@@ -39,10 +39,7 @@ public static class PackageRewriter
         XDocument manifest;
         using (var stream = manifests[0].Open())
             manifest = await XDocument.LoadAsync(stream, LoadOptions.PreserveWhitespace, cancellationToken).ConfigureAwait(false);
-        var metadata = manifest.Root?.Elements().SingleOrDefault(x => x.Name.LocalName == "metadata")
-            ?? throw new InvalidDataException("Missing nuspec metadata.");
-        var idElement = metadata.Elements().Single(x => x.Name.LocalName == "id");
-        var versionElement = metadata.Elements().Single(x => x.Name.LocalName == "version");
+        var (metadata, idElement, versionElement) = ManifestIdentity(manifest);
         if (!idElement.Value.Equals(id, StringComparison.OrdinalIgnoreCase)
             || NuGetVersion.Parse(versionElement.Value) != NuGetVersion.Parse(originalVersion))
             throw new InvalidDataException($"Package identity does not match expected {id} {originalVersion}.");
@@ -99,6 +96,20 @@ public static class PackageRewriter
         }
         if (hasSignature)
             logger?.LogInformation("Removed NuGet signature from rewritten package {PackageId} {OriginalVersion}.", id, originalVersion);
+    }
+
+    internal static (XElement Metadata, XElement Id, XElement Version) ManifestIdentity(XDocument manifest)
+    {
+        var root = manifest.Root ?? throw new InvalidDataException("Nuspec has no root element.");
+        var metadata = RequiredElement(root, "metadata");
+        return (metadata, RequiredElement(metadata, "id"), RequiredElement(metadata, "version"));
+    }
+
+    private static XElement RequiredElement(XElement parent, string name)
+    {
+        var elements = parent.Elements().Where(x => x.Name.LocalName == name).ToArray();
+        return elements.Length == 1 ? elements[0]
+            : throw new InvalidDataException($"Nuspec must contain exactly one {name} element; found {elements.Length}.");
     }
 
     private static bool IsSignature(ZipArchiveEntry entry) =>

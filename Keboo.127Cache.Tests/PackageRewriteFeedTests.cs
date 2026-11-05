@@ -179,12 +179,12 @@ public class PackageRewriteFeedTests
         await Assert.That(inventory.Length).IsEqualTo(3);
         await Assert.That(inventory.Single(x => x.Id == "Acme.Core").Version).IsEqualTo(expected);
         var rewrittenPath = await packages.GetAsync("acme.core", build, CancellationToken.None);
-        await Assert.That(rewrittenPath.Contains(Path.Combine("packages", "discovered", "v2"), StringComparison.OrdinalIgnoreCase)).IsTrue();
+        await Assert.That(rewrittenPath.Contains(Path.Combine("packages", "discovered", $"v{CacheSchema.Version}"), StringComparison.OrdinalIgnoreCase)).IsTrue();
         using (var reader = new PackageArchiveReader(rewrittenPath))
             await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(expected);
         var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(Path.Combine(options.CacheDirectory, "catalog.json")),
             JsonSettings.Options)!;
-        await Assert.That(saved.SchemaVersion).IsEqualTo(2);
+        await Assert.That(saved.SchemaVersion).IsEqualTo(CacheSchema.Version);
         await Assert.That(saved.Builds.Single().Version).IsEqualTo(expected);
         await Assert.That(await File.ReadAllTextAsync(oldIndex)).IsEqualTo(oldIndexContents);
         await Assert.That(await File.ReadAllTextAsync(oldPackage)).IsEqualTo("legacy bytes must not be used or removed");
@@ -223,7 +223,7 @@ public class PackageRewriteFeedTests
         await Assert.That(async () => await packages.GetAsync("Acme.Core", build, CancellationToken.None)).ThrowsExactly<IOException>();
         await Assert.That(await File.ReadAllTextAsync(oldPackage)).IsEqualTo("legacy bytes");
         await Assert.That(File.Exists(oldIndex)).IsTrue();
-        await Assert.That(Directory.Exists(Path.Combine(options.CacheDirectory, "packages", "discovered", "v2"))).IsFalse();
+        await Assert.That(Directory.Exists(Path.Combine(options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}"))).IsFalse();
         await Assert.That(github.Downloads).IsEqualTo(0);
     }
 
@@ -358,13 +358,13 @@ public class PackageRewriteFeedTests
     public async Task LongPrereleaseUsesAFileSystemSafeCacheNameWithoutChangingThePublicVersion()
     {
         using var fixture = new PackageRewriteFixture();
-        var original = "1.2.0-preview." + new string('a', 194);
+        var original = "1.2.0-preview." + new string('a', 180);
         var github = await fixture.CreateGitHubAsync(coreVersion: original);
         await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>());
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
         var expected = PackageRewriter.VersionFor(original, 755, 100, 1, 200);
         await Assert.That(NuGetVersion.Parse(expected).ToNormalizedString()).IsEqualTo(expected);
-        await Assert.That($"acme.core.{expected}.nupkg".Length > 255).IsTrue();
+        await Assert.That($"acme.core.{expected}.nupkg.sha512".Length).IsEqualTo(255);
         var catalog = app.Services.GetRequiredService<PackageCatalog>();
         var build = (await catalog.GetBuildsAsync(CancellationToken.None)).Single();
         var path = await app.Services.GetRequiredService<PackageCache>().GetAsync("Acme.Core", build, CancellationToken.None);
@@ -484,7 +484,7 @@ public class PackageRewriteFeedTests
     }
 
     [Test]
-    public async Task ExistingSchemaV2PackageFilenamesRemainUsableWithoutRawArtifacts()
+    public async Task CurrentSchemaLegacyStyleFilenamesRemainUsableWithoutRawArtifacts()
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
@@ -711,7 +711,7 @@ public class PackageRewriteFeedTests
         await Assert.That(string.Join(",", actual)).IsEqualTo("1.2.0-alpha.2,1.2.0-alpha.10,1.2.0-beta.3,1.2.0-rc.1");
     }
 
-    private static async Task<WebApplication> StartFeedAsync(PackageRewriteFixture fixture, FixtureGitHub github,
+    internal static async Task<WebApplication> StartFeedAsync(PackageRewriteFixture fixture, FixtureGitHub github,
         CollectingLogger<PackageCache> logger, long[]? runIds = null, CollectingLogger<PackageCatalog>? catalogLogger = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = fixture.DirectoryPath });

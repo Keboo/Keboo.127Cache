@@ -107,15 +107,34 @@ nuspec, core properties, feed metadata, and exact in-artifact dependency pins;
 external dependency ranges are unchanged.
 
 Rewriting invalidates a package signature, so the signature is removed and
-logged; the served package is unsigned. Schema v2 keeps regenerated packages
-separate from older rewritten caches. It uses short internal filenames without
-changing public package versions and can still read packages from earlier v2
-drafts. Before upgrading a saved catalog, it verifies the regenerated packages
-for every known build. If one artifact is unavailable or invalid, that build is
-logged and excluded while healthy builds remain available; the older catalog,
-packages, and raw artifacts are retained. The next request retries migration.
-An expired artifact can be recovered by restoring its matching verified raw ZIP
-to the artifact cache.
+logged; the served package is unsigned. Schema v3 regenerates the complete
+inventory from each SHA256-verified raw artifact rather than trusting a
+potentially incomplete v1 or v2 inventory. Rewritten packages use short
+internal filenames without changing their public versions. An integrity record
+binds the inventory to the artifact digest and records the SHA256 of each
+rewritten package; package identities and hashes are checked before a build is
+advertised or served. These checks detect accidental corruption, not malicious
+changes by someone who can also edit the integrity record.
+
+Before upgrading a saved catalog, the tool compares each inventory with the
+complete verified raw artifact for every known build, including closed PRs. If
+one artifact is unavailable or invalid, that build is logged and excluded while
+healthy builds remain available; the older catalog, packages, and raw artifacts
+are retained. The next request retries migration. Restore an expired artifact's
+matching raw ZIP to the artifact cache to resume migration. After migration, an
+intact v3 cache remains usable without the raw artifact.
+For a corrupt v3 cache, restore the matching inventory, integrity record, and
+package bytes from a trusted backup. Alternatively, first preserve the affected
+build directory elsewhere, then remove that directory only if its verified raw
+artifact is available; the next request can regenerate it.
+
+NuGet clients commonly write `<id>.<version>.nupkg.sha512` in their global
+package cache. If this filename would exceed 255 UTF-8 bytes, the entire build
+is logged and excluded rather than advertising a package that cannot be
+installed on common filesystems. The approved public version is not shortened.
+Producing a new build with a shorter original prerelease label or package ID
+can avoid this limit. A shorter component does not guarantee success on clients
+or filesystems with stricter component or total-path limits.
 
 The feed enumerates run IDs numerically, including IDs larger than
 `Int32.MaxValue`. Registration page bounds instead follow NuGet's version
