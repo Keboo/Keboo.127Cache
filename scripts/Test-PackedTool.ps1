@@ -2,16 +2,30 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string] $PackageDirectory
+    [string] $PackageDirectory,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string] $ExpectedSha256
 )
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $packageDirectoryPath = (Resolve-Path -LiteralPath $PackageDirectory).Path
-$packages = @(Get-ChildItem -LiteralPath $packageDirectoryPath -Filter 'Keboo.127Cache.*.nupkg' -File)
-if ($packages.Count -ne 1) {
+$packages = @(Get-ChildItem -LiteralPath $packageDirectoryPath -Filter '*.nupkg' -File)
+if ($packages.Count -ne 1 -or $packages[0].Name -notlike 'Keboo.127Cache.*.nupkg') {
     throw "Expected exactly one Keboo.127Cache package in $packageDirectoryPath; found $($packages.Count)."
 }
+
+function Assert-ExpectedPackageHash {
+    $actual = (Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256).Hash
+    if (![string]::Equals($actual, $ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Package SHA-256 mismatch for $($packages[0].Name): expected $ExpectedSha256, actual $actual."
+    }
+    return $actual
+}
+
+$verifiedHash = Assert-ExpectedPackageHash
+Write-Host "DOWNLOADED_PACKAGE_SHA256=$verifiedHash"
 
 $archive = [IO.Compression.ZipFile]::OpenRead($packages[0].FullName)
 try {
@@ -61,6 +75,7 @@ try {
     $toolDirectory = Join-Path $root 'tools'
     Invoke-DotNet -Arguments @('tool', 'install', 'Keboo.127Cache', '--tool-path', $toolDirectory,
         '--version', $version, '--configfile', $nugetConfig)
+    $verifiedHash = Assert-ExpectedPackageHash
     $toolName = if ($IsWindows) { 'keboo-127cache.exe' } else { 'keboo-127cache' }
     $fakeName = if ($IsWindows) { 'gh.exe' } else { 'gh' }
     $tool = Join-Path $toolDirectory $toolName
@@ -151,6 +166,7 @@ try {
         if ($requests -notcontains $expected) { throw "The fake gh did not receive $expected." }
     }
     $passed = $true
+    Write-Host "SMOKED_PACKAGE_SHA256=$verifiedHash"
     Write-Host "PASS: installed Keboo.127Cache $version from the local package and verified health, v3 index, and empty fake-source builds."
 } finally {
     if ($server) {
