@@ -7,16 +7,25 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: pwsh
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up .NET Core
         uses: actions/setup-dotnet@v6
@@ -35,36 +44,64 @@ jobs:
       # --retry-failed-tests plus --retry-failed-tests-max-percentage <value> to skip reruns when too many tests fail:
       # https://learn.microsoft.com/dotnet/core/testing/microsoft-testing-platform-retry#retry-1
       - name: dotnet test
-        run: dotnet test --configuration Release --no-build -- --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
+        if: runner.os != 'Linux'
+        run: dotnet test --configuration Release --no-build
+
+      - name: dotnet test with coverage
+        id: coverage
+        if: runner.os == 'Linux'
+        run: |
+          $reports = @()
+          foreach ($project in @('Keboo.127Cache.Tests', 'Keboo.127Cache.Proxy.Tests')) {
+            $results = Join-Path (Join-Path $PWD 'TestResults') $project
+            dotnet test --project $project --configuration Release --no-build --results-directory $results --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $report = Join-Path $results 'coverage.cobertura.xml'
+            if (!(Test-Path -LiteralPath $report)) { throw "Missing coverage report for $project" }
+            $reports += $report
+          }
+          "reports=$($reports -join ';')" >> $env:GITHUB_OUTPUT
 
       - name: ReportGenerator
+        if: runner.os == 'Linux'
         uses: danielpalme/ReportGenerator-GitHub-Action@5.5.12
         with:
-          reports: '**/TestResults/coverage.cobertura.xml'
+          reports: ${{ steps.coverage.outputs.reports }}
           targetdir: coveragereport
           reporttypes: Html;MarkdownSummaryGithub
           title: 'Code Coverage'
   
       - name: Write PR Number
-        if: ${{ github.event_name == 'pull_request' }}
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
         run: |
-          echo ${{ github.event.number }} > ./coveragereport/PullRequestNumber
+          Set-Content -Path (Join-Path 'coveragereport' 'PullRequestNumber') -Value '${{ github.event.number }}'
   
       - name: Upload Code Coverage Report
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
           name: CodeCoverage
-          path: coveragereport/
+          path: coveragereport
           if-no-files-found: error
 
       - name: dotnet pack
-        run: dotnet pack --configuration Release --no-build -o ./NuGet
+        run: dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet
+
+      - name: Test packed tool installation and server
+        run: |
+          & (Join-Path 'scripts' 'Test-PackedTool.ps1') -PackageDirectory 'NuGet'
+
+      - name: Test install-state recovery
+        run: |
+          & (Join-Path 'scripts' 'Test-InstallState.ps1')
 
       - name: Upload NuGet artifact
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
           name: NuGet
-          path: ./NuGet
+          path: NuGet
+          if-no-files-found: error
 
   automerge:
     if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' }}

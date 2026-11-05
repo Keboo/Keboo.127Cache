@@ -109,11 +109,20 @@ the feed on the next discovery refresh.
 ## Development
 
 ```powershell
-dotnet build
-dotnet test
-dotnet pack .\Keboo.127Cache\Keboo.127Cache.csproj
+dotnet build --configuration Release
+dotnet test --configuration Release --no-build
+dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet
+& (Join-Path 'scripts' 'Test-PackedTool.ps1') -PackageDirectory NuGet
+& (Join-Path 'scripts' 'Test-InstallState.ps1')
 ```
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
 and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+
+The packed-tool smoke test installs the one package in the output directory using
+an isolated local-only NuGet source and cache. It starts the installed command with
+an isolated fake `gh`, then checks health, the v3 service index, and an empty
+build list without GitHub credentials or remote repository access. CI runs this
+test and the install-state script on Windows, Linux, and macOS; coverage reports
+from both test projects are combined on the Linux leg.
