@@ -137,7 +137,7 @@ public sealed class ProxyTests : IDisposable
         await catalog.GetBuildsAsync(Cancellation);
         await Assert.That(_github.VersionDownloads).IsEqualTo(1);
         var restored = await CreateCatalog().GetBuildsAsync(Cancellation);
-        await Assert.That(restored).IsEquivalentTo(builds, CollectionOrdering.Matching);
+        await ProxyAssertions.EqualRecords(restored, builds);
         await Assert.That(_github.VersionDownloads).IsEqualTo(1);
     }
 
@@ -190,7 +190,7 @@ public sealed class ProxyTests : IDisposable
             .IsEqualTo(VersionRange.Parse($"[{library.Build.Version}]").ToNormalizedString());
         _github.FailDownloads = true;
         var restored = await CreateCatalog().GetPackagesAsync(Cancellation);
-        await Assert.That(restored).IsEquivalentTo(packages, CollectionOrdering.Matching);
+        await ProxyAssertions.EqualRecords(restored, packages);
         await Assert.That(async () => await cache.GetAsync("missing", plugin.Build, Cancellation)).ThrowsExactly<InvalidDataException>();
         await Assert.That(_github.PackageDownloads).IsEqualTo(1);
     }
@@ -442,9 +442,8 @@ public sealed class ProxyTests : IDisposable
         await Assert.That(await autocomplete.IdStartsWith("Velo", true, NullLogger.Instance, Cancellation))
             .IsEquivalentTo(new[] { "Velopack", "Velopack.Build" }, CollectionOrdering.Matching);
         app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
-        var memoryCache = app.Services.GetRequiredService<IMemoryCache>();
-        await Assert.That(memoryCache).IsTypeOf<MemoryCache>();
-        ((MemoryCache)memoryCache).Compact(1);
+        var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
+        memoryCache.Compact(1);
         using var allLibraryVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
         await Assert.That(allLibraryVersions.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(2);
         using var allPluginVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/example.plugin/index.json", Cancellation));
@@ -456,9 +455,8 @@ public sealed class ProxyTests : IDisposable
             "/autocomplete?id=Example.Plugin&prerelease=true&semVerLevel=2.0.0", Cancellation));
         await Assert.That(pluginAutocomplete.RootElement.GetProperty("data").EnumerateArray()).HasSingleItem();
         _github.OpenPullRequests = [];
-        memoryCache = app.Services.GetRequiredService<IMemoryCache>();
-        await Assert.That(memoryCache).IsTypeOf<MemoryCache>();
-        ((MemoryCache)memoryCache).Compact(1);
+        memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
+        memoryCache.Compact(1);
         await Assert.That((await client.GetAsync("/flat/velopack/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
         await Assert.That((await client.GetAsync($"/flat/velopack/{version}/velopack.{version}.nupkg", Cancellation)).StatusCode)
             .IsEqualTo(HttpStatusCode.NotFound);
