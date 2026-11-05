@@ -1,0 +1,44 @@
+{
+  "schema": "squad-agent-provenance/v1",
+  "schema_version": 1,
+  "revision": 2,
+  "generated_at": "2026-11-05T09:21:23.873-08:00",
+  "agents": {
+    "lead": {
+      "persistent_name": "Lead",
+      "universe": "descriptive",
+      "created_at": "2026-11-05T09:21:23.873-08:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "backend": {
+      "persistent_name": "Backend",
+      "universe": "descriptive",
+      "created_at": "2026-11-05T09:21:23.873-08:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "frontend": {
+      "persistent_name": "Frontend",
+      "universe": "descriptive",
+      "created_at": "2026-11-05T09:21:23.873-08:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "tester": {
+      "persistent_name": "Tester",
+      "universe": "descriptive",
+      "created_at": "2026-11-05T09:21:23.873-08:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "infra": {
+      "persistent_name": "Infra",
+      "universe": "descriptive",
+      "created_at": "2026-11-05T09:21:23.873-08:00",
+      "legacy_named": false,
+      "status": "active"
+    }
+  },
+  "transaction_id": "9677b103-dc60-4929-9d00-10f82c4df9ed"
+}

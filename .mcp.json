@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "squad_state": {
+      "command": "squad.exe",
+      "args": [
+        "state-mcp"
+      ],
+      "env": {},
+      "tools": [
+        "*"
+      ]
+    }
+  }
+}
