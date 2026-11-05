@@ -108,13 +108,26 @@ external dependency ranges are unchanged.
 
 Rewriting invalidates a package signature, so the signature is removed and
 logged; the served package is unsigned. Schema v2 keeps regenerated packages
-separate from older rewritten caches and upgrades saved build versions, while
-retaining verified raw artifacts and older cache files.
+separate from older rewritten caches. It uses short internal filenames without
+changing public package versions and can still read packages from earlier v2
+drafts. Before upgrading a saved catalog, it verifies the regenerated packages
+for every known build. If one artifact is unavailable or invalid, that build is
+logged and excluded while healthy builds remain available; the older catalog,
+packages, and raw artifacts are retained. The next request retries migration.
+An expired artifact can be recovered by restoring its matching verified raw ZIP
+to the artifact cache.
 
-The feed orders run IDs numerically, including IDs larger than `Int32.MaxValue`.
-Some NuGet clients (including NuGet.Versioning 7.9) instead compare very large
-numeric prerelease identifiers lexically, so a floating version can select an
-older run across a digit-length boundary. Use an exact version in that case.
+The feed enumerates run IDs numerically, including IDs larger than
+`Int32.MaxValue`. Registration page bounds instead follow NuGet's version
+comparer so exact-version dependency resolution works. When that order differs
+from numeric order, the feed uses one-version registration pages so each page's
+bounds are valid under either ordering. Some clients, including
+NuGet.Versioning 7.9, compare numeric prerelease identifiers that exceed
+`Int32.MaxValue` lexically: a floating version can therefore choose run
+`3000000000` over the newer run `10000000000`. Server-side ordering cannot
+change that client comparison; use an exact version as a workaround. Guaranteeing
+numeric floating selection in those clients would require changing the approved
+version format or the clients themselves.
 
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet

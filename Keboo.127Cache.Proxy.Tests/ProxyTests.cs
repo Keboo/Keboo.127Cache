@@ -49,8 +49,9 @@ public sealed class ProxyTests : IDisposable
     public void VersionsAreDistinctNormalizedPrereleases()
     {
         var first = PackageRewriter.VersionFor("1.3.67-gabcdef0+metadata", 755, 100, 1, 200);
-        Assert.Equal("1.3.67-pr.755.run.100.attempt.1.artifact.200", first);
+        Assert.Equal("1.3.67-gabcdef0.pr.755.run.100.attempt.1.artifact.200", first);
         Assert.Equal(first, NuGetVersion.Parse(first).ToNormalizedString());
+        Assert.Equal(first, PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 1, 200));
         Assert.NotEqual(first, PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 2, 201));
         Assert.NotEqual(first, PackageRewriter.VersionFor("1.3.67-gabcdef0", 756, 101, 1, 202));
     }
@@ -80,15 +81,22 @@ public sealed class ProxyTests : IDisposable
     }
 
     [Fact]
-    public void SignedAndMismatchedPackagesAreRejected()
+    public void SignatureIsStrippedAndMismatchedPackagesAreRejected()
     {
         var source = Path.Combine(_directory, "signed.nupkg");
         FakeGitHub.WritePackage(source, "Velopack");
         Assert.Throws<InvalidDataException>(() => PackageRewriter.Rewrite(source, source + ".wrong", "Other",
             FakeGitHub.OriginalVersion, "1.0.0-test"));
+        Assert.Throws<InvalidDataException>(() => PackageRewriter.Rewrite(source, source + ".wrong-version", "Velopack",
+            "9.9.9", "1.0.0-test"));
         using (var zip = ZipFile.Open(source, ZipArchiveMode.Update)) zip.CreateEntry(".signature.p7s");
-        Assert.Throws<InvalidDataException>(() => PackageRewriter.Rewrite(source, source + ".out", "Velopack",
-            FakeGitHub.OriginalVersion, "1.0.0-test"));
+        var rewrittenPath = source + ".out";
+        PackageRewriter.Rewrite(source, rewrittenPath, "Velopack", FakeGitHub.OriginalVersion, "1.0.0-test");
+        using var rewritten = ZipFile.OpenRead(rewrittenPath);
+        Assert.Null(rewritten.GetEntry(".signature.p7s"));
+        using var reader = new PackageArchiveReader(rewrittenPath);
+        Assert.Equal("Velopack", reader.GetIdentity().Id);
+        Assert.Equal("1.0.0-test", reader.GetIdentity().Version.ToNormalizedString());
     }
 
     [Fact]

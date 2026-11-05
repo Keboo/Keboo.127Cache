@@ -91,9 +91,9 @@ internal sealed class PackageRewriteFixture : IDisposable
         return signed;
     }
 
-    public async Task<FixtureGitHub> CreateGitHubAsync(bool signCore = false)
+    public async Task<FixtureGitHub> CreateGitHubAsync(bool signCore = false, string coreVersion = "1.2.0-beta.3+sha")
     {
-        var core = CreatePackage("Acme.Core", "1.2.0-beta.3+sha");
+        var core = CreatePackage("Acme.Core", coreVersion);
         if (signCore) core = await SignAsync(core);
         var widget = CreatePackage("Acme.Widget", "2.0.0-rc.1", WidgetDependencies);
         var empty = CreatePackage("Acme.Empty", "1.2.3.4+build");
@@ -106,7 +106,7 @@ internal sealed class PackageRewriteFixture : IDisposable
         }
         var version = Path.Combine(DirectoryPath, "version.zip");
         using (var archive = ZipFile.Open(version, ZipArchiveMode.Create))
-            WriteEntry(archive, "version.txt", "1.2.0-beta.3+sha");
+            WriteEntry(archive, "version.txt", coreVersion);
         return new FixtureGitHub(packages, version);
     }
 
@@ -178,10 +178,10 @@ internal sealed class FixtureGitHub(string packagesPath, string versionPath) : I
 
 internal sealed class CollectingLogger<T> : ILogger<T>
 {
-    public ConcurrentQueue<(LogLevel Level, string Message)> Messages { get; } = new();
+    public ConcurrentQueue<(LogLevel Level, string Message, Exception? Exception)> Messages { get; } = new();
 
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
     public bool IsEnabled(LogLevel logLevel) => true;
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-        Func<TState, Exception?, string> formatter) => Messages.Enqueue((logLevel, formatter(state, exception)));
+        Func<TState, Exception?, string> formatter) => Messages.Enqueue((logLevel, formatter(state, exception), exception));
 }

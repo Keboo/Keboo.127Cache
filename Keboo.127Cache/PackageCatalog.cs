@@ -74,12 +74,19 @@ public sealed class PackageCatalog
         var result = new List<PublishedPackage>();
         foreach (var build in await GetBuildsAsync(cancellationToken))
         {
-            foreach (var package in await _packages.GetPackagesAsync(build, cancellationToken))
-                result.Add(new PublishedPackage(package.Id, build with
-                {
-                    OriginalVersion = package.OriginalVersion,
-                    Version = package.Version
-                }));
+            try
+            {
+                foreach (var package in await _packages.GetPackagesAsync(build, cancellationToken))
+                    result.Add(new PublishedPackage(package.Id, build with
+                    {
+                        OriginalVersion = package.OriginalVersion,
+                        Version = package.Version
+                    }));
+            }
+            catch (Exception exception) when (IsBuildFailure(exception))
+            {
+                ReportUnavailableBuild(build, exception);
+            }
         }
         return result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), PackageRewriter.VersionOrder).ToArray();
     }
@@ -91,22 +98,50 @@ public sealed class PackageCatalog
         try
         {
             var next = new List<BuildEntry>(_builds);
+            var unavailable = new HashSet<BuildEntry>();
             foreach (var run in runs)
             {
                 if (next.Any(x => x.RunId == run.RunId && x.Attempt == run.Attempt && x.PullRequest == run.PullRequest)) continue;
-                var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
-                next.Add(new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
-                    PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
-                    run.Packages, run.VersionArtifact));
+                try
+                {
+                    var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
+                    next.Add(new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
+                        PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
+                        run.Packages, run.VersionArtifact));
+                }
+                catch (Exception exception) when (IsBuildFailure(exception))
+                {
+                    _logger.LogWarning(exception, "Skipping run {RunId} attempt {Attempt} of PR {PullRequest}: " +
+                        "version artifact {ArtifactId} is unavailable.", run.RunId, run.Attempt, run.PullRequest, run.VersionArtifact.Id);
+                }
             }
-            if (next.Count != _builds.Count || _catalogNeedsUpgrade)
+            if (_catalogNeedsUpgrade)
             {
-                await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
-                _builds = next;
-                _catalogNeedsUpgrade = false;
+                var ready = true;
+                foreach (var build in next)
+                {
+                    try
+                    {
+                        await _packages.VerifyForMigrationAsync(build, cancellationToken);
+                    }
+                    catch (Exception exception) when (IsBuildFailure(exception))
+                    {
+                        ready = false;
+                        unavailable.Add(build);
+                        ReportUnavailableBuild(build, exception);
+                    }
+                }
+                if (ready)
+                {
+                    await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
+                    _catalogNeedsUpgrade = false;
+                }
             }
+            else if (next.Count != _builds.Count)
+                await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
+            _builds = next;
             var visible = runs.Select(x => (x.RunId, x.Attempt, x.PullRequest)).ToHashSet();
-            return _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)))
+            return _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)) && !unavailable.Contains(x))
                 .OrderBy(x => NuGetVersion.Parse(x.Version), PackageRewriter.VersionOrder).ToArray();
         }
         finally
@@ -179,14 +214,26 @@ public sealed class PackageCatalog
         }
     }
 
+    private static bool IsBuildFailure(Exception exception) =>
+        exception is IOException or InvalidDataException or UnauthorizedAccessException or FormatException
+            or System.Xml.XmlException or NuGet.Packaging.Core.PackagingException;
+
+    private void ReportUnavailableBuild(BuildEntry build, Exception exception) =>
+        _logger.LogWarning(exception, "Skipping build {RunId} attempt {Attempt} of PR {PullRequest}: " +
+            "package artifact {ArtifactId} is unavailable or invalid; existing cache files were retained.",
+            build.RunId, build.Attempt, build.PullRequest, build.Packages.Id);
+
     private async Task<string> ReadVersionAsync(Artifact artifact, CancellationToken cancellationToken)
     {
         var path = await _artifacts.GetAsync(artifact, cancellationToken);
         using var archive = ZipFile.OpenRead(path);
-        var entry = archive.Entries.Single(x => x.FullName == "version.txt");
+        var entries = archive.Entries.Where(x => x.FullName == "version.txt").ToArray();
+        if (entries.Length != 1) throw new InvalidDataException($"Artifact {artifact.Id} must contain exactly one version.txt.");
+        var entry = entries[0];
         if (entry.Length > 4096) throw new InvalidDataException("Version file is unexpectedly large.");
         using var reader = new StreamReader(entry.Open());
         var value = (await reader.ReadToEndAsync(cancellationToken)).Trim();
-        return NuGetVersion.Parse(value).ToNormalizedString();
+        return NuGetVersion.TryParse(value, out var version) ? version.ToNormalizedString()
+            : throw new InvalidDataException($"Artifact {artifact.Id} contains an invalid NuGet version.");
     }
 }
