@@ -120,7 +120,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
 
   deploy-nuget:
-    if: ${{ github.event_name != 'pull_request' }}
+    # Publishing is paused until the owner separately authorizes it.
+    # See "Release safety" in README.md before restoring the original condition.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     needs: build
     

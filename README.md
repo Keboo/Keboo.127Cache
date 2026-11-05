@@ -126,3 +126,20 @@ an isolated fake `gh`, then checks health, the v3 service index, and an empty
 build list without GitHub credentials or remote repository access. CI runs this
 test and the install-state script on Windows, Linux, and macOS; coverage reports
 from both test projects are combined on the Linux leg.
+
+## Release safety
+
+Publishing is paused: the `deploy-nuget` job in
+`.github/workflows/build-and-deploy.yml` has an unconditional false condition.
+For this workflow revision, neither pushes to `main` nor manual dispatches can
+log in to NuGet or publish, regardless of credentials. CI still restores, builds,
+tests, packs, and uploads the `NuGet` and coverage artifacts.
+
+Only after separate owner authorization to publish, submit a reviewed change to
+restore the original non-PR condition (`github.event_name != 'pull_request'`) or
+a narrower authorized condition. Restoring the original condition permits
+publishing on the push to `main` that merges the change, and on manual dispatches
+from any branch. Confirm the package, version, and trigger scope before merging.
+The guard applies to this workflow revision: do not rerun older, unguarded
+workflow runs or dispatch an older, unguarded ref. Release work in #27 remains
+open.
