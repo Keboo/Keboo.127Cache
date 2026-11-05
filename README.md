@@ -148,3 +148,20 @@ dotnet pack .\Keboo.127Cache\Keboo.127Cache.csproj
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
 and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+
+## Release safety
+
+Publishing is paused: the `deploy-nuget` job in
+`.github/workflows/build-and-deploy.yml` has an unconditional false condition.
+For this workflow revision, neither pushes to `main` nor manual dispatches can
+log in to NuGet or publish, regardless of credentials. CI still restores, builds,
+tests, packs, and uploads the `NuGet` and coverage artifacts.
+
+Only after separate owner authorization to publish, submit a reviewed change to
+restore the original non-PR condition (`github.event_name != 'pull_request'`) or
+a narrower authorized condition. Restoring the original condition permits
+publishing on the push to `main` that merges the change, and on manual dispatches
+from any branch. Confirm the package, version, and trigger scope before merging.
+The guard applies to this workflow revision: do not rerun older, unguarded
+workflow runs or dispatch an older, unguarded ref. Release work in #27 remains
+open.
