@@ -71,6 +71,51 @@ public sealed class CliConfigurationTests : IDisposable
         await Assert.That(output).Contains("#9");
     }
 
+    [Test]
+    [Arguments("\"\"")]
+    [Arguments("""{ "0": { "Name": "wrong", "Repository": "org/wrong", "Workflow": "ci.yml", "Artifact": "p" } }""")]
+    public async Task ServeRejectsMalformedExplicitSourcesBeforeDiscovery(string malformed)
+    {
+        var profile = Path.Combine(_directory, "profile");
+        var configFolder = Path.Combine(profile, OperatingSystem.IsWindows() ? "Keboo.127Cache" : "keboo-127cache");
+        var work = Path.Combine(_directory, "work");
+        var bin = Path.Combine(_directory, "fake-bin");
+        Directory.CreateDirectory(configFolder);
+        Directory.CreateDirectory(work);
+        Directory.CreateDirectory(bin);
+        File.WriteAllText(Path.Combine(configFolder, "config.json"), """
+            { "Sources": [{ "Name": "valid", "Repository": "org/repo",
+              "Workflow": "ci.yml", "Artifact": "packages" }] }
+            """);
+        var explicitFile = Path.Combine(_directory, "explicit.json");
+        File.WriteAllText(explicitFile, $$"""{ "Sources": {{malformed}} }""");
+        var fakeGh = Path.Combine(bin, OperatingSystem.IsWindows() ? "gh.cmd" : "gh");
+        if (OperatingSystem.IsWindows())
+            File.WriteAllText(fakeGh, "@echo off\r\necho unexpected gh invocation 1>&2\r\nexit /b 1\r\n");
+        else
+        {
+            File.WriteAllText(fakeGh, "#!/bin/sh\necho 'unexpected gh invocation' >&2\nexit 1\n");
+            File.SetUnixFileMode(fakeGh, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        var start = StartInfo(profile, explicitFile, null);
+        start.Environment["PATH"] = bin + Path.PathSeparator + start.Environment["PATH"];
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the CLI.");
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+
+        var output = await stdout + await stderr;
+        await Assert.That(process.ExitCode).IsNotEqualTo(0);
+        await Assert.That(output).Contains("Sources must be an array");
+        await Assert.That(output.Contains("unexpected gh invocation", StringComparison.Ordinal)).IsFalse();
+    }
+
     private ProcessStartInfo StartInfo(string profile, string? explicitFile, string? environmentUrl)
     {
         var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")

@@ -1,6 +1,9 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+
 using Microsoft.Extensions.Configuration.EnvironmentVariables;
+using Microsoft.Extensions.Configuration.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -50,10 +53,123 @@ public static class ConfigurationFiles
     public static void AddUserAndExplicitConfiguration(
         IConfigurationBuilder builder, FileInfo? explicitConfig, string? userConfigPath = null)
     {
-        builder.AddJsonFile(Path.GetFullPath(userConfigPath ?? UserConfigPath()), optional: true, reloadOnChange: false);
+        TrackExistingJsonFiles(builder);
+        AddJsonFile(builder, Path.GetFullPath(userConfigPath ?? UserConfigPath()), optional: true);
         if (explicitConfig is not null)
-            builder.AddJsonFile(explicitConfig.FullName, optional: false, reloadOnChange: false);
+            AddJsonFile(builder, explicitConfig.FullName, optional: false);
         builder.AddEnvironmentVariables();
+    }
+
+    private static void TrackExistingJsonFiles(IConfigurationBuilder builder)
+    {
+        for (var index = 0; index < builder.Sources.Count; index++)
+        {
+            if (builder.Sources[index] is not JsonConfigurationSource source
+                || source.GetType() != typeof(JsonConfigurationSource) || source.Path is not { } path) continue;
+            builder.Sources[index] = new SourceShapeJsonConfigurationSource
+            {
+                Path = path,
+                FileProvider = source.FileProvider,
+                Optional = source.Optional,
+                ReloadOnChange = source.ReloadOnChange,
+                ReloadDelay = source.ReloadDelay,
+                OnLoadException = source.OnLoadException
+            };
+        }
+    }
+
+    private static void AddJsonFile(IConfigurationBuilder builder, string path, bool optional)
+    {
+        var source = new SourceShapeJsonConfigurationSource { Path = path, Optional = optional };
+        source.ResolveFileProvider();
+        builder.Add(source);
+    }
+}
+
+internal sealed class SourceShapeJsonConfigurationSource : JsonConfigurationSource
+{
+    public override IConfigurationProvider Build(IConfigurationBuilder builder)
+    {
+        EnsureDefaults(builder);
+        return new SourceShapeJsonConfigurationProvider(this);
+    }
+}
+
+internal sealed class SourceShapeJsonConfigurationProvider(JsonConfigurationSource source) : JsonConfigurationProvider(source)
+{
+    public JsonValueKind? SourcesKind { get; private set; }
+
+    public override void Load(Stream stream)
+    {
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        buffer.Position = 0;
+        // The configuration provider otherwise flattens [] and "" to the same value.
+        var kind = JsonSourceShape.Read(buffer);
+        buffer.Position = 0;
+        base.Load(buffer);
+        SourcesKind = kind;
+    }
+}
+
+internal static class JsonSourceShape
+{
+    public static bool IsArray(IConfigurationProvider provider)
+    {
+        try
+        {
+            if (provider is SourceShapeJsonConfigurationProvider tracked)
+                return tracked.SourcesKind == JsonValueKind.Array;
+            if (provider is JsonConfigurationProvider file)
+            {
+                var info = file.Source.FileProvider?.GetFileInfo(file.Source.Path ?? "");
+                if (info is null || !info.Exists) return false;
+                using var stream = info.CreateReadStream();
+                return Read(stream) == JsonValueKind.Array;
+            }
+            if (provider is JsonStreamConfigurationProvider jsonStream)
+            {
+                if (jsonStream.Source.Stream is MemoryStream memory)
+                {
+                    using var stream = new MemoryStream(memory.ToArray());
+                    return Read(stream) == JsonValueKind.Array;
+                }
+                if (jsonStream.Source.Stream is FileStream fileStream)
+                {
+                    using var stream = File.OpenRead(fileStream.Name);
+                    return Read(stream) == JsonValueKind.Array;
+                }
+                return false;
+            }
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    public static JsonValueKind? Read(Stream stream)
+    {
+        using var reader = new StreamReader(stream, leaveOpen: true);
+        using var document = JsonDocument.Parse(reader.ReadToEnd(), new JsonDocumentOptions
+        {
+            CommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        });
+        if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+        JsonValueKind? result = null;
+        foreach (var property in document.RootElement.EnumerateObject())
+        {
+            if (property.Name.StartsWith("Sources:", StringComparison.OrdinalIgnoreCase))
+                return JsonValueKind.Undefined;
+            if (property.Name.Equals("Sources", StringComparison.OrdinalIgnoreCase))
+            {
+                if (result is not null) return JsonValueKind.Undefined;
+                result = property.Value.ValueKind;
+            }
+        }
+        return result;
     }
 }
 
@@ -102,10 +218,23 @@ public static class CacheConfigurationLoader
             if (hasSources)
             {
                 if (hasLegacySource) conflictingSources = true;
-                if (mode != SourceMode.Modern || provider is not EnvironmentVariablesConfigurationProvider || hasSourceValue)
+                if (!JsonSourceShape.IsArray(provider))
+                {
+                    sourceErrors["Sources"] = "Sources must be an array.";
+                    continue;
+                }
+
+                var indexedEnvironment = provider is EnvironmentVariablesConfigurationProvider && !hasSourceValue;
+                if (indexedEnvironment && mode == SourceMode.Legacy)
+                {
+                    legacy.Value.Name = LegacyName(legacy.Value.Repository);
+                    sources.Clear();
+                    sources[0] = legacy;
+                }
+                else if (mode != SourceMode.Modern || !indexedEnvironment)
                 {
                     sources.Clear();
-                    sourceErrors.Clear();
+                    if (!indexedEnvironment) sourceErrors.Clear();
                 }
                 mode = SourceMode.Modern;
                 if (hasSourceValue && sourceValue is null)
@@ -128,6 +257,7 @@ public static class CacheConfigurationLoader
             }
             else if (hasLegacySource || (hasLegacy && mode == SourceMode.None))
             {
+                if (hasLegacySource) sourceErrors.Clear();
                 if (mode != SourceMode.Legacy)
                     legacy = NewLegacySource();
                 mode = SourceMode.Legacy;
@@ -147,7 +277,6 @@ public static class CacheConfigurationLoader
             legacy.Value.Name = LegacyName(legacy.Value.Repository);
             sources.Clear();
             sources[0] = legacy;
-            sourceErrors.Clear();
         }
 
         var failures = new List<string>(serverErrors.Values);

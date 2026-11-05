@@ -1,4 +1,5 @@
 using System.Text;
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -467,6 +468,179 @@ public sealed class ConfigurationTests : IDisposable
         {
             foreach (var (name, value) in saved) Environment.SetEnvironmentVariable(name, value);
         }
+    }
+
+    [Test]
+    [NotInParallel]
+    public async Task IndexedEnvironmentOverridePreservesMappedLegacySourceFields()
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", """
+            { "Proxy": { "Repository": "default/repo", "Workflow": "default.yml",
+              "PackagesArtifact": "default-packages" } }
+            """);
+        var user = WriteJson("user.json", """
+            { "Proxy": { "Repository": "user/widgets", "Workflow": "user.yml",
+              "PackagesArtifact": "user-packages" } }
+            """);
+        var explicitFile = WriteJson("explicit.json", """
+            { "Proxy": { "Workflow": "explicit.yml", "PackagesArtifact": "explicit-packages" } }
+            """);
+        const string variable = "Sources__0__Artifact";
+        var saved = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+            var beforeEnvironment = LoadFiles(defaults, user, explicitFile).Sources.Single();
+            await Assert.That(beforeEnvironment.Name).IsEqualTo("widgets");
+            await Assert.That(beforeEnvironment.Repository).IsEqualTo("user/widgets");
+            await Assert.That(beforeEnvironment.Workflow).IsEqualTo("explicit.yml");
+            await Assert.That(beforeEnvironment.Artifact).IsEqualTo("explicit-packages");
+
+            Environment.SetEnvironmentVariable(variable, "environment-packages");
+            var source = LoadFiles(defaults, user, explicitFile).Sources.Single();
+            await Assert.That(source.Name).IsEqualTo("widgets");
+            await Assert.That(source.Repository).IsEqualTo("user/widgets");
+            await Assert.That(source.Workflow).IsEqualTo("explicit.yml");
+            await Assert.That(source.Artifact).IsEqualTo("environment-packages");
+            await Assert.That(source.VersionArtifact).IsEqualTo("build-version");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, saved);
+        }
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments("\"\"")]
+    [Arguments("""{ "0": { "Name": "wrong", "Repository": "wrong/repo", "Workflow": "wrong.yml", "Artifact": "wrong" } }""")]
+    public async Task MalformedJsonSourcesCannotReplaceAnEarlierListOrBeHiddenByEnvironment(string malformed)
+    {
+        const string valid = """
+            { "Sources": [{ "Name": "valid", "Repository": "org/repo",
+              "Workflow": "ci.yml", "Artifact": "packages" }] }
+            """;
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", valid);
+        var explicitFile = WriteJson("explicit.json", $$"""{ "Sources": {{malformed}} }""");
+        const string variable = "Sources__0__Artifact";
+        var saved = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, "environment-packages");
+            var files = new ConfigurationBuilder().AddJsonFile(defaults, optional: false);
+            ConfigurationFiles.AddUserAndExplicitConfiguration(files, new FileInfo(explicitFile), user);
+            var fileError = Invalid(files.Build());
+            await Assert.That(fileError.Message).Contains("Sources must be an array");
+
+            var streams = new ConfigurationBuilder().AddJsonStream(Stream(valid))
+                .AddJsonStream(Stream($$"""{ "Sources": {{malformed}} }"""));
+            var streamError = Invalid(streams.Build());
+            await Assert.That(streamError.Message).Contains("Sources must be an array");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, saved);
+        }
+    }
+
+    [Test]
+    [Arguments("\"\"")]
+    [Arguments("""{ "0": { "Name": "wrong" } }""")]
+    public async Task ACompleteHigherPrecedenceArrayReplacesAMalformedEarlierSourcesValue(string malformed)
+    {
+        var builder = new ConfigurationBuilder()
+            .AddJsonStream(Stream($$"""{ "Sources": {{malformed}} }"""))
+            .AddJsonStream(Stream("""
+                { "Sources": [{ "Name": "replacement", "Repository": "org/repo",
+                  "Workflow": "ci.yml", "Artifact": "packages" }] }
+                """));
+
+        var result = CacheConfigurationLoader.Load(builder.Build());
+
+        await Assert.That(result.Sources.Single().Name).IsEqualTo("replacement");
+        await Assert.That(result.Sources.Single().Artifact).IsEqualTo("packages");
+    }
+
+    [Test]
+    [Arguments("\"\"")]
+    [Arguments("""{ "0": { "Name": "wrong" } }""")]
+    public async Task ANewerLegacySourceReplacesMalformedEarlierSources(string malformed)
+    {
+        var builder = new ConfigurationBuilder()
+            .AddJsonStream(Stream("""{ "Proxy": { "Repository": "org/old", "Workflow": "old.yml" } }"""))
+            .AddJsonStream(Stream($$"""{ "Sources": {{malformed}} }"""))
+            .AddJsonStream(Stream("""{ "Proxy": { "Repository": "org/new", "Workflow": "new.yml" } }"""));
+
+        var source = CacheConfigurationLoader.Load(builder.Build()).Sources.Single();
+
+        await Assert.That(source.Name).IsEqualTo("new");
+        await Assert.That(source.Repository).IsEqualTo("org/new");
+        await Assert.That(source.Workflow).IsEqualTo("new.yml");
+    }
+
+    [Test]
+    public async Task JsonFileShapeMatchesTheLoadedSnapshotRatherThanLaterFileContents()
+    {
+        Directory.CreateDirectory(_directory);
+        var explicitFile = WriteJson("explicit.json", """{ "Sources": "" }""");
+        var builder = new ConfigurationBuilder();
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder, new FileInfo(explicitFile),
+            Path.Combine(_directory, "missing.json"));
+        var malformedSnapshot = builder.Build();
+        File.WriteAllText(explicitFile, """{ "Sources": [] }""");
+        await Assert.That(Invalid(malformedSnapshot).Message).Contains("Sources must be an array");
+
+        builder = new ConfigurationBuilder();
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder, new FileInfo(explicitFile),
+            Path.Combine(_directory, "missing.json"));
+        var validSnapshot = builder.Build();
+        File.WriteAllText(explicitFile, """{ "Sources": "" }""");
+        await Assert.That(CacheConfigurationLoader.Load(validSnapshot).Sources).IsEmpty();
+    }
+
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task ExistingJsonDefaultsAlsoKeepTheirLoadedShape(bool useConfigurationManager)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", """{ "Sources": "" }""");
+        IConfigurationBuilder builder = useConfigurationManager ? new ConfigurationManager() : new ConfigurationBuilder();
+        builder.AddJsonFile(defaults, optional: false);
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder, null, Path.Combine(_directory, "missing.json"));
+        var snapshot = builder.Build();
+        File.WriteAllText(defaults, """{ "Sources": [] }""");
+
+        await Assert.That(Invalid(snapshot).Message).Contains("Sources must be an array");
+    }
+
+    [Test]
+    public async Task ValidJsonStreamFromAFileIsStillAccepted()
+    {
+        Directory.CreateDirectory(_directory);
+        var path = WriteJson("stream.json", """
+            { "Sources": [{ "Name": "stream", "Repository": "org/repo",
+              "Workflow": "ci.yml", "Artifact": "packages" }] }
+            """);
+        var config = new ConfigurationBuilder().AddJsonStream(File.OpenRead(path)).Build();
+
+        var result = CacheConfigurationLoader.Load(config);
+
+        await Assert.That(result.Sources.Single().Name).IsEqualTo("stream");
+        await Assert.That(result.Sources.Single().Artifact).IsEqualTo("packages");
+    }
+
+    [Test]
+    [Arguments("""{ "Sources": [], "sources": { "0": { "Name": "not-an-array" } } }""")]
+    [Arguments("""{ "Sources": [], "Sources:0:Name": "not-an-array" }""")]
+    public async Task JsonCannotSmuggleIndexedObjectsAlongsideAnArray(string json)
+    {
+        var error = Invalid(Json(json));
+
+        await Assert.That(error.Message).Contains("Sources must be an array");
     }
 
     [Test]

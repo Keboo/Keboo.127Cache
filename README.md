@@ -64,6 +64,9 @@ Configuration layers have the following precedence, from lowest to highest:
 
 Each JSON `Sources` array replaces an earlier array, including when it is empty.
 Environment variables override individual indexed fields of the resulting array.
+An indexed environment override also preserves the other fields of a source
+mapped from legacy `Proxy` configuration. A JSON `Sources` value must be an
+array, not a scalar or an object with numeric keys.
 An empty or absent `Sources` array is valid; there is no default repository.
 
 | Setting | Default | Description |
@@ -76,12 +79,13 @@ An empty or absent `Sources` array is valid; there is no default repository.
 | `Sources[n].Repository` | Required | GitHub `owner/repository` |
 | `Sources[n].Workflow` | Required | Workflow filename to query |
 | `Sources[n].Artifact` | Required | Run artifact containing `.nupkg` files |
-| `Sources[n].VersionArtifact` | `null` | Optional artifact containing root `version.txt`; without it, `/builds` derives a representative version from the package artifact |
+| `Sources[n].VersionArtifact` | `null` | Optional artifact containing root `version.txt`, used for the legacy `/builds` version |
 | `Sources[n].Type` | `GitHubActions` | Source type; only `GitHubActions` is currently supported |
 
-Without `VersionArtifact`, `/builds` downloads the packages artifact on its
-first request and uses the version of the alphabetically first package ID as
-the representative build version. Feed packages still use their own versions.
+`/builds` supports the existing `vpk` installer scripts. Without
+`VersionArtifact`, it downloads the packages artifact on its first request and
+uses the `vpk` package's own version; builds without `vpk` are omitted from
+`/builds`. All packages remain available through the feed with their own versions.
 
 Example (the same schema can contain several independent entries):
 
@@ -139,7 +143,9 @@ Package Source Mapping, allow the desired package IDs from this local source.
 The app refuses simultaneous instances sharing a cache directory, and refuses a
 cache belonging to a different repository or workflow. Changing a configured
 artifact may require a different cache directory; cached run metadata is not
-overwritten. Closed PRs disappear from the feed on the next discovery refresh.
+overwritten. When an open PR falls outside the recent discovery window, its
+latest known cached run remains visible until a newer successful run is found.
+Closed PRs disappear from the feed on the next discovery refresh.
 
 ## Development
 
@@ -148,6 +154,9 @@ dotnet build
 dotnet test
 dotnet pack .\Keboo.127Cache\Keboo.127Cache.csproj
 ```
+
+Installer compatibility tests require PowerShell 7.2 or later (`pwsh`). They
+simulate the `dotnet tool` commands and do not install a global tool.
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol

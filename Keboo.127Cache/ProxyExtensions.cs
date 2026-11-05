@@ -25,7 +25,7 @@ public static class ProxyExtensions
     {
         var options = app.Services.GetRequiredService<ProxyOptions>();
         app.MapGet("/health", () => Results.Ok(new { status = "ok", repository = options.Repository }));
-        app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) => Results.Ok(await catalog.GetBuildsAsync(ct)));
+        app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) => Results.Ok(await catalog.GetScriptBuildsAsync(ct)));
         app.MapMethods("/v3/index.json", ["GET", "HEAD"], () => Results.Json(new
         {
             version = "3.0.0",

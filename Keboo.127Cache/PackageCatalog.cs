@@ -1,7 +1,9 @@
 using System.IO.Compression;
 using System.Text.Json;
+
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Caching.Memory;
+
 using NuGet.Versioning;
 
 namespace Keboo._127Cache;
@@ -97,18 +99,16 @@ public sealed class PackageCatalog
                 if (existing >= 0)
                 {
                     if (next[existing].Packages.Id == run.Packages.Id
-                        && next[existing].VersionArtifact?.Id == run.VersionArtifact?.Id) continue;
+                        && next[existing].VersionArtifact?.Id == run.VersionArtifact?.Id
+                        && (run.VersionArtifact is not null
+                            || (string.IsNullOrEmpty(next[existing].OriginalVersion) && string.IsNullOrEmpty(next[existing].Version))))
+                        continue;
                     next.RemoveAt(existing);
                 }
+                // A missing version artifact leaves no build-wide version; feed identities come from each package.
                 var build = new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, "", "",
                     run.Packages, run.VersionArtifact);
-                if (run.VersionArtifact is null)
-                {
-                    var package = (await _packages.GetPackagesAsync(build, cancellationToken))
-                        .OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase).First();
-                    build = build with { OriginalVersion = package.OriginalVersion, Version = package.Version };
-                }
-                else
+                if (run.VersionArtifact is not null)
                 {
                     var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
                     build = build with
@@ -127,12 +127,33 @@ public sealed class PackageCatalog
             }
             var visible = runs.Select(x => (x.RunId, x.Attempt, x.PullRequest)).ToHashSet();
             return _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)))
-                .OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
+                .OrderBy(x => string.IsNullOrEmpty(x.Version) ? new NuGetVersion(0, 0, 0) : NuGetVersion.Parse(x.Version),
+                    VersionComparer.VersionRelease)
+                .ThenBy(x => x.RunId).ThenBy(x => x.Attempt).ToArray();
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    public async Task<BuildEntry[]> GetScriptBuildsAsync(CancellationToken cancellationToken)
+    {
+        var result = new List<BuildEntry>();
+        foreach (var build in await GetBuildsAsync(cancellationToken))
+        {
+            if (build.VersionArtifact is not null)
+            {
+                result.Add(build);
+                continue;
+            }
+
+            var tool = (await _packages.GetPackagesAsync(build, cancellationToken))
+                .SingleOrDefault(x => x.Id.Equals("vpk", StringComparison.OrdinalIgnoreCase));
+            if (tool is not null)
+                result.Add(build with { OriginalVersion = tool.OriginalVersion, Version = tool.Version });
+        }
+        return result.OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
     }
 
     public async Task<RunArtifacts[]> GetRunArtifactsAsync(CancellationToken cancellationToken)
@@ -152,7 +173,8 @@ public sealed class PackageCatalog
                     .Select(pr => (Run: run, PullRequest: pr.Number)))
                 .ToArray();
             var runs = eligibleRuns.GroupBy(x => x.PullRequest)
-                .SelectMany(g => g.OrderByDescending(x => x.Run.Id).Take(1).Concat(g.Where(x => _options.RunIds.Contains(x.Run.Id))))
+                .SelectMany(g => g.OrderByDescending(x => x.Run.Id).ThenByDescending(x => x.Run.Attempt).Take(1)
+                    .Concat(g.Where(x => _options.RunIds.Contains(x.Run.Id))))
                 .DistinctBy(x => (x.Run.Id, x.Run.Attempt, x.PullRequest)).ToArray();
             // Keep immutable completed-run and artifact metadata on disk even while a PR is closed.
             // Open-PR membership is volatile and is applied only to the response below.
@@ -163,12 +185,8 @@ public sealed class PackageCatalog
                 var existing = next.FindIndex(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr);
                 if (existing >= 0)
                 {
-                    var saved = next[existing];
-                    if (saved.Packages.Name == _options.PackagesArtifact
-                        && (_options.VersionArtifact is null || saved.VersionArtifact?.Name == _options.VersionArtifact))
-                        continue;
-                    throw new InvalidDataException(
-                        $"Cached run {run.Id} uses different configured artifacts. Use a different Server.CacheDirectory when changing Artifact or VersionArtifact.");
+                    ValidateCachedArtifacts(next[existing]);
+                    continue;
                 }
                 var artifacts = await _github.GetArtifactsAsync(run.Id, cancellationToken);
                 var packages = artifacts.SingleOrDefault(x => x.Name == _options.PackagesArtifact);
@@ -197,21 +215,38 @@ public sealed class PackageCatalog
                     && !next.Any(x => x.RunId == id))
                     throw new InvalidDataException($"Run {id} is not an available successful build of an open pull request.");
             }
-            await JsonSettings.WriteAtomicAsync(_runsFile, new RunArtifactsFile(_options.Repository, _options.Workflow, next), cancellationToken);
-            _runs = next;
-            var selected = runs.Select(x => (x.Run.Id, x.Run.Attempt, x.PullRequest)).ToHashSet();
-            var result = next.Where(x => selected.Contains((x.RunId, x.Attempt, x.PullRequest)))
-                .Where(x => openPullRequests.Contains(x.PullRequest))
+            var availableCached = next.Where(x => openPullRequests.Contains(x.PullRequest))
                 .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
                     || _options.RunIds.Contains(x.RunId))
+                .ToArray();
+            var candidates = eligibleRuns.Select(x => (RunId: x.Run.Id, x.Run.Attempt, x.PullRequest))
+                .Concat(availableCached.Select(x => (x.RunId, x.Attempt, x.PullRequest)));
+            var selected = candidates.GroupBy(x => x.PullRequest)
+                .Select(g => g.OrderByDescending(x => x.RunId).ThenByDescending(x => x.Attempt).First())
+                .ToHashSet();
+            selected.UnionWith(availableCached.Where(x => _options.RunIds.Contains(x.RunId))
+                .Select(x => (x.RunId, x.Attempt, x.PullRequest)));
+            var visible = availableCached.Where(x => selected.Contains((x.RunId, x.Attempt, x.PullRequest))).ToArray();
+            foreach (var run in visible) ValidateCachedArtifacts(run);
+            var result = visible
                 .Select(x => _options.VersionArtifact is null ? x with { VersionArtifact = null } : x)
                 .OrderBy(x => x.RunId).ThenBy(x => x.Attempt).ToArray();
+            await JsonSettings.WriteAtomicAsync(_runsFile, new RunArtifactsFile(_options.Repository, _options.Workflow, next), cancellationToken);
+            _runs = next;
             return _memoryCache.Set(_cacheKey, result, TimeSpan.FromSeconds(_options.RefreshSeconds));
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    private void ValidateCachedArtifacts(RunArtifacts run)
+    {
+        if (run.Packages.Name != _options.PackagesArtifact
+            || (_options.VersionArtifact is not null && run.VersionArtifact?.Name != _options.VersionArtifact))
+            throw new InvalidDataException(
+                $"Cached run {run.RunId} uses different configured artifacts. Use a different Server.CacheDirectory when changing Artifact or VersionArtifact.");
     }
 
     private async Task<string> ReadVersionAsync(Artifact artifact, CancellationToken cancellationToken)
