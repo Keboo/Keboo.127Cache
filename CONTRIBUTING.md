@@ -25,7 +25,19 @@ Run the complete solution:
 dotnet test --solution Keboo.127Cache.slnx
 ```
 
-For the same per-project Cobertura reports consumed by CI:
+For the solution-wide Cobertura collection used by CI, supply a new, empty
+coverage directory:
+
+```powershell
+dotnet build --configuration Release
+& (Join-Path 'scripts' 'Invoke-CiTests.ps1') -CoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
+```
+
+The coverage extension generates a distinct report for each test module under
+that directory, including both the CLI and proxy projects. CI passes these
+reports to ReportGenerator without a fixed project list.
+
+To generate project-local reports with a fixed filename instead:
 
 ```powershell
 dotnet build --configuration Release
@@ -37,7 +49,7 @@ dotnet test --configuration Release --no-build -- --coverage --coverage-output-f
 Pop-Location
 ```
 
-Run each coverage command from its project directory: a single solution-wide run
-uses the same `TestResults` directory for both processes and can overwrite one
-report. The reports are `Keboo.127Cache.Tests\TestResults\coverage.cobertura.xml`
-and `Keboo.127Cache.Proxy.Tests\TestResults\coverage.cobertura.xml`.
+Run each fixed-filename coverage command from its project directory to prevent
+one report from overwriting the other. The reports are
+`Keboo.127Cache.Tests\TestResults\coverage.cobertura.xml` and
+`Keboo.127Cache.Proxy.Tests\TestResults\coverage.cobertura.xml`.

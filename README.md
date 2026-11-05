@@ -109,12 +109,48 @@ the feed on the next discovery refresh.
 ## Development
 
 ```powershell
-dotnet build
-dotnet test
-dotnet pack .\Keboo.127Cache\Keboo.127Cache.csproj
+dotnet build --configuration Release
+dotnet test --configuration Release --no-build
+dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet
+$package = Get-ChildItem -Path NuGet -Filter '*.nupkg' -File
+$sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
+& (Join-Path 'scripts' 'Test-PackedTool.ps1') -PackageDirectory NuGet -ExpectedSha256 $sha256
+& (Join-Path 'scripts' 'Test-InstallState.ps1')
 ```
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
 and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
+
+The packed-tool smoke test installs the one package in the output directory using
+an isolated local-only NuGet source and cache. It starts the installed command with
+an isolated fake `gh`, then checks health, the v3 service index, and an empty
+build list without GitHub credentials or remote repository access. CI runs this
+test and the install-state script on Windows, Linux, and macOS. A single Ubuntu
+job packs and uploads the `NuGet` artifact; each OS downloads that same artifact
+by its immutable ID and verifies its SHA-256 before and after installation. The
+disabled deployment job also requires the matrix to pass and verifies the same
+artifact and hash before any publishing step.
+
+Linux tests the entire solution with coverage; the coverage extension generates a
+separate report per test module, without a fixed project list. CI also adds a
+failing test project to a copy of the solution to verify discovery, and mutates
+a valid package to verify that the smoke test rejects the wrong artifact.
+
+## Release safety
+
+Publishing is paused: the `deploy-nuget` job in
+`.github/workflows/build-and-deploy.yml` has an unconditional false condition.
+For this workflow revision, neither pushes to `main` nor manual dispatches can
+log in to NuGet or publish, regardless of credentials. CI still restores, builds,
+tests, packs, and uploads the `NuGet` and coverage artifacts.
+
+Only after separate owner authorization to publish, submit a reviewed change to
+restore the original non-PR condition (`github.event_name != 'pull_request'`) or
+a narrower authorized condition. Restoring the original condition permits
+publishing on the push to `main` that merges the change, and on manual dispatches
+from any branch. Confirm the package, version, and trigger scope before merging.
+The guard applies to this workflow revision: do not rerun older, unguarded
+workflow runs or dispatch an older, unguarded ref. Release work in #27 remains
+open.
