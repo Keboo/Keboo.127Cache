@@ -117,3 +117,4 @@ dotnet pack .\Keboo.127Cache\Keboo.127Cache.csproj
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
 and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
