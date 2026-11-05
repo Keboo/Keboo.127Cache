@@ -17,3 +17,13 @@
 - Not covered: real `dotnet restore`/`tool install` against the feed, fork-PR runs, offline startup, digest-less artifacts, signed packages (only rejection), multi-source, concurrency of downloads, CSRF.
 - Your issues: #18 NuGet client compatibility + rewriter golden tests (P1), #19 consolidate on one framework (Lead recommends xUnit v3, D9), #25 management API/eviction/UI validation suite. Feature issues list expected tests in their acceptance criteria — review them against those.
 - Manual scripts: scripts/Smoke-Test.ps1 (live proxy, vpk PR install/remove), scripts/Test-InstallState.ps1 (mocked install-state tests, PowerShell 7.2).
+
+### 2026-11-05 — Owner decisions applied (Lead)
+- #18: add golden/E2E tests for preserved prerelease labels (`1.2.0-beta.3` → `1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200`, in version, .psmdcp and dependency pins; floating `1.2.0-beta.3.pr.755.*`) and for signed packages being served with the signature stripped (not rejected).
+- #25: UI is Blazor → bUnit/HTTP rendering tests (Playwright only if needed), antiforgery rejection tests; eviction: remove → refresh re-downloads open-PR builds (download counter increments), closed/expired builds stay gone.
+- Multi-source tests use sources with different repo/workflow/artifact (flat `Sources[]`, #8).
+### 2026-11-05 — D9 resolved: TUnit only (owner, Kevin Bost)
+- All tests standardize on **TUnit** (1.64.13, central). Proxy.Tests (xUnit v3 `xunit.v3.mtp-v2` 3.2.2, 20 `[Fact]`s) migrates under #19 (retitled "Migrate Keboo.127Cache.Proxy.Tests from xUnit to TUnit"); #18/#25 new tests are TUnit. My charter's "xUnit test projects" wording is stale.
+- Migration surface is mechanical but large: ~160 `Assert.*` calls → `await Assert.That(...)` (35 `Assert.Single` returning the item, 5 `ThrowsAsync`, 3 `Throws` → prefer `ThrowsExactly` to keep xUnit's exact-type semantics), `TestContext.Current.CancellationToken` → TUnit `TestContext`/injected `CancellationToken`, `IDisposable` per-test temp dir works as-is. No Theory/fixtures/ITestOutputHelper/WebApplicationFactory.
+- Risk: TUnit runs tests in parallel by default (xUnit serialized within a class) — check temp dirs, Kestrel free-port, static state; `[NotInParallel]` only with reason.
+- Coverage: CI passes `-- --coverage --coverage-output-format cobertura`; Proxy.Tests has no `Microsoft.Testing.Extensions.CodeCoverage` ref today — TUnit meta-package brings it; verify cobertura is produced for both projects after migration.

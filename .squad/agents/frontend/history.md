@@ -17,3 +17,8 @@
 - Your issues: #22 UI shell (sources/builds/packages), #23 refresh + remove actions, #24 package detail + copy-paste consume snippets. Depends on #21 (API) and #20 (eviction).
 - Constraints: assets must be embedded in the global-tool package and work offline (no CDN); state-changing calls must carry CSRF protection (D7). UI tech recommendation (Proposed, awaiting Kevin): Razor Components static SSR, no Node toolchain (D6) — confirm before building.
 - Rewritten versions look like `1.3.67-pr.755.run.100.attempt.1.artifact.200`; show PR/run links to `https://github.com/{repo}/pull/{n}`.
+
+### 2026-11-05 — Owner decisions applied (Lead)
+- UI tech decided: **Blazor** (#22) — Razor Components in the same Kestrel process, static SSR by default, Interactive Server only where live updates are needed, no WebAssembly/Node; antiforgery for form posts; bUnit/HTTP rendering tests.
+- Remove (#23): confirmation must say an open-PR build is re-downloaded on the next refresh; closed/expired builds don't return.
+- Versions shown/snippets (#24) include the preserved prerelease label, e.g. `1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200`, floating `1.2.0-beta.3.pr.755.*`; signed originals are served unsigned.

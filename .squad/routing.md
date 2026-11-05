@@ -9,7 +9,7 @@ How to decide who handles what.
 | Architecture, scope, backlog, triage, code review | Lead | Design proposals, issue triage, PR review |
 | NuGet feed, sources, caching, package rewriting | Backend | v3 endpoints, gh artifact download, nuspec/version rewrite, cache store |
 | Web UI and UI-facing management API | Frontend | Cache dashboard, refresh/evict buttons |
-| Tests and quality | Tester | xUnit, integration with `dotnet restore`, edge cases |
+| Tests and quality | Tester | TUnit, integration with `dotnet restore`, edge cases |
 | Packaging, CI/CD, releases, config plumbing | Infra | PackAsTool, GitHub Actions, publish to NuGet.org |
 
 Preset installation adds concrete routes for the configured team. Add or edit rows

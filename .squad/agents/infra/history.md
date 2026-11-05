@@ -17,3 +17,9 @@
 - Scripts (PowerShell 7.2, vpk-specific): Common.ps1, Install-PrBuild.ps1, Remove-PrBuild.ps1, Smoke-Test.ps1, Start-Proxy.ps1, Test-InstallState.ps1.
 - Cache dir default: `LocalApplicationData/Keboo.127Cache/cache` (cross-platform via SpecialFolder); script state `LocalApplicationData/Keboo.127Cache/install`.
 - Your issues: #27 release versioning/publishing (D10 proposed: tag-driven, MinVer), #28 cross-platform CI matrix + packed-tool install smoke test, #29 scripts → CLI `feed add|remove`/`tool install --pr`, #31 docs overhaul.
+
+### 2026-11-05 — Owner decisions applied (Lead)
+- Release (#27): publish on every push to `main` with `dotnet nuget push --skip-duplicate`; only a version change publishes. Not tag-driven (MinVer/NBGV dropped). Release = bump the in-source version and push; optional tag/GitHub Release only when a new version actually publishes.
+- Docs (#31) must cover: flat `Sources` config (PR builds only), preserved prerelease labels, signature stripping, eviction re-download semantics, push-to-publish release procedure.
+### 2026-11-05 — Test framework: TUnit only (Tester, owner decision D9)
+- Proxy.Tests migrates from xUnit v3 to TUnit (#19). CI `dotnet test ... -- --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml` must keep producing `**/TestResults/coverage.cobertura.xml` for both projects (TUnit meta-package includes the MTP code-coverage extension; Proxy.Tests currently has no explicit CodeCoverage ref). `xunit.v3.mtp-v2` leaves Directory.Packages.props. No workflow change expected; verify on the migration PR (and in #28's matrix).

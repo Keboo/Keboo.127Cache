@@ -11,7 +11,7 @@
 
 ## What I Own
 
-- xUnit test projects (Keboo.127Cache.Tests, Keboo.127Cache.Proxy.Tests)
+- TUnit test projects (Keboo.127Cache.Tests, Keboo.127Cache.Proxy.Tests)
 - Integration tests driving real `dotnet restore` against the local feed
 - Edge cases: version collisions, partial downloads, stale cache, concurrent requests
 

@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "id": "9667113e-00a3-4641-a8ad-a51fb277d27f",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Owner decisions on initial review questions - 2026-11-05T11:06:47-08:00",
+    "path": ".squad\\decisions\\inbox\\kevin-bost-via-copilot-owner-decisions-on-initial-review-questions-2026-11-05t11-06-47--9667113e.md",
+    "status": "active",
+    "createdAt": "2026-11-05T19:07:02.547Z",
+    "updatedAt": "2026-11-05T19:07:02.547Z"
+  },
+  {
+    "id": "2b9683cc-36a6-440d-af59-7c775b0b8904",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Test framework: TUnit - 2026-11-05T11:16:27-08:00",
+    "path": ".squad\\decisions\\inbox\\kevin-bost-via-copilot-test-framework-tunit-2026-11-05t11-16-27-08-00-2b9683cc.md",
+    "status": "active",
+    "createdAt": "2026-11-05T19:16:38.680Z",
+    "updatedAt": "2026-11-05T19:16:38.680Z"
+  }
+]
