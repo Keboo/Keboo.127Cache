@@ -1,33 +1,43 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace Keboo._127Cache;
 
 public sealed class ProxyOptions
 {
-    public string Repository { get; set; } = "velopack/velopack";
+    internal const int RunLimit = 100;
+    public bool HasSource { get; set; } = true;
+    public string Repository { get; set; } = "";
     public string Workflow { get; set; } = "build.yml";
     public string PackagesArtifact { get; set; } = "packages";
-    public string VersionArtifact { get; set; } = "build-version";
+    public string? VersionArtifact { get; set; } = "build-version";
+    // Retained for direct callers; legacy configuration values are never bound to these selectors.
     public int[] PullRequests { get; set; } = [];
     public long[] RunIds { get; set; } = [];
     public string BaseUrl { get; set; } = "http://localhost:55631";
     public int RefreshSeconds { get; set; } = 120;
-    public int RunLimit { get; set; } = 100;
     public string CacheDirectory { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Keboo.127Cache", "cache");
 
-    public bool IsValid()
+    public static ProxyOptions FromConfiguration(CacheConfiguration configuration)
     {
-        return Repository is not null && Regex.IsMatch(Repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-            && Workflow is not null && Regex.IsMatch(Workflow, @"^[A-Za-z0-9_.-]+$")
-            && Uri.TryCreate(BaseUrl, UriKind.Absolute, out var url) && url.IsLoopback
-            && url.Scheme is "http" or "https" && url.AbsolutePath == "/" && url.Query.Length == 0 && url.Fragment.Length == 0
-            && !BaseUrl.EndsWith('/') && RefreshSeconds >= 10 && RunLimit is >= 1 and <= 500
-            && PullRequests is not null && PullRequests.All(x => x > 0)
-            && RunIds is not null && RunIds.All(x => x > 0)
-            && !string.IsNullOrWhiteSpace(CacheDirectory)
-            && !string.IsNullOrWhiteSpace(PackagesArtifact) && !string.IsNullOrWhiteSpace(VersionArtifact);
+        if (configuration.Sources.Count > 1)
+            throw new NotSupportedException(
+                "Multiple Sources are valid configuration, but serving more than one source requires issue #9. Configure one source until it is implemented.");
+
+        var source = configuration.Sources.SingleOrDefault();
+        var options = new ProxyOptions
+        {
+            HasSource = source is not null,
+            Repository = source?.Repository ?? "",
+            Workflow = source?.Workflow ?? "",
+            PackagesArtifact = source?.Artifact ?? "",
+            VersionArtifact = source?.VersionArtifact,
+            BaseUrl = configuration.Server.BaseUrl,
+            RefreshSeconds = configuration.Server.RefreshSeconds
+        };
+        if (configuration.Server.CacheDirectory is not null)
+            options.CacheDirectory = configuration.Server.CacheDirectory;
+        return options;
     }
 }
 

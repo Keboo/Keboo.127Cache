@@ -246,7 +246,7 @@ public sealed class ProxyTests : IDisposable
         var saved = JsonSerializer.Deserialize<CatalogFile>(File.ReadAllText(Path.Combine(_options.CacheDirectory, "catalog.json")),
             JsonSettings.Options)!;
         var cachedBuild = Assert.Single(saved.Builds);
-        Assert.Equal(build.VersionArtifact.Id, cachedBuild.VersionArtifact.Id);
+        Assert.Equal(build.VersionArtifact!.Id, cachedBuild.VersionArtifact!.Id);
         Assert.Equal(build.Packages.Id, cachedBuild.Packages.Id);
         Assert.True(File.Exists(cachedPackage));
 
@@ -335,6 +335,8 @@ public sealed class ProxyTests : IDisposable
     [Fact]
     public async Task HttpFeedHasConsistentIdentitiesAndDependencies()
     {
+        _options.Repository = "fixture/project";
+        _github.OpenPullRequests = [new(755)];
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         _options.BaseUrl = $"http://localhost:{((IPEndPoint)listener.LocalEndpoint).Port}";
@@ -343,9 +345,9 @@ public sealed class ProxyTests : IDisposable
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Urls"] = _options.BaseUrl,
+            ["Proxy:Repository"] = _options.Repository,
             ["Proxy:BaseUrl"] = _options.BaseUrl,
-            ["Proxy:CacheDirectory"] = _options.CacheDirectory,
-            ["Proxy:PullRequests:0"] = "755"
+            ["Proxy:CacheDirectory"] = _options.CacheDirectory
         });
         builder.Services.AddProxy(builder.Configuration);
         builder.Services.AddSingleton<IGitHubClient>(_github);

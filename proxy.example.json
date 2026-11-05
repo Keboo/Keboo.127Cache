@@ -1,14 +1,16 @@
 {
-  "Urls": "http://localhost:55631",
-  "Proxy": {
-    "Repository": "velopack/velopack",
-    "Workflow": "build.yml",
-    "PackagesArtifact": "packages",
-    "VersionArtifact": "build-version",
-    "PullRequests": [],
-    "RunIds": [],
+  "Server": {
     "BaseUrl": "http://localhost:55631",
-    "RefreshSeconds": 120,
-    "RunLimit": 100
-  }
+    "CacheDirectory": null,
+    "RefreshSeconds": 120
+  },
+  "Sources": [
+    {
+      "Name": "example",
+      "Repository": "owner/repository",
+      "Workflow": "build.yml",
+      "Artifact": "packages",
+      "VersionArtifact": null
+    }
+  ]
 }

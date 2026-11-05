@@ -8,11 +8,11 @@ namespace Keboo._127Cache;
 
 public sealed record BuildEntry(
     long RunId, int Attempt, int PullRequest, string HeadSha, string OriginalVersion, string Version,
-    Artifact Packages, Artifact VersionArtifact);
+    Artifact Packages, Artifact? VersionArtifact);
 public sealed record CatalogFile(string Repository, List<BuildEntry> Builds);
 public sealed record PublishedPackage(string Id, BuildEntry Build);
 public sealed record RunArtifacts(
-    long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact VersionArtifact);
+    long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact? VersionArtifact);
 public sealed record RunArtifactsFile(string Repository, string Workflow, List<RunArtifacts> Runs);
 
 public sealed class PackageCatalog
@@ -40,7 +40,15 @@ public sealed class PackageCatalog
         _artifacts = artifacts;
         _packages = packages;
         _file = Path.Combine(options.CacheDirectory, "catalog.json");
+        _runsFile = Path.Combine(options.CacheDirectory, "runs.json");
         Directory.CreateDirectory(options.CacheDirectory);
+        if (!options.HasSource)
+        {
+            _builds = [];
+            _runs = [];
+            return;
+        }
+
         var saved = File.Exists(_file)
             ? JsonSerializer.Deserialize<CatalogFile>(File.ReadAllText(_file), JsonSettings.Options)
                 ?? throw new InvalidDataException("Invalid saved catalog.")
@@ -48,7 +56,6 @@ public sealed class PackageCatalog
         if (saved is not null && saved.Repository != options.Repository)
             throw new InvalidDataException("This cache belongs to another repository. Use a different CacheDirectory.");
         _builds = saved?.Builds ?? [];
-        _runsFile = Path.Combine(options.CacheDirectory, "runs.json");
         var savedRuns = File.Exists(_runsFile)
             ? JsonSerializer.Deserialize<RunArtifactsFile>(File.ReadAllText(_runsFile), JsonSettings.Options)
                 ?? throw new InvalidDataException("Invalid saved run metadata.")
@@ -56,7 +63,6 @@ public sealed class PackageCatalog
         if (savedRuns is not null && (savedRuns.Repository != options.Repository || savedRuns.Workflow != options.Workflow))
             throw new InvalidDataException("This run cache belongs to another repository/workflow. Use a different CacheDirectory.");
         _runs = savedRuns?.Runs ?? _builds
-            .Where(x => x.VersionArtifact is not null)
             .Select(x => new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact))
             .ToList();
     }
@@ -83,15 +89,38 @@ public sealed class PackageCatalog
         try
         {
             var next = new List<BuildEntry>(_builds);
+            var changed = false;
             foreach (var run in runs)
             {
-                if (next.Any(x => x.RunId == run.RunId && x.Attempt == run.Attempt && x.PullRequest == run.PullRequest)) continue;
-                var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
-                next.Add(new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
-                    PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
-                    run.Packages, run.VersionArtifact));
+                var existing = next.FindIndex(x =>
+                    x.RunId == run.RunId && x.Attempt == run.Attempt && x.PullRequest == run.PullRequest);
+                if (existing >= 0)
+                {
+                    if (next[existing].Packages.Id == run.Packages.Id
+                        && next[existing].VersionArtifact?.Id == run.VersionArtifact?.Id) continue;
+                    next.RemoveAt(existing);
+                }
+                var build = new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, "", "",
+                    run.Packages, run.VersionArtifact);
+                if (run.VersionArtifact is null)
+                {
+                    var package = (await _packages.GetPackagesAsync(build, cancellationToken))
+                        .OrderBy(x => x.Id, StringComparer.OrdinalIgnoreCase).First();
+                    build = build with { OriginalVersion = package.OriginalVersion, Version = package.Version };
+                }
+                else
+                {
+                    var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
+                    build = build with
+                    {
+                        OriginalVersion = original,
+                        Version = PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id)
+                    };
+                }
+                next.Add(build);
+                changed = true;
             }
-            if (next.Count != _builds.Count)
+            if (changed)
             {
                 await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next), cancellationToken);
                 _builds = next;
@@ -108,6 +137,7 @@ public sealed class PackageCatalog
 
     public async Task<RunArtifacts[]> GetRunArtifactsAsync(CancellationToken cancellationToken)
     {
+        if (!_options.HasSource) return [];
         if (_memoryCache.TryGetValue(_cacheKey, out RunArtifacts[]? cached) && cached is not null) return cached;
         await _gate.WaitAsync(cancellationToken);
         try
@@ -123,25 +153,36 @@ public sealed class PackageCatalog
                 .ToArray();
             var runs = eligibleRuns.GroupBy(x => x.PullRequest)
                 .SelectMany(g => g.OrderByDescending(x => x.Run.Id).Take(1).Concat(g.Where(x => _options.RunIds.Contains(x.Run.Id))))
-                .DistinctBy(x => (x.Run.Id, x.Run.Attempt, x.PullRequest));
+                .DistinctBy(x => (x.Run.Id, x.Run.Attempt, x.PullRequest)).ToArray();
             // Keep immutable completed-run and artifact metadata on disk even while a PR is closed.
             // Open-PR membership is volatile and is applied only to the response below.
             var next = new List<RunArtifacts>(_runs);
             foreach (var (run, pr) in runs)
             {
                 // Completed immutable builds already known locally need no artifact API/download request.
-                if (next.Any(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr)) continue;
+                var existing = next.FindIndex(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr);
+                if (existing >= 0)
+                {
+                    var saved = next[existing];
+                    if (saved.Packages.Name == _options.PackagesArtifact
+                        && (_options.VersionArtifact is null || saved.VersionArtifact?.Name == _options.VersionArtifact))
+                        continue;
+                    throw new InvalidDataException(
+                        $"Cached run {run.Id} uses different configured artifacts. Use a different Server.CacheDirectory when changing Artifact or VersionArtifact.");
+                }
                 var artifacts = await _github.GetArtifactsAsync(run.Id, cancellationToken);
                 var packages = artifacts.SingleOrDefault(x => x.Name == _options.PackagesArtifact);
-                var version = artifacts.SingleOrDefault(x => x.Name == _options.VersionArtifact);
-                if (packages is null || version is null)
+                var version = _options.VersionArtifact is null
+                    ? null : artifacts.SingleOrDefault(x => x.Name == _options.VersionArtifact);
+                if (packages is null || (_options.VersionArtifact is not null && version is null))
                 {
                     if (_options.RunIds.Contains(run.Id))
                         throw new InvalidDataException($"Run {run.Id} has missing package/version artifacts.");
                     _logger.LogWarning("Skipping run {RunId}: missing package/version artifacts.", run.Id);
                     continue;
                 }
-                if ((packages.Expired && !_artifacts.Contains(packages)) || (version.Expired && !_artifacts.Contains(version)))
+                if ((packages.Expired && !_artifacts.Contains(packages))
+                    || (version is not null && version.Expired && !_artifacts.Contains(version)))
                 {
                     if (_options.RunIds.Contains(run.Id))
                         throw new InvalidDataException($"Run {run.Id} has expired artifacts that are not cached locally.");
@@ -158,9 +199,12 @@ public sealed class PackageCatalog
             }
             await JsonSettings.WriteAtomicAsync(_runsFile, new RunArtifactsFile(_options.Repository, _options.Workflow, next), cancellationToken);
             _runs = next;
-            var result = next.Where(x => openPullRequests.Contains(x.PullRequest))
+            var selected = runs.Select(x => (x.Run.Id, x.Run.Attempt, x.PullRequest)).ToHashSet();
+            var result = next.Where(x => selected.Contains((x.RunId, x.Attempt, x.PullRequest)))
+                .Where(x => openPullRequests.Contains(x.PullRequest))
                 .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
                     || _options.RunIds.Contains(x.RunId))
+                .Select(x => _options.VersionArtifact is null ? x with { VersionArtifact = null } : x)
                 .OrderBy(x => x.RunId).ThenBy(x => x.Attempt).ToArray();
             return _memoryCache.Set(_cacheKey, result, TimeSpan.FromSeconds(_options.RefreshSeconds));
         }

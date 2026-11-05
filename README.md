@@ -2,18 +2,19 @@
 
 `Keboo.127Cache` is a .NET global tool that serves NuGet packages produced by
 completed GitHub Actions pull-request builds through a local NuGet v3 feed. It
-discovers package IDs from each pipeline's `packages` artifact, so package lists
-do not need to be maintained by hand.
+discovers package IDs from each pipeline's configured package artifact, so
+package lists do not need to be maintained by hand.
 
 ## Requirements
 
 - .NET 10 SDK/runtime
-- GitHub CLI (`gh`) installed and authenticated with permission to read the
-  repository's pull requests, workflow runs, and artifacts
+- For a configured source, GitHub CLI (`gh`) installed and authenticated with
+  permission to read its repository's pull requests, workflow runs, and artifacts
 
-The tool only downloads artifact contents when a feed request needs them.
-At startup it queries open pull requests, completed successful workflow runs,
-and artifact metadata, then caches that metadata locally.
+The tool only downloads artifact contents when a request needs them. At startup
+it queries open pull requests, completed successful workflow runs, and artifact
+metadata, then caches that metadata locally. With no configured sources, the
+server starts with an empty feed and does not contact GitHub.
 
 ## Install and run
 
@@ -33,8 +34,8 @@ dotnet run --project .\Keboo.127Cache\Keboo.127Cache.csproj -- serve
 The default feed is `http://localhost:55631/v3/index.json`. Check
 `http://localhost:55631/health` to see whether the service is running.
 
-To select a particular pull request and listen on the default address, copy
-`proxy.example.json`, edit its `Proxy` section, then run:
+To configure a source, copy `proxy.example.json`, replace the example repository,
+workflow, and artifact with your own, then run:
 
 ```powershell
 keboo-127cache serve --config .\proxy.json
@@ -50,50 +51,83 @@ PR build install/restore/removal against an already-running proxy.
 
 ## Configuration
 
-Configuration can be supplied in `appsettings.json`, a file passed to
-`serve --config`, or environment variables using the `Proxy__` prefix.
+Configuration layers have the following precedence, from lowest to highest:
+
+1. Built-in defaults and the tool's `appsettings.json`.
+2. The optional per-user file: `%APPDATA%\Keboo.127Cache\config.json` on Windows;
+   `$XDG_CONFIG_HOME/keboo-127cache/config.json`, or
+   `~/.config/keboo-127cache/config.json` when `XDG_CONFIG_HOME` is unset or not
+   an absolute path, elsewhere.
+3. An explicit JSON file passed to `serve --config` (the file must exist).
+4. Environment variables, using `__` between section names, for example
+   `Server__BaseUrl` or `Sources__0__Repository`.
+
+Each JSON `Sources` array replaces an earlier array, including when it is empty.
+Environment variables override individual indexed fields of the resulting array.
+An empty or absent `Sources` array is valid; there is no default repository.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `Repository` | `velopack/velopack` | GitHub owner/repository |
-| `Workflow` | `build.yml` | Workflow filename to query |
-| `PackagesArtifact` | `packages` | Run artifact containing `.nupkg` files |
-| `VersionArtifact` | `build-version` | Artifact containing root `version.txt`, used by `/builds` |
-| `PullRequests` | `[]` | Optional allowlist of open PR numbers |
-| `RunIds` | `[]` | Additional completed successful PR run IDs to include |
-| `RunLimit` | `100` | Number of recent successful PR runs to scan (1–500) |
-| `RefreshSeconds` | `120` | Lifetime of cached GitHub discovery data (minimum 10) |
-| `BaseUrl` | `http://localhost:55631` | Loopback URL advertised in feed metadata |
-| `CacheDirectory` | Per-user local app data | Location for metadata, artifacts, and rewritten packages |
+| `Server.BaseUrl` | `http://localhost:55631` | HTTP(S) loopback origin for listening and feed metadata; no trailing slash |
+| `Server.CacheDirectory` | `null` (per-user local app data) | Location for metadata, artifacts, and rewritten packages |
+| `Server.RefreshSeconds` | `120` | Lifetime of cached GitHub discovery data (minimum 10 seconds) |
+| `Sources` | `[]` | Flat list of independently configured sources |
+| `Sources[n].Name` | Required | Stable, case-insensitively unique filesystem key of up to 255 ASCII letters, digits, `.`, `_`, `-`, excluding reserved names and trailing `.` |
+| `Sources[n].Repository` | Required | GitHub `owner/repository` |
+| `Sources[n].Workflow` | Required | Workflow filename to query |
+| `Sources[n].Artifact` | Required | Run artifact containing `.nupkg` files |
+| `Sources[n].VersionArtifact` | `null` | Optional artifact containing root `version.txt`; without it, `/builds` derives a representative version from the package artifact |
+| `Sources[n].Type` | `GitHubActions` | Source type; only `GitHubActions` is currently supported |
 
-Example:
+Without `VersionArtifact`, `/builds` downloads the packages artifact on its
+first request and uses the version of the alphabetically first package ID as
+the representative build version. Feed packages still use their own versions.
+
+Example (the same schema can contain several independent entries):
 
 ```json
 {
-  "Urls": "http://localhost:55631",
-  "Proxy": {
-    "Repository": "velopack/velopack",
-    "Workflow": "build.yml",
-    "PackagesArtifact": "packages",
-    "VersionArtifact": "build-version",
-    "PullRequests": [755],
-    "RunIds": [],
+  "Server": {
     "BaseUrl": "http://localhost:55631",
-    "RefreshSeconds": 120,
-    "RunLimit": 100
-  }
+    "CacheDirectory": null,
+    "RefreshSeconds": 120
+  },
+  "Sources": [
+    {
+      "Name": "widgets",
+      "Repository": "contoso/widgets",
+      "Workflow": "ci.yml",
+      "Artifact": "packages"
+    }
+  ]
 }
 ```
 
-The tool serves the latest completed, successful run for each selected open PR.
-Queued, running, failed, cancelled, and non-PR runs are excluded. Explicit run
-IDs still have to belong to an open PR. The app refreshes GitHub discovery on
-startup and after the in-memory cache expires. Startup lists run artifacts but
-does not download their contents.
+**Multi-source serving is not implemented yet:** a list with multiple valid
+sources passes configuration validation, but starting the server fails with a
+clear message until source aggregation and source-scoped caches are implemented
+in [#9](https://github.com/Keboo/Keboo.127Cache/issues/9). Configure at most one
+source in the meantime; the tool never silently serves only the first entry.
+
+The legacy `Proxy` section still maps to one source and logs a deprecation
+warning. `Proxy.Repository` supplies the source name from its repository
+component (prefixed when needed for filesystem safety), and
+`Proxy.PackagesArtifact` maps to `Artifact`; legacy server fields map to
+`Server`. The old default workflow, packages artifact, and version
+artifact are retained for legacy configurations, but a repository is required.
+`Proxy.PullRequests`, `Proxy.RunIds`, and `Proxy.RunLimit` are ignored, each
+with a warning. A `Sources` array takes precedence over legacy source fields in
+the same layer; across layers the higher-precedence source configuration wins.
+Use `Server` and `Sources` for new configurations.
+
+The tool serves the latest completed, successful run for each open PR. Queued,
+running, failed, cancelled, and non-PR runs are excluded. The app refreshes
+GitHub discovery on startup and after the in-memory cache expires. Startup lists
+run artifacts but does not download their contents.
 
 Run metadata and raw artifact ZIPs are cached by artifact ID. Downloaded ZIPs
 are SHA256-verified and reused across restarts. On first package access, every
-NuGet package in that build's `packages` artifact is discovered from its nuspec,
+NuGet package in that build's configured artifact is discovered from its nuspec,
 rewritten to an immutable PR/run-specific version, and cached. The feed exposes
 only the packages actually present in each build. Dependencies on packages in
 the same artifact are pinned to their corresponding rewritten versions.
@@ -103,8 +137,9 @@ contains only packages from the configured workflow artifacts. If using NuGet
 Package Source Mapping, allow the desired package IDs from this local source.
 
 The app refuses simultaneous instances sharing a cache directory, and refuses a
-cache belonging to a different repository or workflow. Closed PRs disappear from
-the feed on the next discovery refresh.
+cache belonging to a different repository or workflow. Changing a configured
+artifact may require a different cache directory; cached run metadata is not
+overwritten. Closed PRs disappear from the feed on the next discovery refresh.
 
 ## Development
 
