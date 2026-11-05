@@ -7,16 +7,88 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: pwsh
 
 jobs:
-  build:
+  package:
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.fingerprint.outputs.sha256 }}
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Test CI workflow contract
+        run: |
+          & (Join-Path 'scripts' 'Test-CiWorkflow.ps1')
+
+      - name: Set up .NET Core
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Restore and build package
+        run: |
+          dotnet restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build --configuration Release --no-restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Pack canonical tool
+        run: dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet
+
+      - name: Fingerprint canonical package
+        id: fingerprint
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath 'NuGet' -Filter '*.nupkg' -File)
+          if ($packages.Count -ne 1 -or $packages[0].Name -notlike 'Keboo.127Cache.*.nupkg') {
+            throw "Expected one Keboo.127Cache package; found $($packages.Count)."
+          }
+          $sha256 = (Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256).Hash
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$sha256" -Encoding utf8
+          Write-Host "CANONICAL_PACKAGE_SHA256=$sha256"
+
+      - name: Upload canonical NuGet artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: NuGet
+          path: NuGet
+          if-no-files-found: error
+
+  build:
+    needs: package
+    if: ${{ always() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Require canonical package
+        env:
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          PACKAGE_ARTIFACT_ID: ${{ needs.package.outputs.artifact-id }}
+          EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          if ($env:PACKAGE_RESULT -ne 'success' -or
+              $env:PACKAGE_ARTIFACT_ID -notmatch '^[0-9]+$' -or
+              $env:EXPECTED_PACKAGE_SHA256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'The canonical package job did not produce a valid artifact ID and SHA-256.'
+          }
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up .NET Core
         uses: actions/setup-dotnet@v6
@@ -35,36 +107,67 @@ jobs:
       # --retry-failed-tests plus --retry-failed-tests-max-percentage <value> to skip reruns when too many tests fail:
       # https://learn.microsoft.com/dotnet/core/testing/microsoft-testing-platform-retry#retry-1
       - name: dotnet test
-        run: dotnet test --configuration Release --no-build -- --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
+        if: runner.os != 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Invoke-CiTests.ps1')
+
+      - name: dotnet test with coverage
+        id: coverage
+        if: runner.os == 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Invoke-CiTests.ps1') -CoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
+
+      - name: Test solution discovery guard
+        if: runner.os == 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Test-CiDiscovery.ps1') -BaselineCoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
 
       - name: ReportGenerator
+        if: runner.os == 'Linux'
         uses: danielpalme/ReportGenerator-GitHub-Action@5.5.12
         with:
-          reports: '**/TestResults/coverage.cobertura.xml'
+          reports: ${{ steps.coverage.outputs.reports }}
           targetdir: coveragereport
           reporttypes: Html;MarkdownSummaryGithub
           title: 'Code Coverage'
   
       - name: Write PR Number
-        if: ${{ github.event_name == 'pull_request' }}
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
         run: |
-          echo ${{ github.event.number }} > ./coveragereport/PullRequestNumber
+          Set-Content -Path (Join-Path 'coveragereport' 'PullRequestNumber') -Value '${{ github.event.number }}'
   
       - name: Upload Code Coverage Report
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
           name: CodeCoverage
-          path: coveragereport/
+          path: coveragereport
           if-no-files-found: error
 
-      - name: dotnet pack
-        run: dotnet pack --configuration Release --no-build -o ./NuGet
-
-      - name: Upload NuGet artifact
-        uses: actions/upload-artifact@v7
+      - name: Download canonical NuGet artifact
+        uses: actions/download-artifact@v8
         with:
-          name: NuGet
-          path: ./NuGet
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
+          path: NuGet
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Test packed tool installation and server
+        env:
+          EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          & (Join-Path 'scripts' 'Test-PackedTool.ps1') -PackageDirectory 'NuGet' -ExpectedSha256 $env:EXPECTED_PACKAGE_SHA256
+
+      - name: Test packed tool provenance guard
+        if: runner.os == 'Linux'
+        env:
+          EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          & (Join-Path 'scripts' 'Test-PackedToolProvenance.ps1') -PackageDirectory 'NuGet' -ExpectedSha256 $env:EXPECTED_PACKAGE_SHA256
+
+      - name: Test install-state recovery
+        run: |
+          & (Join-Path 'scripts' 'Test-InstallState.ps1')
 
   automerge:
     if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' }}
@@ -87,7 +190,7 @@ jobs:
     # See "Release safety" in README.md before restoring the original condition.
     if: ${{ false }}
     runs-on: ubuntu-latest
-    needs: build
+    needs: [package, build]
     
     # Required for Trusted Publishing: allows GitHub to issue OIDC tokens for this job
     # This enables secure, keyless authentication with NuGet.org
@@ -95,10 +198,26 @@ jobs:
       id-token: write
     
     steps:
-      - name: Download artifact from build job
+      - name: Download canonical NuGet artifact
         uses: actions/download-artifact@v8
         with:
-          name: NuGet
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify release artifact identity
+        env:
+          EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Filter '*.nupkg' -File)
+          if ($packages.Count -ne 1 -or $packages[0].Name -notlike 'Keboo.127Cache.*.nupkg') {
+            throw "Expected one Keboo.127Cache release package; found $($packages.Count)."
+          }
+          $actual = (Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256).Hash
+          if ($actual -ne $env:EXPECTED_PACKAGE_SHA256) {
+            throw "Release package SHA-256 mismatch: expected $env:EXPECTED_PACKAGE_SHA256, actual $actual."
+          }
+          Write-Host "RELEASE_PACKAGE_SHA256=$actual"
 
       # ====================================================================================
       # OPTION 1: Trusted Publishing (RECOMMENDED - Default)
