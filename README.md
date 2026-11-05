@@ -98,6 +98,24 @@ rewritten to an immutable PR/run-specific version, and cached. The feed exposes
 only the packages actually present in each build. Dependencies on packages in
 the same artifact are pinned to their corresponding rewritten versions.
 
+For example, `1.2.0` becomes
+`1.2.0-pr.755.run.100.attempt.1.artifact.200`, while `1.2.0-beta.3+sha`
+becomes `1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200`. Original
+prerelease labels are retained and build metadata is dropped. NuGet's
+four-part versions are also supported. The rewritten version is used in the
+nuspec, core properties, feed metadata, and exact in-artifact dependency pins;
+external dependency ranges are unchanged.
+
+Rewriting invalidates a package signature, so the signature is removed and
+logged; the served package is unsigned. Schema v2 keeps regenerated packages
+separate from older rewritten caches and upgrades saved build versions, while
+retaining verified raw artifacts and older cache files.
+
+The feed orders run IDs numerically, including IDs larger than `Int32.MaxValue`.
+Some NuGet clients (including NuGet.Versioning 7.9) instead compare very large
+numeric prerelease identifiers lexically, so a floating version can select an
+older run across a digit-length boundary. Use an exact version in that case.
+
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet
 Package Source Mapping, allow the desired package IDs from this local source.

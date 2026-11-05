@@ -9,7 +9,7 @@ namespace Keboo._127Cache;
 public sealed record BuildEntry(
     long RunId, int Attempt, int PullRequest, string HeadSha, string OriginalVersion, string Version,
     Artifact Packages, Artifact VersionArtifact);
-public sealed record CatalogFile(string Repository, List<BuildEntry> Builds);
+public sealed record CatalogFile(string Repository, List<BuildEntry> Builds, int SchemaVersion = 1);
 public sealed record PublishedPackage(string Id, BuildEntry Build);
 public sealed record RunArtifacts(
     long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact VersionArtifact);
@@ -29,6 +29,7 @@ public sealed class PackageCatalog
     private readonly string _runsFile;
     private List<RunArtifacts> _runs;
     private List<BuildEntry> _builds;
+    private bool _catalogNeedsUpgrade;
 
     public PackageCatalog(ProxyOptions options, IGitHubClient github, IMemoryCache memoryCache, ArtifactCache artifacts, PackageCache packages,
         ILogger<PackageCatalog>? logger = null)
@@ -47,7 +48,14 @@ public sealed class PackageCatalog
             : null;
         if (saved is not null && saved.Repository != options.Repository)
             throw new InvalidDataException("This cache belongs to another repository. Use a different CacheDirectory.");
-        _builds = saved?.Builds ?? [];
+        if (saved is not null && saved.SchemaVersion > CacheSchema.Version)
+            throw new InvalidDataException("This cache was created by a newer version. Use a different CacheDirectory or upgrade 127Cache.");
+        _builds = saved?.Builds.Select(build => build with
+        {
+            Version = PackageRewriter.VersionFor(build.OriginalVersion, build.PullRequest, build.RunId, build.Attempt, build.Packages.Id)
+        }).ToList() ?? [];
+        _catalogNeedsUpgrade = saved is not null
+            && (saved.SchemaVersion != CacheSchema.Version || !saved.Builds.SequenceEqual(_builds));
         _runsFile = Path.Combine(options.CacheDirectory, "runs.json");
         var savedRuns = File.Exists(_runsFile)
             ? JsonSerializer.Deserialize<RunArtifactsFile>(File.ReadAllText(_runsFile), JsonSettings.Options)
@@ -73,7 +81,7 @@ public sealed class PackageCatalog
                     Version = package.Version
                 }));
         }
-        return result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), VersionComparer.VersionRelease).ToArray();
+        return result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), PackageRewriter.VersionOrder).ToArray();
     }
 
     public async Task<BuildEntry[]> GetBuildsAsync(CancellationToken cancellationToken)
@@ -91,14 +99,15 @@ public sealed class PackageCatalog
                     PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
                     run.Packages, run.VersionArtifact));
             }
-            if (next.Count != _builds.Count)
+            if (next.Count != _builds.Count || _catalogNeedsUpgrade)
             {
-                await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next), cancellationToken);
+                await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
                 _builds = next;
+                _catalogNeedsUpgrade = false;
             }
             var visible = runs.Select(x => (x.RunId, x.Attempt, x.PullRequest)).ToHashSet();
             return _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)))
-                .OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
+                .OrderBy(x => NuGetVersion.Parse(x.Version), PackageRewriter.VersionOrder).ToArray();
         }
         finally
         {
