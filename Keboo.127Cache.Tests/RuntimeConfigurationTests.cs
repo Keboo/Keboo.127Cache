@@ -56,6 +56,60 @@ public sealed class RuntimeConfigurationTests : IDisposable
     }
 
     [Test]
+    [NotInParallel]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task ProductionHostUsesLegacyAndIndexedEnvironmentFieldsTogether(bool legacyJson)
+    {
+        Directory.CreateDirectory(_directory);
+        var user = Path.Combine(_directory, "user.json");
+        var explicitFile = Path.Combine(_directory, "explicit.json");
+        File.WriteAllText(user, legacyJson
+            ? """
+                { "Proxy": { "Repository": "user/old", "Workflow": "user.yml",
+                  "PackagesArtifact": "user-packages", "VersionArtifact": null } }
+                """
+            : "{}");
+        File.WriteAllText(explicitFile, """{ "Server": {} }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>
+        {
+            ["Proxy__Repository"] = "env/new",
+            ["Sources__0__Artifact"] = "env-packages",
+            ["Server__CacheDirectory"] = Path.Combine(_directory, "cache")
+        });
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = [],
+            ContentRootPath = _directory,
+            EnvironmentName = "Production"
+        });
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder.Configuration, new FileInfo(explicitFile), user);
+        builder.Services.AddProxy(builder.Configuration);
+        var github = new Mock<IGitHubClient>(MockBehavior.Strict);
+        github.Setup(client => client.GetOpenPullRequestsAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<PullRequestInfo>());
+        builder.Services.AddSingleton(github.Object);
+        await using var app = builder.Build();
+        app.UseExceptionHandler();
+        app.MapProxy();
+        await app.StartAsync(CancellationToken.None);
+
+        using var client = Client(app);
+        using var health = JsonDocument.Parse(await client.GetStringAsync("/health", CancellationToken.None));
+        var options = app.Services.GetRequiredService<ProxyOptions>();
+        await Assert.That(health.RootElement.GetProperty("repository").GetString()).IsEqualTo("env/new");
+        await Assert.That(options.Repository).IsEqualTo("env/new");
+        await Assert.That(options.Workflow).IsEqualTo(legacyJson ? "user.yml" : "build.yml");
+        await Assert.That(options.PackagesArtifact).IsEqualTo("env-packages");
+        if (legacyJson) await Assert.That(options.VersionArtifact).IsNull();
+        else await Assert.That(options.VersionArtifact).IsEqualTo("build-version");
+        await Assert.That(github.Invocations.Count).IsEqualTo(1);
+        await app.StopAsync(CancellationToken.None);
+    }
+
+    [Test]
     public async Task SourceWithoutVersionArtifactServesPackagesWithoutInventingAnInstallerVersion()
     {
         var github = new PackageGitHub(_directory) { OpenPullRequests = [new(42)] };

@@ -513,6 +513,334 @@ public sealed class ConfigurationTests : IDisposable
 
     [Test]
     [NotInParallel]
+    [Arguments("none", false)]
+    [Arguments("none", true)]
+    [Arguments("legacy", false)]
+    [Arguments("legacy", true)]
+    [Arguments("modern", false)]
+    [Arguments("modern", true)]
+    [Arguments("empty", false)]
+    [Arguments("empty", true)]
+    public async Task LegacyAndIndexedEnvironmentFieldsCombineWithoutLosingEarlierValues(
+        string previousSource, bool environmentBeforeJson)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", previousSource switch
+        {
+            "legacy" => """
+                { "Proxy": { "Repository": "user/old", "Workflow": "user.yml",
+                  "PackagesArtifact": "user-packages", "VersionArtifact": null } }
+                """,
+            "modern" => """
+                { "Sources": [{ "Name": "user-source", "Repository": "user/old", "Workflow": "user.yml",
+                  "Artifact": "user-packages", "VersionArtifact": null }] }
+                """,
+            "empty" => """{ "Sources": [] }""",
+            _ => "{}"
+        });
+        var explicitFile = WriteJson("explicit.json", """{ "Server": {} }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>
+        {
+            ["Proxy__Repository"] = "env/new",
+            ["Sources__0__Artifact"] = "env-packages"
+        });
+        var config = ProviderFiles(defaults, user, explicitFile, environmentBeforeJson);
+        using var services = new ServiceCollection().AddProxy(config).BuildServiceProvider();
+
+        var source = services.GetRequiredService<CacheConfiguration>().Sources.Single();
+        var runtime = services.GetRequiredService<ProxyOptions>();
+
+        await Assert.That(source.Name).IsEqualTo(previousSource == "modern" ? "user-source" : "new");
+        await Assert.That(source.Repository).IsEqualTo("env/new");
+        await Assert.That(source.Workflow).IsEqualTo(previousSource is "legacy" or "modern" ? "user.yml" : "build.yml");
+        await Assert.That(source.Artifact).IsEqualTo("env-packages");
+        if (previousSource is "legacy" or "modern")
+            await Assert.That(source.VersionArtifact).IsNull();
+        else
+            await Assert.That(source.VersionArtifact).IsEqualTo("build-version");
+        await Assert.That(runtime.Repository).IsEqualTo("env/new");
+        await Assert.That(runtime.PackagesArtifact).IsEqualTo("env-packages");
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task IndexedEnvironmentFieldsWinOnlyTheirOverlappingLegacyFields(bool legacyJson)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", legacyJson
+            ? """{ "Proxy": { "Repository": "user/old", "Workflow": "user.yml", "PackagesArtifact": "user-packages" } }"""
+            : "{}");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>
+        {
+            ["Proxy__Repository"] = "env/legacy",
+            ["Proxy__Workflow"] = "env-workflow.yml",
+            ["Proxy__PackagesArtifact"] = "legacy-packages",
+            ["Sources__0__Name"] = "explicit-name",
+            ["Sources__0__Repository"] = "modern/final",
+            ["Sources__0__Artifact"] = "modern-packages"
+        });
+        var logger = new RecordingLogger();
+
+        var source = CacheConfigurationLoader.Load(ProviderFiles(defaults, user, null, true), logger).Sources.Single();
+
+        await Assert.That(source.Name).IsEqualTo("explicit-name");
+        await Assert.That(source.Repository).IsEqualTo("modern/final");
+        await Assert.That(source.Workflow).IsEqualTo("env-workflow.yml");
+        await Assert.That(source.Artifact).IsEqualTo("modern-packages");
+        await Assert.That(logger.Messages.Any(x => x.Contains("combined", StringComparison.OrdinalIgnoreCase)
+            && x.Contains("precedence", StringComparison.OrdinalIgnoreCase))).IsTrue();
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments("\"\"", false, false, false)]
+    [Arguments("\"\"", false, true, false)]
+    [Arguments("\"\"", true, false, false)]
+    [Arguments("\"\"", true, true, false)]
+    [Arguments("""{ "0": { "Name": "wrong" } }""", false, false, false)]
+    [Arguments("""{ "0": { "Name": "wrong" } }""", false, true, false)]
+    [Arguments("""{ "0": { "Name": "wrong" } }""", true, false, false)]
+    [Arguments("""{ "0": { "Name": "wrong" } }""", true, true, false)]
+    [Arguments("\"\"", false, false, true)]
+    [Arguments("\"\"", true, true, true)]
+    [Arguments("""{ "0": { "Name": "wrong" } }""", false, false, true)]
+    [Arguments("""{ "0": { "Name": "wrong" } }""", true, true, true)]
+    public async Task PartialLegacyEnvironmentCannotHideMalformedExplicitSources(
+        string malformed, bool legacyJson, bool indexedEnvironment, bool overrideRepository)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", legacyJson
+            ? """{ "Proxy": { "Repository": "user/old", "Workflow": "user.yml", "PackagesArtifact": "user-packages" } }"""
+            : """{ "Sources": [{ "Name": "user", "Repository": "user/old", "Workflow": "user.yml", "Artifact": "user-packages" }] }""");
+        var explicitFile = WriteJson("explicit.json", $$"""{ "Sources": {{malformed}} }""");
+        var variables = new Dictionary<string, string?> { ["Proxy__Workflow"] = "env.yml" };
+        if (indexedEnvironment) variables["Sources__0__Artifact"] = "env-packages";
+        if (overrideRepository) variables["Proxy__Repository"] = "env/new";
+        using var environment = new ConfigurationEnvironment(variables);
+
+        var error = Invalid(ProviderFiles(defaults, user, explicitFile, true));
+
+        await Assert.That(error.Failures.Any(x => x.StartsWith("Sources must be an array", StringComparison.Ordinal))).IsTrue();
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments("\"\"")]
+    [Arguments("""{ "0": { "Name": "wrong" } }""")]
+    public async Task PartialLegacyJsonCannotHideMalformedEarlierSources(string malformed)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", """
+            { "Proxy": { "Repository": "user/old", "Workflow": "user.yml", "PackagesArtifact": "user-packages" } }
+            """);
+        var user = WriteJson("user.json", $$"""{ "Sources": {{malformed}} }""");
+        var explicitFile = WriteJson("explicit.json", """{ "Proxy": { "Workflow": "explicit.yml" } }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>());
+
+        var error = Invalid(ProviderFiles(defaults, user, explicitFile, true));
+
+        await Assert.That(error.Failures.Any(x => x.StartsWith("Sources must be an array", StringComparison.Ordinal))).IsTrue();
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments("Repository", """{ "unexpected": "value" }""")]
+    [Arguments("Repository", "{}")]
+    [Arguments("Repository", "[]")]
+    [Arguments("Workflow", """{ "unexpected": "value" }""")]
+    [Arguments("PackagesArtifact", """{ "unexpected": "value" }""")]
+    [Arguments("VersionArtifact", """{ "unexpected": "value" }""")]
+    public async Task MalformedHigherLegacyFieldReportsItsOwnPath(string field, string malformed)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", """
+            { "Proxy": { "Repository": "user/old", "Workflow": "user.yml",
+              "PackagesArtifact": "user-packages", "VersionArtifact": "user-version" } }
+            """);
+        var explicitFile = WriteJson("explicit.json", $$"""{ "Proxy": { "{{field}}": {{malformed}} } }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>
+        {
+            ["Server__RefreshSeconds"] = "31"
+        });
+
+        var error = Invalid(ProviderFiles(defaults, user, explicitFile, true));
+
+        await Assert.That(error.Failures.Any(x => x.Contains($"Proxy.{field}", StringComparison.Ordinal)
+            && x.Contains("scalar", StringComparison.OrdinalIgnoreCase))).IsTrue();
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task HigherEquivalentScalarCanCorrectAMalformedLegacyField(bool useIndexedSource)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", """
+            { "Proxy": { "Repository": "user/old", "Workflow": "user.yml", "PackagesArtifact": "user-packages" } }
+            """);
+        var explicitFile = WriteJson("explicit.json", """{ "Proxy": { "Repository": { "unexpected": "value" } } }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>
+        {
+            [useIndexedSource ? "Sources__0__Repository" : "Proxy__Repository"] = "env/new"
+        });
+
+        var source = CacheConfigurationLoader.Load(ProviderFiles(defaults, user, explicitFile, true)).Sources.Single();
+
+        await Assert.That(source.Name).IsEqualTo("new");
+        await Assert.That(source.Repository).IsEqualTo("env/new");
+        await Assert.That(source.Workflow).IsEqualTo("user.yml");
+        await Assert.That(source.Artifact).IsEqualTo("user-packages");
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments("\"\"", false)]
+    [Arguments("\"\"", true)]
+    [Arguments("[]", false)]
+    [Arguments("[]", true)]
+    [Arguments("null", false)]
+    [Arguments("42", true)]
+    public async Task MalformedServerShapeCannotBeHiddenByAnEnvironmentField(string malformed, bool overrideField)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", """
+            { "Server": { "BaseUrl": "http://localhost:55101", "RefreshSeconds": 20 }, "Sources": [] }
+            """);
+        var explicitFile = WriteJson("explicit.json", $$"""{ "Server": {{malformed}} }""");
+        var variables = new Dictionary<string, string?>();
+        if (overrideField) variables["Server__RefreshSeconds"] = "31";
+        using var environment = new ConfigurationEnvironment(variables);
+
+        var error = Invalid(ProviderFiles(defaults, user, explicitFile, true));
+
+        await Assert.That(error.Failures.Any(x => x == "Server must be an object.")).IsTrue();
+    }
+
+    [Test]
+    [NotInParallel]
+    [Arguments("server", false)]
+    [Arguments("server", true)]
+    [Arguments("source", false)]
+    [Arguments("source", true)]
+    public async Task MalformedOptionalScalarRequiresAnEquivalentHigherOverride(string section, bool correct)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", """
+            { "Server": { "CacheDirectory": "user-cache" },
+              "Sources": [{ "Name": "user", "Repository": "user/old", "Workflow": "user.yml",
+                "Artifact": "user-packages", "VersionArtifact": "user-version" }] }
+            """);
+        var explicitFile = WriteJson("explicit.json", section == "server"
+            ? """{ "Server": { "CacheDirectory": {} } }"""
+            : """
+                { "Sources": [{ "Name": "user", "Repository": "user/old", "Workflow": "user.yml",
+                  "Artifact": "user-packages", "VersionArtifact": [] }] }
+                """);
+        var variables = new Dictionary<string, string?> { ["Server__RefreshSeconds"] = "31" };
+        if (correct)
+            variables[section == "server" ? "Server__CacheDirectory" : "Sources__0__VersionArtifact"] = "env-value";
+        using var environment = new ConfigurationEnvironment(variables);
+        var config = ProviderFiles(defaults, user, explicitFile, true);
+
+        if (!correct)
+        {
+            var error = Invalid(config);
+            await Assert.That(error.Message).Contains(
+                section == "server" ? "Server.CacheDirectory" : "Sources[0].VersionArtifact");
+        }
+        else
+        {
+            var result = CacheConfigurationLoader.Load(config);
+            await Assert.That(section == "server" ? result.Server.CacheDirectory : result.Sources.Single().VersionArtifact)
+                .IsEqualTo("env-value");
+        }
+    }
+
+    [Test]
+    [NotInParallel]
+    public async Task EmptyServerObjectAndExplicitEmptySourcesRemainValidWithEnvironmentOverrides()
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", """
+            { "Server": { "BaseUrl": "http://localhost:55101", "RefreshSeconds": 20 },
+              "Sources": [{ "Name": "user", "Repository": "user/old", "Workflow": "user.yml", "Artifact": "p" }] }
+            """);
+        var explicitFile = WriteJson("explicit.json", """{ "Server": {}, "Sources": [] }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>
+        {
+            ["Server__RefreshSeconds"] = "31"
+        });
+
+        var result = CacheConfigurationLoader.Load(ProviderFiles(defaults, user, explicitFile, true));
+
+        await Assert.That(result.Sources).IsEmpty();
+        await Assert.That(result.Server.BaseUrl).IsEqualTo("http://localhost:55101");
+        await Assert.That(result.Server.RefreshSeconds).IsEqualTo(31);
+    }
+
+    [Test]
+    [NotInParallel]
+    public async Task JsonFileSnapshotsKeepTheLoadedServerShape()
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", "{}");
+        var explicitFile = WriteJson("explicit.json", """{ "Server": [] }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>());
+        var malformedSnapshot = ProviderFiles(defaults, user, explicitFile, true);
+        File.WriteAllText(explicitFile, """{ "Server": {} }""");
+        await Assert.That(Invalid(malformedSnapshot).Message).Contains("Server must be an object");
+
+        var validSnapshot = ProviderFiles(defaults, user, explicitFile, true);
+        File.WriteAllText(explicitFile, """{ "Server": [] }""");
+        await Assert.That(CacheConfigurationLoader.Load(validSnapshot).Server.RefreshSeconds).IsEqualTo(120);
+    }
+
+    [Test]
+    [NotInParallel]
+    public async Task HigherEmptyServerObjectReplacesAMalformedServerShape()
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", """{ "Server": [] }""");
+        var user = WriteJson("user.json", """{ "Server": {} }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>());
+
+        var result = CacheConfigurationLoader.Load(ProviderFiles(defaults, user, null, true));
+
+        await Assert.That(result.Server.BaseUrl).IsEqualTo("http://localhost:55631");
+        await Assert.That(result.Sources).IsEmpty();
+    }
+
+    [Test]
+    [NotInParallel]
+    public async Task ReloadingARemovedOptionalJsonFileDiscardsItsServerShape()
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", "{}");
+        var user = WriteJson("user.json", """{ "Server": [] }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>());
+        var config = (IConfigurationRoot)ProviderFiles(defaults, user, null, true);
+        await Assert.That(Invalid(config).Message).Contains("Server must be an object");
+
+        File.Delete(user);
+        config.Reload();
+
+        await Assert.That(CacheConfigurationLoader.Load(config).Server.RefreshSeconds).IsEqualTo(120);
+    }
+
+    [Test]
+    [NotInParallel]
     [Arguments("\"\"")]
     [Arguments("""{ "0": { "Name": "wrong", "Repository": "wrong/repo", "Workflow": "wrong.yml", "Artifact": "wrong" } }""")]
     public async Task MalformedJsonSourcesCannotReplaceAnEarlierListOrBeHiddenByEnvironment(string malformed)
@@ -618,6 +946,26 @@ public sealed class ConfigurationTests : IDisposable
     }
 
     [Test]
+    [NotInParallel]
+    [Arguments(false, "\"\"")]
+    [Arguments(false, "[]")]
+    [Arguments(true, "\"\"")]
+    [Arguments(true, "[]")]
+    public async Task ExistingJsonDefaultsAlsoKeepTheirLoadedServerShape(bool useConfigurationManager, string malformed)
+    {
+        Directory.CreateDirectory(_directory);
+        var defaults = WriteJson("defaults.json", $$"""{ "Server": {{malformed}} }""");
+        using var environment = new ConfigurationEnvironment(new Dictionary<string, string?>());
+        IConfigurationBuilder builder = useConfigurationManager ? new ConfigurationManager() : new ConfigurationBuilder();
+        builder.AddJsonFile(defaults, optional: false);
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder, null, Path.Combine(_directory, "missing.json"));
+        var snapshot = builder.Build();
+        File.WriteAllText(defaults, """{ "Server": {} }""");
+
+        await Assert.That(Invalid(snapshot).Message).Contains("Server must be an object");
+    }
+
+    [Test]
     public async Task ValidJsonStreamFromAFileIsStillAccepted()
     {
         Directory.CreateDirectory(_directory);
@@ -669,6 +1017,16 @@ public sealed class ConfigurationTests : IDisposable
         ConfigurationFiles.AddUserAndExplicitConfiguration(builder,
             explicitFile is null ? null : new FileInfo(explicitFile), user);
         return CacheConfigurationLoader.Load(builder.Build());
+    }
+
+    private static IConfiguration ProviderFiles(string defaults, string user, string? explicitFile, bool environmentBeforeJson)
+    {
+        var builder = new ConfigurationBuilder();
+        if (environmentBeforeJson) builder.AddEnvironmentVariables();
+        builder.AddJsonFile(defaults, optional: false);
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder,
+            explicitFile is null ? null : new FileInfo(explicitFile), user);
+        return builder.Build();
     }
 
     private string WriteJson(string name, string content)

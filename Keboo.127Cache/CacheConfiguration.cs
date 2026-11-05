@@ -66,7 +66,7 @@ public static class ConfigurationFiles
         {
             if (builder.Sources[index] is not JsonConfigurationSource source
                 || source.GetType() != typeof(JsonConfigurationSource) || source.Path is not { } path) continue;
-            builder.Sources[index] = new SourceShapeJsonConfigurationSource
+            builder.Sources[index] = new ShapeTrackingJsonConfigurationSource
             {
                 Path = path,
                 FileProvider = source.FileProvider,
@@ -80,76 +80,100 @@ public static class ConfigurationFiles
 
     private static void AddJsonFile(IConfigurationBuilder builder, string path, bool optional)
     {
-        var source = new SourceShapeJsonConfigurationSource { Path = path, Optional = optional };
+        var source = new ShapeTrackingJsonConfigurationSource { Path = path, Optional = optional };
         source.ResolveFileProvider();
         builder.Add(source);
     }
 }
 
-internal sealed class SourceShapeJsonConfigurationSource : JsonConfigurationSource
+internal sealed class ShapeTrackingJsonConfigurationSource : JsonConfigurationSource
 {
     public override IConfigurationProvider Build(IConfigurationBuilder builder)
     {
         EnsureDefaults(builder);
-        return new SourceShapeJsonConfigurationProvider(this);
+        return new ShapeTrackingJsonConfigurationProvider(this);
     }
 }
 
-internal sealed class SourceShapeJsonConfigurationProvider(JsonConfigurationSource source) : JsonConfigurationProvider(source)
+internal sealed class ShapeTrackingJsonConfigurationProvider(JsonConfigurationSource source) : JsonConfigurationProvider(source)
 {
-    public JsonValueKind? SourcesKind { get; private set; }
+    public JsonConfigurationShape? Shape { get; private set; }
 
     public override void Load(Stream stream)
     {
         using var buffer = new MemoryStream();
         stream.CopyTo(buffer);
         buffer.Position = 0;
-        // The configuration provider otherwise flattens [] and "" to the same value.
-        var kind = JsonSourceShape.Read(buffer);
+        // Flattening otherwise makes empty arrays, objects and scalar values indistinguishable.
+        var shape = JsonConfigurationShapes.Read(buffer);
         buffer.Position = 0;
         base.Load(buffer);
-        SourcesKind = kind;
+        Shape = shape;
     }
 }
 
-internal static class JsonSourceShape
+internal sealed class JsonConfigurationShape
 {
-    public static bool IsArray(IConfigurationProvider provider)
+    private readonly Dictionary<string, JsonValueKind> _kinds = new(StringComparer.OrdinalIgnoreCase);
+
+    public JsonValueKind? Kind(string path) => _kinds.TryGetValue(path, out var kind) ? kind : null;
+
+    public void Add(string path, JsonValueKind kind)
+    {
+        if (!_kinds.TryAdd(path, kind)) _kinds[path] = JsonValueKind.Undefined;
+    }
+
+    public void MarkInvalid(string path) => _kinds[path] = JsonValueKind.Undefined;
+}
+
+internal static class JsonConfigurationShapes
+{
+    public static bool SourcesAreArray(IConfigurationProvider provider)
+    {
+        var shape = FromProvider(provider);
+        return shape is not null
+            ? shape.Kind("Sources") == JsonValueKind.Array
+            : provider is not (JsonConfigurationProvider or JsonStreamConfigurationProvider);
+    }
+
+    public static JsonValueKind? Kind(IConfigurationProvider provider, string path) =>
+        FromProvider(provider)?.Kind(path);
+
+    private static JsonConfigurationShape? FromProvider(IConfigurationProvider provider)
     {
         try
         {
-            if (provider is SourceShapeJsonConfigurationProvider tracked)
-                return tracked.SourcesKind == JsonValueKind.Array;
+            if (provider is ShapeTrackingJsonConfigurationProvider tracked)
+                return tracked.Shape;
             if (provider is JsonConfigurationProvider file)
             {
                 var info = file.Source.FileProvider?.GetFileInfo(file.Source.Path ?? "");
-                if (info is null || !info.Exists) return false;
+                if (info is null || !info.Exists) return null;
                 using var stream = info.CreateReadStream();
-                return Read(stream) == JsonValueKind.Array;
+                return Read(stream);
             }
             if (provider is JsonStreamConfigurationProvider jsonStream)
             {
                 if (jsonStream.Source.Stream is MemoryStream memory)
                 {
                     using var stream = new MemoryStream(memory.ToArray());
-                    return Read(stream) == JsonValueKind.Array;
+                    return Read(stream);
                 }
                 if (jsonStream.Source.Stream is FileStream fileStream)
                 {
                     using var stream = File.OpenRead(fileStream.Name);
-                    return Read(stream) == JsonValueKind.Array;
+                    return Read(stream);
                 }
-                return false;
             }
-            return true;
+            return null;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or ObjectDisposedException)
         {
-            return false;
+            return null;
         }
     }
 
-    public static JsonValueKind? Read(Stream stream)
+    public static JsonConfigurationShape Read(Stream stream)
     {
         using var reader = new StreamReader(stream, leaveOpen: true);
         using var document = JsonDocument.Parse(reader.ReadToEnd(), new JsonDocumentOptions
@@ -157,19 +181,31 @@ internal static class JsonSourceShape
             CommentHandling = JsonCommentHandling.Skip,
             AllowTrailingCommas = true
         });
-        if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
-        JsonValueKind? result = null;
+        var shape = new JsonConfigurationShape();
+        if (document.RootElement.ValueKind != JsonValueKind.Object) return shape;
+        var invalidSources = false;
         foreach (var property in document.RootElement.EnumerateObject())
         {
             if (property.Name.StartsWith("Sources:", StringComparison.OrdinalIgnoreCase))
-                return JsonValueKind.Undefined;
-            if (property.Name.Equals("Sources", StringComparison.OrdinalIgnoreCase))
-            {
-                if (result is not null) return JsonValueKind.Undefined;
-                result = property.Value.ValueKind;
-            }
+                invalidSources = true;
+            AddElement(shape, property.Name, property.Value);
         }
-        return result;
+        if (invalidSources) shape.MarkInvalid("Sources");
+        return shape;
+    }
+
+    private static void AddElement(JsonConfigurationShape shape, string path, JsonElement element)
+    {
+        shape.Add(path, element.ValueKind);
+        if (element.ValueKind == JsonValueKind.Object)
+            foreach (var property in element.EnumerateObject())
+                AddElement(shape, $"{path}:{property.Name}", property.Value);
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+                AddElement(shape, $"{path}:{(index++).ToString(CultureInfo.InvariantCulture)}", item);
+        }
     }
 }
 
@@ -199,6 +235,7 @@ public static class CacheConfigurationLoader
         var legacy = NewLegacySource();
         var sawLegacy = false;
         var conflictingSources = false;
+        var combinedEnvironmentSources = false;
 
         foreach (var provider in root.Providers)
         {
@@ -214,27 +251,40 @@ public static class CacheConfigurationLoader
             var hasSourceValue = provider.TryGet("Sources", out var sourceValue);
             var hasSources = hasSourceValue || sourceChildren.Length > 0;
             var hasLegacySource = LegacySourceFields.Any(field => HasSection(provider, $"Proxy:{field}"));
+            var isEnvironment = provider is EnvironmentVariablesConfigurationProvider;
 
             if (hasSources)
             {
-                if (hasLegacySource) conflictingSources = true;
-                if (!JsonSourceShape.IsArray(provider))
+                if (hasLegacySource)
+                {
+                    if (isEnvironment && !hasSourceValue) combinedEnvironmentSources = true;
+                    else conflictingSources = true;
+                }
+                if (!JsonConfigurationShapes.SourcesAreArray(provider))
                 {
                     sourceErrors["Sources"] = "Sources must be an array.";
                     continue;
                 }
 
-                var indexedEnvironment = provider is EnvironmentVariablesConfigurationProvider && !hasSourceValue;
-                if (indexedEnvironment && mode == SourceMode.Legacy)
+                var indexedEnvironment = isEnvironment && !hasSourceValue;
+                if (indexedEnvironment)
                 {
-                    legacy.Value.Name = LegacyName(legacy.Value.Repository);
-                    sources.Clear();
-                    sources[0] = legacy;
+                    if (mode == SourceMode.Legacy)
+                    {
+                        sources.Clear();
+                        sources[0] = legacy;
+                    }
+                    if (hasLegacySource)
+                    {
+                        if (!sources.TryGetValue(0, out var state))
+                            sources[0] = state = NewLegacySource();
+                        ApplyLegacySource(provider, state);
+                    }
                 }
-                else if (mode != SourceMode.Modern || !indexedEnvironment)
+                else
                 {
                     sources.Clear();
-                    if (!indexedEnvironment) sourceErrors.Clear();
+                    sourceErrors.Clear();
                 }
                 mode = SourceMode.Modern;
                 if (hasSourceValue && sourceValue is null)
@@ -257,11 +307,21 @@ public static class CacheConfigurationLoader
             }
             else if (hasLegacySource || (hasLegacy && mode == SourceMode.None))
             {
-                if (hasLegacySource) sourceErrors.Clear();
-                if (mode != SourceMode.Legacy)
-                    legacy = NewLegacySource();
-                mode = SourceMode.Legacy;
-                ApplyLegacySource(provider, legacy);
+                if (isEnvironment && hasLegacySource && mode == SourceMode.Modern)
+                {
+                    if (!sources.TryGetValue(0, out var state))
+                        sources[0] = state = NewLegacySource();
+                    ApplyLegacySource(provider, state);
+                }
+                else
+                {
+                    if (mode != SourceMode.Legacy)
+                        legacy = NewLegacySource();
+                    mode = SourceMode.Legacy;
+                    ApplyLegacySource(provider, legacy);
+                    if (!isEnvironment && IsCompleteLegacySource(provider, legacy))
+                        sourceErrors.Clear();
+                }
             }
         }
 
@@ -271,13 +331,16 @@ public static class CacheConfigurationLoader
             logger.LogWarning("Proxy.{Field} is ignored; the feed uses the latest successful builds of open pull requests.", field);
         if (conflictingSources)
             logger.LogWarning("Proxy source settings are ignored when Sources is supplied in the same configuration layer.");
+        if (combinedEnvironmentSources)
+            logger.LogWarning("Proxy and Sources environment source settings were combined; indexed Sources fields take precedence when both set the same field.");
 
         if (mode == SourceMode.Legacy)
         {
-            legacy.Value.Name = LegacyName(legacy.Value.Repository);
             sources.Clear();
             sources[0] = legacy;
         }
+        foreach (var state in sources.Values.Where(state => state.DeriveName))
+            state.Value.Name = LegacyName(state.Value.Repository);
 
         var failures = new List<string>(serverErrors.Values);
         failures.AddRange(sourceErrors.Values);
@@ -301,8 +364,10 @@ public static class CacheConfigurationLoader
         var children = Children(provider, section).ToArray();
         if (section == "Server")
         {
-            if (children.Length > 0) errors.Remove("Server");
-            if (provider.TryGet(section, out var value) && !string.IsNullOrEmpty(value))
+            var kind = HasSection(provider, section) ? JsonConfigurationShapes.Kind(provider, section) : null;
+            if (kind == JsonValueKind.Object)
+                errors.Remove("Server");
+            else if (kind is not null || (provider.TryGet(section, out var value) && value is not null))
                 errors["Server"] = "Server must be an object.";
             foreach (var child in children.Where(child => !ServerFields.Contains(child)))
                 errors[$"Server.{child}"] = $"Server.{child} is not a supported field.";
@@ -312,7 +377,10 @@ public static class CacheConfigurationLoader
         {
             var path = $"{section}:{field}";
             var name = $"Server.{field}";
-            if (provider.TryGet(path, out var value))
+            if (!HasSection(provider, path)) continue;
+            if (IsNonScalar(provider, path) || !provider.TryGet(path, out var value))
+                errors[name] = $"{name} must be a scalar value.";
+            else
             {
                 errors.Remove(name);
                 switch (field)
@@ -322,27 +390,50 @@ public static class CacheConfigurationLoader
                     case "RefreshSeconds": refreshSeconds = value ?? ""; break;
                 }
             }
-            else if (HasSection(provider, path))
-                errors[name] = $"{name} must be a scalar value.";
         }
     }
 
     private static SourceState NewLegacySource() => new()
     {
-        Value = new SourceOptions { Workflow = "build.yml", Artifact = "packages", VersionArtifact = "build-version" }
+        Value = new SourceOptions { Workflow = "build.yml", Artifact = "packages", VersionArtifact = "build-version" },
+        DeriveName = true
     };
 
     private static void ApplyLegacySource(IConfigurationProvider provider, SourceState state)
     {
-        if (provider.TryGet("Proxy:Repository", out var repository)) state.Value.Repository = repository ?? "";
-        if (provider.TryGet("Proxy:Workflow", out var workflow)) state.Value.Workflow = workflow ?? "";
-        if (provider.TryGet("Proxy:PackagesArtifact", out var artifact)) state.Value.Artifact = artifact ?? "";
-        if (provider.TryGet("Proxy:VersionArtifact", out var versionArtifact)) state.Value.VersionArtifact = versionArtifact;
+        foreach (var field in LegacySourceFields)
+        {
+            var path = $"Proxy:{field}";
+            if (!HasSection(provider, path)) continue;
+            var sourceField = field == "PackagesArtifact" ? "Artifact" : field;
+            if (IsNonScalar(provider, path) || !provider.TryGet(path, out var value))
+            {
+                state.Errors[sourceField] = $"Proxy.{field} must be a scalar value.";
+                continue;
+            }
+
+            state.Errors.Remove(sourceField);
+            switch (field)
+            {
+                case "Repository": state.Value.Repository = value ?? ""; break;
+                case "Workflow": state.Value.Workflow = value ?? ""; break;
+                case "PackagesArtifact": state.Value.Artifact = value ?? ""; break;
+                case "VersionArtifact": state.Value.VersionArtifact = value; break;
+            }
+        }
     }
+
+    private static bool IsCompleteLegacySource(IConfigurationProvider provider, SourceState state) =>
+        provider.TryGet("Proxy:Repository", out _) && !IsNonScalar(provider, "Proxy:Repository")
+        && state.Errors.Count == 0 && IsValidRepository(state.Value.Repository) && IsValidWorkflow(state.Value.Workflow)
+        && !string.IsNullOrWhiteSpace(state.Value.Artifact)
+        && (state.Value.VersionArtifact is null || !string.IsNullOrWhiteSpace(state.Value.VersionArtifact));
 
     private static void ApplySource(IConfigurationProvider provider, string path, int index, SourceState state)
     {
-        if (provider.TryGet(path, out var value) && !string.IsNullOrEmpty(value))
+        var kind = JsonConfigurationShapes.Kind(provider, path);
+        if ((kind is not null && kind != JsonValueKind.Object)
+            || (kind is null && provider.TryGet(path, out var value) && !string.IsNullOrEmpty(value)))
             state.Errors["object"] = $"Sources[{index}] must be an object.";
 
         foreach (var field in Children(provider, path))
@@ -354,7 +445,7 @@ public static class CacheConfigurationLoader
             }
 
             var key = $"{path}:{field}";
-            if (!provider.TryGet(key, out var fieldValue))
+            if (IsNonScalar(provider, key) || !provider.TryGet(key, out var fieldValue))
             {
                 state.Errors[field] = $"Sources[{index}].{field} must be a scalar value.";
                 continue;
@@ -363,7 +454,7 @@ public static class CacheConfigurationLoader
             state.Errors.Remove(field);
             switch (field.ToUpperInvariant())
             {
-                case "NAME": state.Value.Name = fieldValue ?? ""; break;
+                case "NAME": state.Value.Name = fieldValue ?? ""; state.DeriveName = false; break;
                 case "REPOSITORY": state.Value.Repository = fieldValue ?? ""; break;
                 case "WORKFLOW": state.Value.Workflow = fieldValue ?? ""; break;
                 case "ARTIFACT": state.Value.Artifact = fieldValue ?? ""; break;
@@ -378,6 +469,10 @@ public static class CacheConfigurationLoader
 
     private static bool HasSection(IConfigurationProvider provider, string path) =>
         provider.TryGet(path, out _) || Children(provider, path).Any();
+
+    private static bool IsNonScalar(IConfigurationProvider provider, string path) =>
+        JsonConfigurationShapes.Kind(provider, path) is JsonValueKind.Object or JsonValueKind.Array
+        || Children(provider, path).Any();
 
     private static void ValidateServer(ServerOptions server, List<string> failures)
     {
@@ -404,10 +499,9 @@ public static class CacheConfigurationLoader
             else if (!names.TryAdd(source.Name, index))
                 failures.Add($"Sources[{index}].Name duplicates Sources[{names[source.Name]}].Name (case-insensitive).");
 
-            if (!Regex.IsMatch(source.Repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-                || source.Repository.Split('/').Any(part => part is "." or ".."))
+            if (!IsValidRepository(source.Repository))
                 failures.Add($"Sources[{index}].Repository{nameContext} must be a GitHub owner/repository.");
-            if (!Regex.IsMatch(source.Workflow, @"^[A-Za-z0-9_.-]+$") || source.Workflow is "." or "..")
+            if (!IsValidWorkflow(source.Workflow))
                 failures.Add($"Sources[{index}].Workflow{nameContext} must be a workflow filename.");
             if (string.IsNullOrWhiteSpace(source.Artifact))
                 failures.Add($"Sources[{index}].Artifact{nameContext} is required.");
@@ -417,6 +511,13 @@ public static class CacheConfigurationLoader
                 failures.Add($"Sources[{index}].Type{nameContext} must be GitHubActions; other source types are not supported yet.");
         }
     }
+
+    private static bool IsValidRepository(string repository) =>
+        Regex.IsMatch(repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+        && repository.Split('/').All(part => part is not ("." or ".."));
+
+    private static bool IsValidWorkflow(string workflow) =>
+        Regex.IsMatch(workflow, @"^[A-Za-z0-9_.-]+$") && workflow is not ("." or "..");
 
     private static bool IsSafeName(string name) =>
         Regex.IsMatch(name, @"^[A-Za-z0-9._-]{1,255}$")
@@ -454,6 +555,7 @@ public static class CacheConfigurationLoader
     private sealed class SourceState
     {
         public SourceOptions Value { get; set; } = new();
+        public bool DeriveName { get; set; }
         public Dictionary<string, string> Errors { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 }

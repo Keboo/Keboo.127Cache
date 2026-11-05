@@ -99,6 +99,7 @@ public sealed class CliConfigurationTests : IDisposable
         }
         var start = StartInfo(profile, explicitFile, null);
         start.Environment["PATH"] = bin + Path.PathSeparator + start.Environment["PATH"];
+        start.Environment["Proxy__Workflow"] = "env.yml";
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the CLI.");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
@@ -114,6 +115,43 @@ public sealed class CliConfigurationTests : IDisposable
         await Assert.That(process.ExitCode).IsNotEqualTo(0);
         await Assert.That(output).Contains("Sources must be an array");
         await Assert.That(output.Contains("unexpected gh invocation", StringComparison.Ordinal)).IsFalse();
+    }
+
+    [Test]
+    [Arguments("\"\"")]
+    [Arguments("[]")]
+    public async Task ServeRejectsMalformedServerBeforeOpeningTheCache(string malformed)
+    {
+        var profile = Path.Combine(_directory, "profile");
+        var configFolder = Path.Combine(profile, OperatingSystem.IsWindows() ? "Keboo.127Cache" : "keboo-127cache");
+        var work = Path.Combine(_directory, "work");
+        var cache = Path.Combine(_directory, "cache");
+        Directory.CreateDirectory(configFolder);
+        Directory.CreateDirectory(work);
+        File.WriteAllText(Path.Combine(configFolder, "config.json"), """{ "Sources": [] }""");
+        var explicitFile = Path.Combine(_directory, "explicit.json");
+        File.WriteAllText(explicitFile, $$"""{ "Server": {{malformed}} }""");
+        var start = StartInfo(profile, explicitFile, FreeUrl());
+        start.Environment["Server__CacheDirectory"] = cache;
+        start.Environment["Server__RefreshSeconds"] = "31";
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the CLI.");
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        var exited = true;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) { exited = false; }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+
+        var output = await stdout + await stderr;
+        await Assert.That(exited).IsTrue();
+        await Assert.That(process.ExitCode).IsNotEqualTo(0);
+        await Assert.That(output).Contains("Server must be an object");
+        await Assert.That(Directory.Exists(cache)).IsFalse();
     }
 
     private ProcessStartInfo StartInfo(string profile, string? explicitFile, string? environmentUrl)

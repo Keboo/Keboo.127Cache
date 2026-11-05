@@ -63,10 +63,18 @@ Configuration layers have the following precedence, from lowest to highest:
    `Server__BaseUrl` or `Sources__0__Repository`.
 
 Each JSON `Sources` array replaces an earlier array, including when it is empty.
-Environment variables override individual indexed fields of the resulting array.
-An indexed environment override also preserves the other fields of a source
-mapped from legacy `Proxy` configuration. A JSON `Sources` value must be an
-array, not a scalar or an object with numeric keys.
+In the same JSON layer, a `Sources` array takes precedence over all legacy
+`Proxy` source fields. For environment variables, legacy `Proxy__` source fields
+first override source 0, retaining its other inherited fields (or using legacy
+defaults when no source exists). Indexed `Sources__0__` fields then override the
+corresponding fields, so a modern environment field wins only when both forms
+set the same field. An explicitly configured source name stays unchanged; a
+legacy-derived name follows the resulting repository.
+
+A JSON `Sources` value must be an array, not a scalar or an object with numeric
+keys. A JSON `Server` value must be an object; `{}` preserves inherited settings.
+Partial environment overrides do not hide malformed section shapes. A complete
+later source configuration can replace an earlier malformed `Sources` value.
 An empty or absent `Sources` array is valid; there is no default repository.
 
 | Setting | Default | Description |
@@ -120,9 +128,9 @@ component (prefixed when needed for filesystem safety), and
 `Server`. The old default workflow, packages artifact, and version
 artifact are retained for legacy configurations, but a repository is required.
 `Proxy.PullRequests`, `Proxy.RunIds`, and `Proxy.RunLimit` are ignored, each
-with a warning. A `Sources` array takes precedence over legacy source fields in
-the same layer; across layers the higher-precedence source configuration wins.
-Use `Server` and `Sources` for new configurations.
+with a warning. Across layers, the higher-precedence source configuration wins
+subject to the environment-field behavior above. Use `Server` and `Sources`
+for new configurations.
 
 The tool serves the latest completed, successful run for each open PR. Queued,
 running, failed, cancelled, and non-PR runs are excluded. The app refreshes
