@@ -1,0 +1,28 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="proxy.example.json" />
+    <File Path="scripts/Common.ps1" />
+    <File Path="scripts/Install-PrBuild.ps1" />
+    <File Path="scripts/Remove-PrBuild.ps1" />
+    <File Path="scripts/Start-Proxy.ps1" />
+    <File Path="scripts/Smoke-Test.ps1" />
+    <File Path="scripts/Test-InstallState.ps1" />
+    <File Path=".editorconfig" />
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Build.targets" />
+    <File Path="Directory.Packages.props" />
+    <File Path="exclusions.dic" />
+    <File Path="global.json" />
+    <File Path="NuGet.config" />
+  </Folder>
+  <Folder Name="/Solution Items/.github/">
+    <File Path=".github/dependabot.yml" />
+  </Folder>
+  <Folder Name="/Solution Items/.github/workflows/">
+    <File Path=".github/workflows/build-and-deploy.yml" />
+    <File Path=".github/workflows/pr-code-coverage-comment.yml" />
+  </Folder>
+  <Project Path="Keboo.127Cache/Keboo.127Cache.csproj" />
+  <Project Path="Keboo.127Cache.Tests/Keboo.127Cache.Tests.csproj" />
+  <Project Path="Keboo.127Cache.Proxy.Tests/Keboo.127Cache.Proxy.Tests.csproj" />
+</Solution>

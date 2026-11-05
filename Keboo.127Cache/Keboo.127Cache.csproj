@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>true</IsPackable>
+    <TargetFramework>net10.0</TargetFramework>
+    <Version>0.0.1</Version>
+    <PackageId>Keboo.127Cache</PackageId>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>keboo-127cache</ToolCommandName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+    <PackageReference Include="NuGet.Packaging" />
+  </ItemGroup>
+</Project>

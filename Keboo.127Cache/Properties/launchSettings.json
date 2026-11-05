@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Keboo._127Cache": {
+      "commandName": "Project",
+      "commandLineArgs": "serve"
+    },
+    "Display Help": {
+      "commandName": "Project",
+      "commandLineArgs": "--help"
+    }
+  }
+}
