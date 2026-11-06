@@ -163,10 +163,11 @@ Linux tests the entire solution with coverage; the coverage extension generates 
 separate report per test module, without a fixed project list. CI also adds a
 failing test project to a copy of the solution to verify discovery, and mutates
 a valid package to verify that the smoke test rejects the wrong artifact. The
-package job checks the actual nuspec, README, icon, version and tool contents,
-and mutates copies of the package to test that those checks fail. It also tests
-the future push outcome reporting with a local `dotnet` stub: no login, network
-push, or publishing credential is used.
+package job and each OS check the actual nuspec, README, license, icon, version
+and tool contents, and mutate copies of the package to test those checks.
+Text comparisons accept equivalent LF and CRLF line endings. The package job
+also tests future push outcome reporting with a local `dotnet` stub: no login,
+network push, or publishing credential is used.
 
 ## Release procedure and safety
 

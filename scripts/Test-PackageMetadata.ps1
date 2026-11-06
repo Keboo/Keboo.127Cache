@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string] $PackageDirectory
+    [string] $PackageDirectory,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string] $ExpectedSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +25,9 @@ if ($packages.Count -ne 1) {
 }
 $packagePath = $packages[0].FullName
 $originalHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
+if ($ExpectedSha256 -and $originalHash -ne $ExpectedSha256) {
+    throw "Package metadata SHA-256 mismatch for $($packages[0].Name): expected $ExpectedSha256, actual $originalHash."
+}
 
 function Get-RequiredEntry {
     param([IO.Compression.ZipArchive] $Archive, [string] $Name)
@@ -50,6 +55,13 @@ function Get-EntryText {
     try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
 }
 
+function Set-EntryText {
+    param([IO.Compression.ZipArchive] $Archive, [string] $Name, [string] $Text)
+    (Get-RequiredEntry $Archive $Name).Delete()
+    $writer = [IO.StreamWriter]::new($Archive.CreateEntry($Name).Open(), [Text.UTF8Encoding]::new($false))
+    try { $writer.Write($Text) } finally { $writer.Dispose() }
+}
+
 function Get-MetadataValue {
     param([System.Xml.XmlNode] $Metadata, [string] $Name)
     $node = $Metadata.SelectSingleNode("*[local-name()='$Name']")
@@ -66,6 +78,13 @@ function Assert-PackedFile {
     $expected = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
     if ($actual -ne $expected) { throw "Packaged '$Name' differs from its source file." }
     return ,$bytes
+}
+
+function Assert-PackedTextFile {
+    param([IO.Compression.ZipArchive] $Archive, [string] $Name, [string] $Source)
+    $actual = (Get-EntryText (Get-RequiredEntry $Archive $Name)).Replace("`r`n", "`n").Replace("`r", "`n")
+    $expected = (Get-Content -LiteralPath $Source -Raw).Replace("`r`n", "`n").Replace("`r", "`n")
+    if ($actual -cne $expected) { throw "Packaged '$Name' differs from its source file." }
 }
 
 function Read-PngUInt32 {
@@ -207,8 +226,8 @@ function Assert-PackageMetadata {
         if ((Get-MetadataValue $metadata 'icon') -cne 'icon.png') {
             throw 'The nuspec must reference the packaged icon.png.'
         }
-        $null = Assert-PackedFile $archive 'README.md' (Join-Path $repositoryRoot 'README.md')
-        $null = Assert-PackedFile $archive 'LICENSE.md' (Join-Path $repositoryRoot 'LICENSE.md')
+        Assert-PackedTextFile $archive 'README.md' (Join-Path $repositoryRoot 'README.md')
+        Assert-PackedTextFile $archive 'LICENSE.md' (Join-Path $repositoryRoot 'LICENSE.md')
         [byte[]] $icon = Assert-PackedFile $archive 'icon.png' (Join-Path (Join-Path $repositoryRoot 'assets') 'icon.png')
         Assert-PngIcon $icon
 
@@ -262,7 +281,24 @@ $root = Join-Path (Join-Path $repositoryRoot 'TestResults') "package-metadata-$(
 if (Test-Path -LiteralPath $root) { throw "Metadata-test directory already exists: $root" }
 try {
     $null = New-Item -ItemType Directory -Path $root
-    foreach ($case in @('projectUrl', 'version', 'README.md', 'icon.png')) {
+    foreach ($name in @('README.md', 'LICENSE.md')) {
+        $mutatedPath = Join-Path $root $packages[0].Name
+        Copy-Item -LiteralPath $packagePath -Destination $mutatedPath -Force
+        $archive = [IO.Compression.ZipFile]::Open($mutatedPath, [IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $text = Get-EntryText (Get-RequiredEntry $archive $name)
+            $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+            $alternate = if ($text.Contains("`r`n")) { $normalized } else { $normalized.Replace("`n", "`r`n") }
+            if ($alternate -ceq $text) { throw "Could not change the line endings of '$name'." }
+            Set-EntryText $archive $name $alternate
+        } finally {
+            $archive.Dispose()
+        }
+        Assert-PackageMetadata $mutatedPath
+        Write-Host "PASS: equivalent $name line endings are accepted across operating systems."
+    }
+
+    foreach ($case in @('projectUrl', 'version', 'README.md', 'README-content', 'icon.png')) {
         $mutatedPath = Join-Path $root $packages[0].Name
         Copy-Item -LiteralPath $packagePath -Destination $mutatedPath -Force
         $archive = [IO.Compression.ZipFile]::Open($mutatedPath, [IO.Compression.ZipArchiveMode]::Update)
@@ -273,11 +309,12 @@ try {
                 [xml] $manifest = Get-EntryText $entry
                 $node = $manifest.SelectSingleNode("/*[local-name()='package']/*[local-name()='metadata']/*[local-name()='$case']")
                 $node.InnerText = if ($case -eq 'projectUrl') { 'https://example.invalid/wrong' } else { '999.999.999' }
-                $entry.Delete()
-                $writer = [IO.StreamWriter]::new($archive.CreateEntry($name).Open(), [Text.UTF8Encoding]::new($false))
-                try { $writer.Write($manifest.OuterXml) } finally { $writer.Dispose() }
+                Set-EntryText $archive $name $manifest.OuterXml
             } elseif ($case -eq 'README.md') {
                 (Get-RequiredEntry $archive 'README.md').Delete()
+            } elseif ($case -eq 'README-content') {
+                $text = Get-EntryText (Get-RequiredEntry $archive 'README.md')
+                Set-EntryText $archive 'README.md' ($text + "`nPackage metadata mutation`n")
             } else {
                 (Get-RequiredEntry $archive 'icon.png').Delete()
                 $stream = $archive.CreateEntry('icon.png').Open()
@@ -295,7 +332,8 @@ try {
         try {
             Assert-PackageMetadata $mutatedPath
         } catch {
-            if ($_.Exception.Message -notlike "*$case*") { throw }
+            $expected = if ($case -eq 'README-content') { 'README.md' } else { $case }
+            if ($_.Exception.Message -notlike "*$expected*") { throw }
             $rejected = $true
         }
         if (!$rejected) { throw "Package metadata mutation '$case' was not rejected." }

@@ -117,6 +117,10 @@ function Assert-WorkflowContract {
     $download = Get-StepBlock $build 'Download canonical NuGet artifact'
     Assert-CanonicalDownload $download 'The matrix'
     Assert-Pattern $download '(?m)^[ \t]*path:[ \t]*NuGet[ \t]*$' 'The matrix must extract the canonical artifact into NuGet.'
+    $downloadedMetadata = Get-StepBlock $build 'Test downloaded package metadata'
+    Assert-CanonicalHashInput $downloadedMetadata 'The matrix metadata test'
+    Assert-Pattern $downloadedMetadata 'Test-PackageMetadata\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''[^\r\n]*-ExpectedSha256[ \t]+\$env:EXPECTED_PACKAGE_SHA256' `
+        'The matrix must validate downloaded package metadata.'
     $smoke = Get-StepBlock $build 'Test packed tool installation and server'
     Assert-CanonicalHashInput $smoke 'The matrix smoke test'
     Assert-Pattern $smoke 'Test-PackedTool\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''[^\r\n]*-ExpectedSha256[ \t]+\$env:EXPECTED_PACKAGE_SHA256' `
@@ -128,8 +132,10 @@ function Assert-WorkflowContract {
     $installState = Get-StepBlock $build 'Test install-state recovery'
     Assert-Pattern $installState 'Test-InstallState\.ps1' 'The matrix must retain the install-state test.'
     if ($build.IndexOf('      - name: Download canonical NuGet artifact') -gt
+        $build.IndexOf('      - name: Test downloaded package metadata') -or
+        $build.IndexOf('      - name: Test downloaded package metadata') -gt
         $build.IndexOf('      - name: Test packed tool installation and server')) {
-        throw 'The matrix must download the canonical package before smoke-testing it.'
+        throw 'The matrix must download and validate the canonical package before smoke-testing it.'
     }
 
     Assert-Pattern $deploy '(?m)^    if:[ \t]*\$\{\{[ \t]*false[ \t]*\}\}[ \t]*$' `
@@ -239,6 +245,13 @@ $index = if ($smokeIndex -ge 0) { $source.IndexOf($hashBinding, $smokeIndex, [St
 if ($index -lt 0) { throw 'Could not mutate the matrix package hash binding.' }
 $mutated = $source.Remove($index, $hashBinding.Length).Insert($index, 'EXPECTED_PACKAGE_SHA256: independently-computed')
 Assert-MutationRejected $mutated 'The matrix smoke test must use the canonical package SHA-256'
+
+$metadataStep = $source.IndexOf('      - name: Test downloaded package metadata', [StringComparison]::Ordinal)
+$metadataCommand = 'Test-PackageMetadata.ps1'
+$index = if ($metadataStep -ge 0) { $source.IndexOf($metadataCommand, $metadataStep, [StringComparison]::Ordinal) } else { -1 }
+if ($index -lt 0) { throw 'Could not mutate the downloaded package metadata check.' }
+$mutated = $source.Remove($index, $metadataCommand.Length).Insert($index, 'DisabledMetadataCheck.ps1')
+Assert-MutationRejected $mutated 'The matrix must validate downloaded package metadata'
 
 $packCommand = 'run: dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet'
 $mutated = $source.Replace($packCommand, 'run: dotnet --info')

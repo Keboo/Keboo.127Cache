@@ -160,6 +160,12 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
 
+      - name: Test downloaded package metadata
+        env:
+          EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          & (Join-Path 'scripts' 'Test-PackageMetadata.ps1') -PackageDirectory 'NuGet' -ExpectedSha256 $env:EXPECTED_PACKAGE_SHA256
+
       - name: Test packed tool installation and server
         env:
           EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
