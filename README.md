@@ -137,6 +137,13 @@ running, failed, cancelled, and non-PR runs are excluded. The app refreshes
 GitHub discovery on startup and after the in-memory cache expires. Startup lists
 run artifacts but does not download their contents.
 
+When GitHub omits a run's PR association, as it often does for forks, the app
+matches the current open PR head SHA and, when available, its head repository
+and branch. Ambiguous matches are skipped with a warning rather than attributed
+to the wrong PR. An unassociated run can only be newly matched while its SHA
+is the current PR head; previously discovered cached runs remain available while
+the PR stays open.
+
 Run metadata and raw artifact ZIPs are cached by artifact ID. A supplied
 `sha256:` digest is verified before a ZIP is cached; mismatched, malformed, or
 unsupported supplied digests fail closed. When no digest is supplied, the app
@@ -186,7 +193,8 @@ The app refuses simultaneous instances sharing a cache directory, and refuses a
 cache belonging to a different repository or workflow. Changing a configured
 artifact may require a different cache directory; cached run metadata is not
 overwritten. When an open PR falls outside the recent discovery window, its
-latest known cached run remains visible until a newer successful run is found.
+latest known cached run remains visible until a newer successful run with
+available artifacts is found.
 Closed PRs disappear from the feed on the next discovery refresh.
 
 ## Development

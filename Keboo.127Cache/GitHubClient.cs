@@ -4,7 +4,12 @@ using System.Text.Json.Serialization;
 
 namespace Keboo._127Cache;
 
-public sealed record PullRequestInfo(int Number);
+public sealed record GitHubRepository([property: JsonPropertyName("full_name")] string? FullName);
+public sealed record PullRequestHead(
+    string? Sha,
+    [property: JsonPropertyName("ref")] string? Branch,
+    [property: JsonPropertyName("repo")] GitHubRepository? Repository);
+public sealed record PullRequestInfo(int Number, PullRequestHead? Head = null);
 public sealed record WorkflowRun(
     long Id,
     [property: JsonPropertyName("run_attempt")] int Attempt,
@@ -12,7 +17,9 @@ public sealed record WorkflowRun(
     string Status,
     string? Conclusion,
     string Event,
-    [property: JsonPropertyName("pull_requests")] PullRequestInfo[] PullRequests);
+    [property: JsonPropertyName("pull_requests")] PullRequestInfo[] PullRequests,
+    [property: JsonPropertyName("head_branch")] string? HeadBranch = null,
+    [property: JsonPropertyName("head_repository")] GitHubRepository? HeadRepository = null);
 public sealed record Artifact(long Id, string Name, bool Expired, string? Digest);
 public sealed record RunsResponse([property: JsonPropertyName("workflow_runs")] WorkflowRun[] Runs);
 public sealed record ArtifactsResponse(Artifact[] Artifacts);

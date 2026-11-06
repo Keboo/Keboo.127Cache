@@ -286,6 +286,132 @@ public sealed class ProxyTests : IDisposable
     }
 
     [Test]
+    public async Task ForkAndSameRepositoryPullRequestsAreServedWithoutPins()
+    {
+        _github.OpenPullRequests = JsonSerializer.Deserialize<PullRequestInfo[]>(
+            """
+            [
+              {"number":755,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"fork-feature","repo":{"full_name":"alice/widgets"}}},
+              {"number":756,"head":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ref":"same-feature","repo":{"full_name":"owner/widgets"}}},
+              {"number":757,"head":{"sha":"cccccccccccccccccccccccccccccccccccccccc","ref":"explicit-feature","repo":{"full_name":"owner/widgets"}}}
+            ]
+            """, JsonSettings.Options)!;
+        _github.Runs = JsonSerializer.Deserialize<RunsResponse>(
+            """
+            {"workflow_runs":[
+              {"id":100,"run_attempt":1,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"fork-feature","head_repository":{"full_name":"alice/widgets"},"status":"completed","conclusion":"success","event":"pull_request","pull_requests":[]},
+              {"id":101,"run_attempt":1,"head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_branch":"same-feature","head_repository":{"full_name":"owner/widgets"},"status":"completed","conclusion":"success","event":"pull_request","pull_requests":[]},
+              {"id":102,"run_attempt":1,"head_sha":"cccccccccccccccccccccccccccccccccccccccc","head_branch":"explicit-feature","head_repository":{"full_name":"owner/widgets"},"status":"completed","conclusion":"success","event":"pull_request","pull_requests":[{"number":757}]}
+            ]}
+            """, JsonSettings.Options)!.Runs;
+
+        var forkHead = _github.OpenPullRequests[0].Head;
+        await Assert.That(forkHead).IsNotNull();
+        await Assert.That(forkHead!.Sha).IsEqualTo("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        await Assert.That(forkHead.Branch).IsEqualTo("fork-feature");
+        await Assert.That(forkHead.Repository?.FullName).IsEqualTo("alice/widgets");
+        await Assert.That(_github.Runs[0].HeadBranch).IsEqualTo("fork-feature");
+        await Assert.That(_github.Runs[0].HeadRepository?.FullName).IsEqualTo("alice/widgets");
+
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Urls"] = "http://127.0.0.1:0",
+            ["Proxy:Repository"] = "fixture/project",
+            ["Proxy:CacheDirectory"] = _options.CacheDirectory
+        });
+        builder.Services.AddProxy(builder.Configuration);
+        builder.Services.AddSingleton<IGitHubClient>(_github);
+        await using var app = builder.Build();
+        app.UseExceptionHandler();
+        app.MapProxy();
+        await app.StartAsync(Cancellation);
+        var baseUrl = await Assert.That(app.Urls).HasSingleItem();
+        var options = app.Services.GetRequiredService<ProxyOptions>();
+        options.BaseUrl = baseUrl;
+        await Assert.That(options.RunIds).IsEmpty();
+
+        using var client = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        using var versions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
+        var listed = versions.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
+        const string forkVersion = "1.3.67-pr.755.run.100.attempt.1.artifact.2";
+        const string sameVersion = "1.3.67-pr.756.run.101.attempt.1.artifact.2";
+        const string explicitVersion = "1.3.67-pr.757.run.102.attempt.1.artifact.2";
+        await Assert.That(listed.Length).IsEqualTo(3);
+        await Assert.That(listed).Contains(forkVersion);
+        await Assert.That(listed).Contains(sameVersion);
+        await Assert.That(listed).Contains(explicitVersion);
+
+        var package = await client.GetByteArrayAsync(
+            $"/flat/velopack/{forkVersion}/velopack.{forkVersion}.nupkg", Cancellation);
+        using var reader = new PackageArchiveReader(new MemoryStream(package));
+        await Assert.That(reader.GetIdentity().Id).IsEqualTo("Velopack");
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(forkVersion);
+
+        _github.OpenPullRequests = _github.OpenPullRequests.Where(x => x.Number != 755).ToArray();
+        var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
+        memoryCache.Compact(1);
+        using var afterClose = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
+        var remaining = afterClose.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
+        await Assert.That(remaining.Length).IsEqualTo(2);
+        await Assert.That(remaining).Contains(sameVersion);
+        await Assert.That(remaining).Contains(explicitVersion);
+        await app.StopAsync(Cancellation);
+    }
+
+    [Test]
+    public async Task HeadMatchingUsesRepositoryAndBranchWithoutGuessingAmbiguousPullRequests()
+    {
+        _options.PullRequests = [];
+        _github.OpenPullRequests = [
+            new(755, new("shared", "feature", new("alice/widgets"))),
+            new(756, new("shared", "feature", new("bob/widgets"))),
+            new(757, new("shared", "duplicate", new("team/widgets"))),
+            new(758, new("shared", "duplicate", new("team/widgets"))),
+            new(759, new("unique", "topic", new("team/widgets"))),
+            new(760, new("wrong-repository", "topic", new("correct/widgets"))),
+            new(761, new("wrong-branch", "feature", new("correct/widgets")))
+        ];
+        _github.Runs = [
+            new(101, 1, "SHARED", "completed", "success", "pull_request", [], "feature", new("ALICE/Widgets")),
+            new(102, 1, "shared", "completed", "success", "pull_request", [], "feature", new("bob/widgets")),
+            new(103, 1, "shared", "completed", "success", "pull_request", [], "duplicate", new("team/widgets")),
+            new(104, 1, "shared", "completed", "success", "pull_request", []),
+            new(105, 1, "unique", "completed", "success", "pull_request", []),
+            new(106, 1, "wrong-repository", "completed", "success", "pull_request", [], "topic", new("other/widgets")),
+            new(107, 1, "wrong-branch", "completed", "success", "pull_request", [], "Feature", new("correct/widgets")),
+            new(108, 1, "unique", "completed", "success", "pull_request", [new(999)], "topic", new("team/widgets")),
+            new(109, 1, "unique", "completed", "success", "push", [], "topic", new("team/widgets")),
+            new(110, 1, "unique", "completed", "failure", "pull_request", [], "topic", new("team/widgets"))
+        ];
+
+        var runs = await CreateCatalog().GetRunArtifactsAsync(Cancellation);
+        await Assert.That(runs.Select(x => $"{x.RunId}:{x.PullRequest}").ToArray())
+            .IsEquivalentTo(new[] { "101:755", "102:756", "105:759" }, CollectionOrdering.Matching);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(3);
+    }
+
+    [Test]
+    [Arguments("failure", false)]
+    [Arguments("success", true)]
+    public async Task PinnedForkRunRequiresSuccessfulUnexpiredArtifacts(string conclusion, bool expired)
+    {
+        _options.PullRequests = [999];
+        _options.RunIds = [100];
+        _github.OpenPullRequests = [new(755, new("fork-sha", "feature", new("alice/widgets")))];
+        _github.Runs = [new(100, 1, "fork-sha", "completed", conclusion, "pull_request", [], "feature", new("alice/widgets"))];
+        _github.Expired = expired;
+        var catalog = CreateCatalog();
+        await Assert.That(async () => await catalog.GetRunArtifactsAsync(Cancellation)).ThrowsExactly<InvalidDataException>();
+
+        _github.Expired = false;
+        _github.Runs[0] = _github.Runs[0] with { Conclusion = "success" };
+        var run = await Assert.That(await catalog.GetRunArtifactsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(run.RunId).IsEqualTo(100);
+        await Assert.That(run.PullRequest).IsEqualTo(755);
+    }
+
+    [Test]
     public async Task NoOpenPullRequestsMeansNoRunOrArtifactQueries()
     {
         _github.OpenPullRequests = [];

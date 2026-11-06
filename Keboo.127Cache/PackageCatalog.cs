@@ -164,13 +164,23 @@ public sealed class PackageCatalog
         try
         {
             if (_memoryCache.TryGetValue(_cacheKey, out cached) && cached is not null) return cached;
-            var openPullRequests = (await _github.GetOpenPullRequestsAsync(cancellationToken)).Select(x => x.Number).ToHashSet();
+            var pullRequests = await _github.GetOpenPullRequestsAsync(cancellationToken);
+            var openPullRequests = pullRequests.Select(x => x.Number).ToHashSet();
+            var openByHeadSha = pullRequests
+                .Where(x => !string.IsNullOrWhiteSpace(x.Head?.Sha))
+                .GroupBy(x => x.Head!.Sha!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
             var discovered = openPullRequests.Count == 0 ? [] : await _github.GetRunsAsync(cancellationToken);
-            var eligibleRuns = discovered
-                .Where(x => x.Status == "completed" && x.Conclusion == "success" && x.Event == "pull_request")
-                .SelectMany(run => run.PullRequests.Where(pr => openPullRequests.Contains(pr.Number))
-                    .Where(pr => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(pr.Number) || _options.RunIds.Contains(run.Id))
-                    .Select(pr => (Run: run, PullRequest: pr.Number)))
+            var associatedRuns = discovered
+                .Where(run => IsSuccessfulPullRequestRun(run) || _options.RunIds.Contains(run.Id))
+                .SelectMany(run => GetRunPullRequests(run, openByHeadSha)
+                    .Where(openPullRequests.Contains)
+                    .Select(pr => (Run: run, PullRequest: pr)))
+                .ToArray();
+            var eligibleRuns = associatedRuns
+                .Where(x => IsSuccessfulPullRequestRun(x.Run))
+                .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
+                    || _options.RunIds.Contains(x.Run.Id))
                 .ToArray();
             var runs = eligibleRuns.GroupBy(x => x.PullRequest)
                 .SelectMany(g => g.OrderByDescending(x => x.Run.Id).ThenByDescending(x => x.Run.Attempt).Take(1)
@@ -211,7 +221,7 @@ public sealed class PackageCatalog
             }
             foreach (var id in _options.RunIds)
             {
-                if (discovered.Any(x => x.Id == id && x.PullRequests.Any(pr => openPullRequests.Contains(pr.Number)))
+                if (associatedRuns.Any(x => x.Run.Id == id)
                     && !next.Any(x => x.RunId == id))
                     throw new InvalidDataException($"Run {id} is not an available successful build of an open pull request.");
             }
@@ -239,6 +249,30 @@ public sealed class PackageCatalog
             _gate.Release();
         }
     }
+
+    private static bool IsSuccessfulPullRequestRun(WorkflowRun run) =>
+        run.Status == "completed" && run.Conclusion == "success" && run.Event == "pull_request";
+
+    private int[] GetRunPullRequests(WorkflowRun run, IReadOnlyDictionary<string, PullRequestInfo[]> openByHeadSha)
+    {
+        if (run.PullRequests is { Length: > 0 })
+            return run.PullRequests.Select(x => x.Number).ToArray();
+        if (string.IsNullOrWhiteSpace(run.HeadSha) || !openByHeadSha.TryGetValue(run.HeadSha, out var candidates))
+            return [];
+
+        var matches = candidates
+            .Where(pr => MatchesWhenKnown(run.HeadRepository?.FullName, pr.Head?.Repository?.FullName,
+                StringComparison.OrdinalIgnoreCase))
+            .Where(pr => MatchesWhenKnown(run.HeadBranch, pr.Head?.Branch, StringComparison.Ordinal))
+            .Select(pr => pr.Number).Distinct().Take(2).ToArray();
+        if (matches.Length > 1)
+            _logger.LogWarning("Skipping run {RunId}: its head matches multiple open pull requests.", run.Id);
+        return matches.Length == 1 ? matches : [];
+    }
+
+    private static bool MatchesWhenKnown(string? first, string? second, StringComparison comparison) =>
+        string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second)
+            || string.Equals(first, second, comparison);
 
     private void ValidateCachedArtifacts(RunArtifacts run)
     {
