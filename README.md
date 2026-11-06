@@ -17,7 +17,7 @@ and artifact metadata, then caches that metadata locally.
 
 ## Install and run
 
-Install the published global tool:
+Once a version is published, install the global tool:
 
 ```powershell
 dotnet tool install --global Keboo.127Cache
@@ -146,6 +146,8 @@ the feed on the next discovery refresh.
 dotnet build --configuration Release
 dotnet test --configuration Release --no-build
 dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet
+& (Join-Path 'scripts' 'Test-PackageMetadata.ps1') -PackageDirectory NuGet
+& (Join-Path 'scripts' 'Test-NuGetPushOutput.ps1') -PackageDirectory NuGet
 $package = Get-ChildItem -Path NuGet -Filter '*.nupkg' -File
 $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
 & (Join-Path 'scripts' 'Test-PackedTool.ps1') -PackageDirectory NuGet -ExpectedSha256 $sha256
@@ -172,21 +174,41 @@ Linux tests the entire solution with coverage; each test module gets its own
 report, its original inputs, and their paths are included in the `CodeCoverage`
 artifact and pull-request summary. CI also adds failing and passing test
 projects to a copy of the solution to verify discovery, and mutates a valid
-package to verify that the smoke test rejects the wrong artifact.
+package to verify that the smoke test rejects the wrong artifact. The package
+job and each OS check the actual nuspec, README, license, icon, version and tool
+contents, and mutate copies of the package to test those checks. Text
+comparisons accept equivalent LF and CRLF line endings. The package job also
+tests future push outcome reporting with a local `dotnet` stub: no login,
+network push, or publishing credential is used.
 
-## Release safety
+## Release procedure and safety
 
 Publishing is paused: the `deploy-nuget` job in
-`.github/workflows/build-and-deploy.yml` has an unconditional false condition.
-For this workflow revision, neither pushes to `main` nor manual dispatches can
-log in to NuGet or publish, regardless of credentials. CI still restores, builds,
-tests, packs, and uploads the `NuGet` and coverage artifacts.
+`.github/workflows/build-and-deploy.yml` is guarded by `if: ${{ false }}`.
+Neither pushes to `main` nor manual dispatches can log in to NuGet or publish
+with this workflow revision. PRs and pushes still build, test and upload the
+canonical `NuGet` artifact; a green build or merged version bump is **not** a
+published release while the guard is in place.
 
-Only after separate owner authorization to publish, submit a reviewed change to
-restore the original non-PR condition (`github.event_name != 'pull_request'`) or
-a narrower authorized condition. Restoring the original condition permits
-publishing on the push to `main` that merges the change, and on manual dispatches
-from any branch. Confirm the package, version, and trigger scope before merging.
-The guard applies to this workflow revision: do not rerun older, unguarded
-workflow runs or dispatch an older, unguarded ref. Release work in #27 remains
-open.
+The package version has one source of truth: `<Version>` in
+`Keboo.127Cache/Keboo.127Cache.csproj`. To prepare a release, bump that version
+in a PR and check its package artifact and the Windows, Linux and macOS results.
+No tag is needed to choose the version.
+
+The intended push-to-publish procedure requires **separate owner authorization**
+and a reviewed change to the hard-false guard first. The authorized condition
+must limit publishing to pushes to `main`, never PRs or manual dispatches. That
+reviewed change must also update the hard-false assertions in the workflow
+contract and offline push test; otherwise the package job will correctly fail.
+Once that change is authorized and enabled, merging a version bump to `main` submits
+the canonical, matrix-tested package to NuGet using `--skip-duplicate`: an
+existing version is skipped, and a new version is accepted for publication.
+Confirm the package, version, Trusted Publishing setup and trigger scope before
+enabling the guard; merging that change can itself trigger a publish. The push
+step reports a new package or a duplicate, and fails rather than guessing if
+NuGet's output is ambiguous.
+
+The current workflow does not create Git tags or GitHub Releases. Do not rerun
+older, unguarded workflow runs or dispatch an older, unguarded ref: the guard
+applies to this workflow revision only. The push-to-publish criterion in #27
+remains incomplete until publication is separately authorized and verified.

@@ -45,6 +45,14 @@ jobs:
       - name: Pack canonical tool
         run: dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet
 
+      - name: Test package metadata
+        run: |
+          & (Join-Path 'scripts' 'Test-PackageMetadata.ps1') -PackageDirectory 'NuGet'
+
+      - name: Test publish outcome reporting offline
+        run: |
+          & (Join-Path 'scripts' 'Test-NuGetPushOutput.ps1') -PackageDirectory 'NuGet'
+
       - name: Fingerprint canonical package
         id: fingerprint
         run: |
@@ -162,6 +170,12 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
 
+      - name: Test downloaded package metadata
+        env:
+          EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          & (Join-Path 'scripts' 'Test-PackageMetadata.ps1') -PackageDirectory 'NuGet' -ExpectedSha256 $env:EXPECTED_PACKAGE_SHA256
+
       - name: Test packed tool installation and server
         env:
           EXPECTED_PACKAGE_SHA256: ${{ needs.package.outputs.sha256 }}
@@ -197,7 +211,7 @@ jobs:
 
   deploy-nuget:
     # Publishing is paused until the owner separately authorizes it.
-    # See "Release safety" in README.md before restoring the original condition.
+    # See "Release procedure and safety" in README.md before changing this guard.
     if: ${{ false }}
     runs-on: ubuntu-latest
     needs: [package, build]
@@ -208,6 +222,15 @@ jobs:
       id-token: write
     
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET Core
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
       - name: Download canonical NuGet artifact
         uses: actions/download-artifact@v8
         with:
@@ -259,7 +282,27 @@ jobs:
           user: ${{ secrets.NUGET_USER }}  # Your nuget.org username (profile name), NOT email
 
       - name: Push NuGet (Trusted Publishing)
-        run: dotnet nuget push ${{ github.workspace }}/*nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        env:
+          NUGET_PUSH_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Filter '*.nupkg' -File)
+          if ($packages.Count -ne 1 -or $packages[0].Name -notlike 'Keboo.127Cache.*.nupkg') {
+            throw 'Expected exactly one Keboo.127Cache package to publish.'
+          }
+          $lines = @(& dotnet nuget push $packages[0].FullName --api-key $env:NUGET_PUSH_API_KEY `
+            --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols --force-english-output 2>&1)
+          $exitCode = $LASTEXITCODE
+          $lines | ForEach-Object { Write-Host $_ }
+          if ($exitCode -ne 0) { throw "NuGet push failed with exit code $exitCode." }
+          $published = @($lines | Where-Object { "$_" -match '^\s*Your package was pushed\.\s*$' }).Count
+          $duplicate = @($lines | Where-Object { "$_" -match "^\s*Package '.+' already exists at feed '.+'\.\s*$" }).Count
+          if ($published -eq 1 -and $duplicate -eq 0) {
+            Write-Host "NUGET_PUBLISH_OUTCOME=published: NuGet accepted $($packages[0].Name)."
+          } elseif ($published -eq 0 -and $duplicate -eq 1) {
+            Write-Host "NUGET_PUBLISH_OUTCOME=duplicate: $($packages[0].Name) already exists; no package was published."
+          } else {
+            throw 'NuGet push returned success but the publication outcome was ambiguous; inspect the preceding output.'
+          }
 
       # ====================================================================================
       # OPTION 2: Traditional API Key (Legacy Method)

@@ -78,6 +78,20 @@ try {
         $env:EXPECTED_PACKAGE_SHA256 = $originalExpected
     }
 
+    $metadataRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot 'Test-PackageMetadata.ps1') -PackageDirectory $root -ExpectedSha256 $ExpectedSha256
+    } catch {
+        $message = $_.Exception.Message
+        if ($message -notlike '*Package metadata SHA-256 mismatch*' -or
+            $message -notlike "*$ExpectedSha256*" -or $message -notlike "*$mutatedHash*") {
+            throw
+        }
+        $metadataRejected = $true
+    }
+    if (!$metadataRejected) { throw 'The metadata test accepted a different package with the canonical SHA-256.' }
+    Write-Host 'PASS: the metadata test rejects the mutated package before inspecting it.'
+
     $rejected = $false
     try {
         & (Join-Path $PSScriptRoot 'Test-PackedTool.ps1') -PackageDirectory $root -ExpectedSha256 $ExpectedSha256
