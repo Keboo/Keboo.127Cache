@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,6 +11,7 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
 {
     private readonly Dictionary<long, (Artifact Version, Artifact Packages)> _artifacts = [];
     private readonly Dictionary<long, string> _files = [];
+    private readonly ConcurrentQueue<long> _artifactQueries = new();
     private int _discoveryCalls;
     private int _downloadCalls;
 
@@ -23,6 +25,7 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
     public TaskCompletionSource? DiscoveryBlock { get; set; }
     public int DiscoveryCalls => Volatile.Read(ref _discoveryCalls);
     public int DownloadCalls => Volatile.Read(ref _downloadCalls);
+    public long[] ArtifactQueries => _artifactQueries.ToArray();
 
     public WorkflowRun AddBuild(long runId, int pullRequest, params string[] packageIds)
     {
@@ -56,6 +59,15 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
     public Artifact PackagesArtifact(long runId) => _artifacts[runId].Packages;
     public string ArtifactFile(long artifactId) => _files[artifactId];
 
+    public void AddArtifactMetadata(long runId, Artifact version, Artifact packages) =>
+        _artifacts[runId] = (version, packages);
+
+    public void UseDigestlessArtifacts(long runId)
+    {
+        var (version, packages) = _artifacts[runId];
+        _artifacts[runId] = (version with { Digest = null }, packages with { Digest = null });
+    }
+
     public async Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _discoveryCalls);
@@ -69,6 +81,7 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
 
     public Task<IReadOnlyList<Artifact>> GetArtifactsAsync(long runId, CancellationToken cancellationToken)
     {
+        _artifactQueries.Enqueue(runId);
         if (FailArtifactsForRun == runId) throw new IOException("Synthetic artifact discovery failure.");
         var (version, packages) = _artifacts[runId];
         var expired = ExpiredRuns.Contains(runId);

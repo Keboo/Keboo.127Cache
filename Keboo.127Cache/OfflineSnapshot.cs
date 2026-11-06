@@ -73,6 +73,7 @@ public sealed record CatalogHealth(
     string Repository,
     string? Error,
     DateTimeOffset? LastSuccessfulRefreshUtc,
+    string Membership,
     int SnapshotBuilds,
     int? AvailableCachedBuilds,
     int? UnavailableBuilds,

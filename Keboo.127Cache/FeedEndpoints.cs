@@ -13,13 +13,18 @@ public static class FeedEndpoints
         app.MapMethods("/flat/{id}/index.json", ["GET", "HEAD"], async (string id, PackageCatalog catalog, CancellationToken ct) =>
         {
             var builds = BuildsFor(await catalog.GetPackagesAsync(ct), id);
+            catalog.EnsurePackageIndexComplete(id, builds.Length > 0);
             return builds.Length == 0 ? Results.NotFound() : Results.Json(new { versions = builds.Select(x => x.Version) });
         });
         app.MapMethods("/flat/{id}/{version}/{file}", ["GET", "HEAD"],
             async (string id, string version, string file, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
             {
                 var build = await FindAsync(catalog, id, version, ct);
-                if (build is null) return Results.NotFound();
+                if (build is null)
+                {
+                    catalog.EnsureLookupComplete();
+                    return Results.NotFound();
+                }
                 var packageFile = $"{id}.{build.Version}.nupkg";
                 var manifestFile = $"{id}.nuspec";
                 if (!file.Equals(packageFile, StringComparison.OrdinalIgnoreCase)
@@ -33,6 +38,7 @@ public static class FeedEndpoints
             async (string id, ProxyOptions options, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
             {
                 var builds = BuildsFor(await catalog.GetPackagesAsync(ct), id);
+                catalog.EnsurePackageIndexComplete(id, builds.Length > 0);
                 if (builds.Length == 0) return Results.NotFound();
                 var leaves = new List<object>();
                 foreach (var build in builds) leaves.Add(await LeafAsync(options, cache, id, build, ct));
@@ -50,7 +56,11 @@ public static class FeedEndpoints
             async (string id, string version, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
             {
                 var build = await FindAsync(catalog, id, version, ct);
-                if (build is null) return Results.NotFound();
+                if (build is null)
+                {
+                    catalog.EnsureLookupComplete();
+                    return Results.NotFound();
+                }
                 id = id.ToLowerInvariant();
                 return Results.Json(new Dictionary<string, object>
                 {
@@ -64,6 +74,7 @@ public static class FeedEndpoints
             PackageCache cache, CancellationToken ct) =>
         {
             var packages = IncludesBuilds(request) ? await catalog.GetPackagesAsync(ct) : [];
+            catalog.EnsureAggregateComplete();
             var query = request.Query["q"].ToString();
             var ids = PackageIds(packages).Where(x => x.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
             var types = new Dictionary<string, string>();
@@ -99,6 +110,7 @@ public static class FeedEndpoints
             PackageCache cache, CancellationToken ct) =>
         {
             var packages = IncludesBuilds(request) ? await catalog.GetPackagesAsync(ct) : [];
+            catalog.EnsureAggregateComplete();
             var id = request.Query["id"].ToString();
             var query = request.Query["q"].ToString();
             IEnumerable<string> values = id.Length > 0 ? BuildsFor(packages, id).Select(x => x.Version)

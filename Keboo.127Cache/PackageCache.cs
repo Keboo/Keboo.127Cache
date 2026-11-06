@@ -7,7 +7,10 @@ using NuGet.Versioning;
 namespace Keboo._127Cache;
 
 public sealed record CachedPackage(string Id, string OriginalVersion, string Version);
-internal sealed record CachedPackageAvailability(CachedPackage[] Packages, int MissingPackages, bool HasInventory);
+internal sealed record CachedPackageAvailability(CachedPackage[] Packages, string[] MissingPackageIds, bool HasInventory)
+{
+    public int MissingPackages => MissingPackageIds.Length;
+}
 
 public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts)
 {
@@ -15,6 +18,13 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts)
 
     private string DirectoryFor(BuildEntry build) => Path.Combine(options.CacheDirectory, "packages", "discovered",
         $"{build.PullRequest}.{build.RunId}.{build.Attempt}.{build.Packages.Id}");
+
+    internal bool MightHaveCachedContent(RunArtifacts run)
+    {
+        var directory = Path.Combine(options.CacheDirectory, "packages", "discovered",
+            $"{run.PullRequest}.{run.RunId}.{run.Attempt}.{run.Packages.Id}");
+        return File.Exists(Path.Combine(directory, "packages.json")) || artifacts.Contains(run.Packages);
+    }
 
     public async Task<string> GetAsync(string id, BuildEntry build, CancellationToken cancellationToken)
     {
@@ -72,6 +82,8 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts)
                     if (cached.Any(package => !File.Exists(PackagePath(directory, package))))
                         throw new InvalidDataException($"Cached packages for artifact {build.Packages.Id} are incomplete.");
                 }
+                if (cached.Any(package => !IsReadablePackage(PackagePath(directory, package), package)))
+                    throw new InvalidDataException($"Cached packages for artifact {build.Packages.Id} are invalid.");
                 return cached;
             }
             var staging = Path.Combine(options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
@@ -112,13 +124,13 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts)
                 }
                 catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
                 {
-                    return new([], 0, false);
+                    return new([], [], false);
                 }
-                if (!ValidInventory(inventory, build)) return new([], 0, false);
+                if (!ValidInventory(inventory, build)) return new([], [], false);
             }
             else
             {
-                if (!artifacts.Contains(build.Packages)) return new([], 0, false);
+                if (!artifacts.Contains(build.Packages)) return new([], [], false);
                 attemptedRepair = true;
                 try
                 {
@@ -126,9 +138,9 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts)
                 }
                 catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
                 {
-                    return new([], 0, false);
+                    return new([], [], false);
                 }
-                if (!ValidInventory(inventory, build)) return new([], 0, false);
+                if (!ValidInventory(inventory, build)) return new([], [], false);
             }
 
             var available = AvailablePackages(directory, inventory!);
@@ -144,7 +156,9 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts)
                     // Preserve the existing files and use only packages that are still readable.
                 }
             }
-            return new(available, inventory.Length - available.Length, true);
+            var availableIds = available.Select(package => package.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return new(available, inventory.Where(package => !availableIds.Contains(package.Id))
+                .Select(package => package.Id).ToArray(), true);
         }
         finally
         {

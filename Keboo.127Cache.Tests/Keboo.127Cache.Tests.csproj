@@ -20,6 +20,7 @@
     <Compile Remove="FakeGh\**\*.cs" />
     <ProjectReference Include="..\Keboo.127Cache\Keboo.127Cache.csproj" />
     <ProjectReference Include="FakeGh\FakeGh.csproj" ReferenceOutputAssembly="false" />
+    <None Update="Fixtures\ReleasedMain-7625362.zip" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

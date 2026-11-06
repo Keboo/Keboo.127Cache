@@ -242,6 +242,7 @@ public sealed class ProxyTests : IDisposable
         var cachedPackage = await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         _github.OpenPullRequests = [new(756)];
         _memoryCache.Compact(1);
+        await RefreshCatalogAsync(catalog);
         Assert.Empty(await catalog.GetBuildsAsync(Cancellation));
         Assert.Empty(await CreateCatalog().GetBuildsAsync(Cancellation));
         var saved = JsonSerializer.Deserialize<CatalogFile>(File.ReadAllText(Path.Combine(_options.CacheDirectory, "catalog.json")),
@@ -253,6 +254,7 @@ public sealed class ProxyTests : IDisposable
 
         _github.OpenPullRequests = [new(755), new(756)];
         _memoryCache.Compact(1);
+        await RefreshCatalogAsync(catalog);
         Assert.Equal(build.Version, Assert.Single(await catalog.GetBuildsAsync(Cancellation)).Version);
         Assert.Equal(1, _github.ArtifactQueries);
         Assert.Equal(1, _github.VersionDownloads);
@@ -426,6 +428,7 @@ public sealed class ProxyTests : IDisposable
         Assert.Equal(["Velopack", "Velopack.Build"], await autocomplete.IdStartsWith("Velo", true, NullLogger.Instance, Cancellation));
         app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
         Assert.IsType<MemoryCache>(app.Services.GetRequiredService<IMemoryCache>()).Compact(1);
+        await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
         using var allLibraryVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
         Assert.Equal(2, allLibraryVersions.RootElement.GetProperty("versions").GetArrayLength());
         using var allPluginVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/example.plugin/index.json", Cancellation));
@@ -438,6 +441,7 @@ public sealed class ProxyTests : IDisposable
         Assert.Single(pluginAutocomplete.RootElement.GetProperty("data").EnumerateArray());
         _github.OpenPullRequests = [];
         Assert.IsType<MemoryCache>(app.Services.GetRequiredService<IMemoryCache>()).Compact(1);
+        await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/flat/velopack/index.json", Cancellation)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound,
             (await client.GetAsync($"/flat/velopack/{version}/velopack.{version}.nupkg", Cancellation)).StatusCode);
@@ -457,6 +461,18 @@ public sealed class ProxyTests : IDisposable
     {
         _memoryCache.Dispose();
         if (Directory.Exists(_directory)) Directory.Delete(_directory, recursive: true);
+    }
+
+    private static async Task RefreshCatalogAsync(PackageCatalog catalog)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            await catalog.GetRunArtifactsAsync(Cancellation);
+            if (catalog.GetHealth().Status == "ok") return;
+            await Task.Delay(20, Cancellation);
+        }
+        throw new TimeoutException("The catalog did not finish refreshing.");
     }
 
 }

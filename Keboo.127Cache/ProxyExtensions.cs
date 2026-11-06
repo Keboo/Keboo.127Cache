@@ -35,7 +35,7 @@ public static class ProxyExtensions
 
             var catalog = context.RequestServices.GetRequiredService<PackageCatalog>();
             using var scope = catalog.BeginFeedRequest();
-            var availability = await catalog.EnsureFeedAvailableAsync(context.RequestAborted);
+            await catalog.EnsureFeedAvailableAsync(context.RequestAborted);
             var getAvailability = catalog.CaptureRequestAvailability();
             context.Response.OnStarting(() =>
             {
@@ -44,19 +44,11 @@ public static class ProxyExtensions
                 {
                     context.Response.Headers.CacheControl = "no-store";
                     context.Response.Headers["X-127Cache-Status"] = current.IsPartial ? "degraded-partial" : "degraded";
+                    context.Response.Headers["X-127Cache-Membership"] = current.Membership;
                     context.Response.Headers.Warning = "110 - \"Response is stale\"";
-                    if (current.IsPartial && (context.Response.StatusCode == StatusCodes.Status404NotFound
-                        || (context.Response.StatusCode < 400 && IsEnumerationPath(context.Request.Path))))
-                    {
-                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                        context.Response.Headers.RetryAfter = "5";
-                    }
                 }
                 return Task.CompletedTask;
             });
-            if (availability.IsPartial && IsEnumerationPath(context.Request.Path))
-                throw new DiscoveryUnavailableException(
-                    "The offline snapshot is incomplete. Search, autocomplete, and build enumeration cannot report complete results.");
             try
             {
                 await next(context);
@@ -69,7 +61,12 @@ public static class ProxyExtensions
         });
 
         app.MapGet("/health", (PackageCatalog catalog) => Results.Ok(catalog.GetHealth()));
-        app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) => Results.Ok(await catalog.GetBuildsAsync(ct)));
+        app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) =>
+        {
+            var builds = await catalog.GetBuildsAsync(ct);
+            catalog.EnsureAggregateComplete();
+            return Results.Ok(builds);
+        });
         app.MapMethods("/v3/index.json", ["GET", "HEAD"], () => Results.Json(new
         {
             version = "3.0.0",
@@ -90,6 +87,4 @@ public static class ProxyExtensions
         || path.StartsWithSegments("/registration") || path.StartsWithSegments("/query")
         || path.StartsWithSegments("/autocomplete") || path.StartsWithSegments("/builds");
 
-    private static bool IsEnumerationPath(PathString path) =>
-        path.StartsWithSegments("/query") || path.StartsWithSegments("/autocomplete") || path.StartsWithSegments("/builds");
 }
