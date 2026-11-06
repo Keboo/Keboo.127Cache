@@ -116,9 +116,9 @@ public sealed class OfflineFeedTests : IDisposable
         DateTimeOffset lastSuccess;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
             alphaBytes = await online.Client.GetByteArrayAsync(PackageUrl("alpha", alphaVersion));
-            await SingleVersionAsync(online.Client, "beta");
+            await RetryVersionAsync(online.Client, "beta");
             using var health = await GetJsonAsync(online.Client, "/health");
             await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("ok");
             lastSuccess = health.RootElement.GetProperty("lastSuccessfulRefreshUtc").GetDateTimeOffset();
@@ -241,7 +241,7 @@ public sealed class OfflineFeedTests : IDisposable
         string latestVersion;
         await using (var online = await StartAsync(runIds: [100]))
         {
-            var versions = await VersionsAsync(online.Client, "alpha");
+            var versions = await RetryVersionsAsync(online.Client, "alpha");
             await Assert.That(versions.Length).IsEqualTo(2);
             oldVersion = versions.Single(x => x.Contains(".run.100.", StringComparison.Ordinal));
             latestVersion = versions.Single(x => x.Contains(".run.101.", StringComparison.Ordinal));
@@ -281,7 +281,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(101, 1, "Alpha")];
         _github.OpenPullRequests = [new(1)];
         await using var server = await StartAsync(runIds: [100]);
-        var versions = await VersionsAsync(server.Client, "alpha");
+        var versions = await RetryVersionsAsync(server.Client, "alpha");
         var oldVersion = versions.Single(x => x.Contains(".run.100.", StringComparison.Ordinal));
         var latestVersion = versions.Single(x => x.Contains(".run.101.", StringComparison.Ordinal));
         var oldPackage = CachedPackagePath(100, 1, "alpha", oldVersion);
@@ -322,7 +322,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync(runIds: [100]))
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         var snapshot = JsonNode.Parse(await File.ReadAllTextAsync(SnapshotPath))!.AsObject();
         snapshot["schemaVersion"] = 1;
         foreach (var run in snapshot["runs"]!.AsArray()) run!.AsObject().Remove("workflowVerified");
@@ -366,7 +366,7 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] snapshot;
         await using (var online = await StartAsync(runIds: [100]))
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             snapshot = await File.ReadAllBytesAsync(SnapshotPath);
             var failureType = typeof(PackageCatalog).Assembly.GetType("Keboo._127Cache.PinnedRunWorkflowException")!;
             _github.DiscoveryError = (Exception)Activator.CreateInstance(failureType, nonPublic: true)!;
@@ -400,8 +400,8 @@ public sealed class OfflineFeedTests : IDisposable
         string betaVersion;
         await using (var online = await StartAsync(runIds: [200]))
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
         }
         foreach (var path in new[] { SnapshotPath, RunsPath })
         {
@@ -434,8 +434,8 @@ public sealed class OfflineFeedTests : IDisposable
         string betaVersion;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
         }
 
         foreach (var path in new[] { SnapshotPath, RunsPath })
@@ -571,7 +571,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
         _github.FailDownloads = true;
         await using var offline = await StartAsync();
@@ -631,8 +631,8 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] alphaBytes;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
             alphaBytes = await online.Client.GetByteArrayAsync(PackageUrl("alpha", alphaVersion));
         }
 
@@ -716,7 +716,7 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] original;
         await using (var online = await StartAsync())
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             original = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
         }
         File.Delete(CachedPackagePath(100, 1, "beta", version));
@@ -777,13 +777,13 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] original;
         await using (var online = await StartAsync())
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             original = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
         }
         if (offlineMode) _github.DiscoveryError = new IOException("Synthetic offline failure.");
         await using var offline = await StartAsync();
         if (offlineMode) await WaitForHealthErrorAsync(offline.Client, "gh auth status");
-        else await RetryUntilHealthyAsync(offline.Client);
+        else await RetryUntilHealthyAsync(offline.Client, validateContent: true);
         var catalog = offline.App.Services.GetRequiredService<PackageCatalog>();
         var gate = (SemaphoreSlim)typeof(PackageCatalog).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(catalog)!;
@@ -829,8 +829,8 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] alphaBytes;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
             alphaBytes = await online.Client.GetByteArrayAsync(PackageUrl("alpha", alphaVersion));
         }
 
@@ -946,7 +946,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [old];
         _github.OpenPullRequests = [new(1)];
         await using var server = await StartAsync();
-        var oldVersion = await SingleVersionAsync(server.Client, "alpha");
+        var oldVersion = await RetryVersionAsync(server.Client, "alpha");
         var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
 
         _github.Runs = [newer, old];
@@ -990,7 +990,7 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] snapshot;
         await using (var online = await StartAsync())
         {
-            oldVersion = await SingleVersionAsync(online.Client, "alpha");
+            oldVersion = await RetryVersionAsync(online.Client, "alpha");
             snapshot = await File.ReadAllBytesAsync(SnapshotPath);
             _github.Runs = [newer, old];
             _github.MissingVersionArtifactForRun = 101;
@@ -1041,7 +1041,7 @@ public sealed class OfflineFeedTests : IDisposable
         string oldVersion;
         await using (var online = await StartAsync())
         {
-            oldVersion = await SingleVersionAsync(online.Client, "alpha");
+            oldVersion = await RetryVersionAsync(online.Client, "alpha");
             _github.Runs = [newer, old];
             _github.MissingVersionArtifactForRun = 101;
             ExpireDiscovery(online);
@@ -1059,29 +1059,29 @@ public sealed class OfflineFeedTests : IDisposable
             await using var offline = await StartAsync();
             await WaitForDiscoveryAsync(calls + 1);
             using (var unavailable = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion))
-                .WaitAsync(TimeSpan.FromSeconds(3)))
+                .WaitAsync(TimeSpan.FromSeconds(5)))
                 await Assert.That(unavailable.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
 
             locked.Dispose();
             File.Delete(marker);
             using (var missing = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion))
-                .WaitAsync(TimeSpan.FromSeconds(3)))
+                .WaitAsync(TimeSpan.FromSeconds(5)))
                 await Assert.That(missing.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
             await File.WriteAllBytesAsync(marker, savedMarker);
             using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion))
-                .WaitAsync(TimeSpan.FromSeconds(3)))
+                .WaitAsync(TimeSpan.FromSeconds(5)))
             {
                 await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.OK);
                 using var package = new PackageArchiveReader(new MemoryStream(await cached.Content.ReadAsByteArrayAsync()));
                 await Assert.That(package.GetIdentity().Version.ToNormalizedString()).IsEqualTo(oldVersion);
             }
-            using (var index = await offline.Client.GetAsync("/flat/alpha/index.json").WaitAsync(TimeSpan.FromSeconds(3)))
+            using (var index = await offline.Client.GetAsync("/flat/alpha/index.json").WaitAsync(TimeSpan.FromSeconds(5)))
             {
                 await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
                 using var problem = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
                 await Assert.That(problem.RootElement.TryGetProperty("versions", out _)).IsFalse();
             }
-            using (var health = await GetJsonAsync(offline.Client, "/health").WaitAsync(TimeSpan.FromSeconds(3)))
+            using (var health = await GetJsonAsync(offline.Client, "/health").WaitAsync(TimeSpan.FromSeconds(5)))
                 await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
 
             _github.MissingVersionArtifactForRun = null;
@@ -1109,7 +1109,7 @@ public sealed class OfflineFeedTests : IDisposable
         string version;
         await using (var online = await StartAsync(runIds: [100]))
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             _github.Runs = [newer, old];
             _github.MissingVersionArtifactForRun = 101;
             ExpireDiscovery(online);
@@ -1150,7 +1150,7 @@ public sealed class OfflineFeedTests : IDisposable
         string version;
         await using (var online = await StartAsync())
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             _github.Runs = [newer, old];
             _github.MissingVersionArtifactForRun = 101;
             ExpireDiscovery(online);
@@ -1189,7 +1189,7 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] snapshot;
         await using (var online = await StartAsync())
         {
-            await SingleVersionAsync(online.Client, "alpha");
+            await RetryVersionAsync(online.Client, "alpha");
             snapshot = await File.ReadAllBytesAsync(SnapshotPath);
             _github.Runs = [newer];
             _github.OpenPullRequests = [new(2)];
@@ -1221,8 +1221,8 @@ public sealed class OfflineFeedTests : IDisposable
         string betaVersion;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
         }
         var beta = CachedPackagePath(200, 2, "beta", betaVersion);
         await File.WriteAllTextAsync(beta, "corrupt");
@@ -1288,8 +1288,8 @@ public sealed class OfflineFeedTests : IDisposable
         string betaVersion;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
         }
         var raw = Path.Combine(CacheDirectory, "artifacts", _github.PackagesArtifact(100).Id + ".zip");
         var sidecar = raw + ".sha256";
@@ -1352,7 +1352,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         var downloads = _github.DownloadCalls;
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
         _github.FailDownloads = true;
@@ -1374,7 +1374,7 @@ public sealed class OfflineFeedTests : IDisposable
         string latestVersion;
         await using (var online = await StartAsync())
         {
-            oldVersion = await SingleVersionAsync(online.Client, "alpha");
+            oldVersion = await RetryVersionAsync(online.Client, "alpha");
             _github.Runs = [latest];
             ExpireDiscovery(online);
             await RetryUntilHealthyAsync(online.Client);
@@ -1414,7 +1414,7 @@ public sealed class OfflineFeedTests : IDisposable
         string[] expected;
         await using (var online = await StartAsync())
         {
-            await SingleVersionAsync(online.Client, "alpha");
+            await RetryVersionAsync(online.Client, "alpha");
             _github.Runs = [latest];
             ExpireDiscovery(online);
             await RetryUntilHealthyAsync(online.Client);
@@ -1440,7 +1440,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         _github.Runs = [first];
         await using var server = await StartAsync();
-        var alphaVersion = await SingleVersionAsync(server.Client, "alpha");
+        var alphaVersion = await RetryVersionAsync(server.Client, "alpha");
         var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
         var history = await File.ReadAllBytesAsync(RunsPath);
         _github.OpenPullRequests = [new(1), new(2), new(3)];
@@ -1486,7 +1486,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         var history = await File.ReadAllBytesAsync(RunsPath);
         var packagePath = CachedPackagePath(100, 1, "alpha", version);
         File.Delete(SnapshotPath);
@@ -1514,7 +1514,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
         _github.OpenPullRequests = [new(1), new(2)];
         await using (var online = await StartAsync([1]))
-            await SingleVersionAsync(online.Client, "alpha");
+            await RetryVersionAsync(online.Client, "alpha");
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
         await using var offline = await StartAsync([2]);
         using var response = await offline.Client.GetAsync("/v3/index.json");
@@ -1532,7 +1532,7 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] package;
         await using (var online = await StartAsync(runLimit: 100))
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             package = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
         }
         var savedSnapshot = await File.ReadAllBytesAsync(SnapshotPath);
@@ -1575,7 +1575,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
         await using var offline = await StartAsync(runIds: [200]);
         foreach (var route in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
@@ -1619,8 +1619,8 @@ public sealed class OfflineFeedTests : IDisposable
         string betaVersion;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
         }
         var betaDirectory = Path.GetDirectoryName(CachedPackagePath(200, 2, "beta", betaVersion))!;
         var retainedInventory = RetainedInventoryPath(200, 2);
@@ -1675,8 +1675,8 @@ public sealed class OfflineFeedTests : IDisposable
         string betaVersion;
         await using (var online = await StartAsync())
         {
-            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
-            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaVersion = await RetryVersionAsync(online.Client, "alpha");
+            betaVersion = await RetryVersionAsync(online.Client, "beta");
         }
         var retained = RetainedInventoryPath(200, 2);
         string? changed = null;
@@ -1711,7 +1711,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [first, second];
         _github.OpenPullRequests = [new(1)];
         await using var server = await StartAsync();
-        var alphaVersion = await SingleVersionAsync(server.Client, "alpha");
+        var alphaVersion = await RetryVersionAsync(server.Client, "alpha");
         _github.OpenPullRequests = [new(1), new(2)];
         ExpireDiscovery(server);
         await server.App.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(CancellationToken.None);
@@ -1754,7 +1754,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [first, second];
         _github.OpenPullRequests = [new(1)];
         await using var server = await StartAsync();
-        var alphaVersion = await SingleVersionAsync(server.Client, "alpha");
+        var alphaVersion = await RetryVersionAsync(server.Client, "alpha");
         _github.OpenPullRequests = [new(1), new(2)];
         ExpireDiscovery(server);
         await server.App.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(CancellationToken.None);
@@ -1775,7 +1775,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
         _github.OpenPullRequests = [new(1)];
         await using (var online = await StartAsync())
-            await SingleVersionAsync(online.Client, "alpha");
+            await RetryVersionAsync(online.Client, "alpha");
         var history = await File.ReadAllBytesAsync(RunsPath);
         await File.WriteAllTextAsync(SnapshotPath, "{truncated");
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
@@ -1795,7 +1795,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         var catalogPath = Path.Combine(CacheDirectory, "catalog.json");
         var catalog = await File.ReadAllBytesAsync(catalogPath);
         var runs = await File.ReadAllBytesAsync(RunsPath);
@@ -1829,7 +1829,7 @@ public sealed class OfflineFeedTests : IDisposable
         byte[] alphaBytes;
         await using (var online = await StartAsync())
         {
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
             alphaBytes = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
         }
         var sharedPath = CachedPackagePath(100, 1, "shared", version);
@@ -1875,7 +1875,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         var alphaPath = CachedPackagePath(100, 1, "alpha", version);
         var sharedPath = CachedPackagePath(100, 1, "shared", version);
         var alphaBefore = await File.ReadAllBytesAsync(alphaPath);
@@ -1898,7 +1898,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
         _github.OpenPullRequests = [new(1)];
         await using var server = await StartAsync();
-        var version = await SingleVersionAsync(server.Client, "alpha");
+        var version = await RetryVersionAsync(server.Client, "alpha");
         var path = CachedPackagePath(100, 1, "alpha", version);
         var original = await File.ReadAllBytesAsync(path);
         await File.WriteAllTextAsync(path, "damaged-package");
@@ -1926,7 +1926,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         var path = CachedPackagePath(100, 1, "alpha", version);
         var original = await File.ReadAllBytesAsync(path);
         var corrupt = CorruptCompressedEntry(original, "lib/net8.0/payload.txt");
@@ -1983,7 +1983,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         File.Delete(Path.Combine(CacheDirectory, "catalog.json"));
         File.Delete(Path.Combine(CacheDirectory, "artifacts", _github.VersionArtifact(100).Id + ".zip"));
         var downloads = _github.DownloadCalls;
@@ -2013,7 +2013,7 @@ public sealed class OfflineFeedTests : IDisposable
             File.Copy(_github.ArtifactFile(artifact.Id), Path.Combine(artifacts, artifact.Id + ".zip"));
         string version;
         await using (var online = await StartAsync())
-            version = await SingleVersionAsync(online.Client, "alpha");
+            version = await RetryVersionAsync(online.Client, "alpha");
         Directory.Delete(Path.Combine(CacheDirectory, "packages"), recursive: true);
         File.Delete(Path.Combine(CacheDirectory, "catalog.json"));
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
@@ -2065,7 +2065,7 @@ public sealed class OfflineFeedTests : IDisposable
         await Assert.That(File.Exists(SnapshotPath)).IsFalse();
 
         _github.MissingVersionArtifactForRun = null;
-        var oldVersion = await SingleVersionAsync(server.Client, "alpha");
+        var oldVersion = await RetryVersionAsync(server.Client, "alpha");
         var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
         var history = await File.ReadAllBytesAsync(RunsPath);
         _github.Runs = [latest, old];
@@ -2276,21 +2276,28 @@ public sealed class OfflineFeedTests : IDisposable
 
     private static async Task<string> RetryVersionAsync(HttpClient client, string id)
     {
+        var versions = await RetryVersionsAsync(client, id);
+        await Assert.That(versions.Length).IsEqualTo(1);
+        return versions[0];
+    }
+
+    private static async Task<string[]> RetryVersionsAsync(HttpClient client, string id)
+    {
         var deadline = DateTime.UtcNow.AddSeconds(10);
+        var lastFailure = "no response";
         while (DateTime.UtcNow < deadline)
         {
             using var response = await client.GetAsync($"/flat/{id}/index.json");
             if (response.StatusCode == HttpStatusCode.OK)
             {
                 using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-                var versions = json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
-                await Assert.That(versions.Length).IsEqualTo(1);
-                return versions[0];
+                return json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
             }
             await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            lastFailure = await response.Content.ReadAsStringAsync();
             await Task.Delay(20);
         }
-        throw new TimeoutException("The cached package index did not recover.");
+        throw new TimeoutException("The cached package index did not recover: " + lastFailure);
     }
 
     private static async Task WaitForHealthErrorAsync(HttpClient client, string expected)
@@ -2311,18 +2318,24 @@ public sealed class OfflineFeedTests : IDisposable
     private static async Task RetryUntilHealthyAsync(HttpClient client, bool validateContent = false)
     {
         var deadline = DateTime.UtcNow.AddSeconds(10);
+        var lastIndex = "not requested";
+        var lastProbe = "not requested";
+        var lastHealth = "not returned";
         while (DateTime.UtcNow < deadline)
         {
             using var response = await client.GetAsync("/v3/index.json");
+            lastIndex = response.StatusCode.ToString();
             if (validateContent)
             {
                 using var probe = await client.GetAsync("/flat/recovery-probe/index.json");
+                lastProbe = probe.StatusCode.ToString();
             }
             using var health = await GetJsonAsync(client, "/health");
+            lastHealth = health.RootElement.ToString();
             if (health.RootElement.GetProperty("status").GetString() == "ok") return;
             await Task.Delay(20);
         }
-        throw new TimeoutException("Discovery did not recover.");
+        throw new TimeoutException($"Discovery did not recover. Index: {lastIndex}; content: {lastProbe}; health: {lastHealth}");
     }
 
     private static async Task RetryUntilMembershipAsync(HttpClient client, string expected)

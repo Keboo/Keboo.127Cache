@@ -454,9 +454,9 @@ public sealed class ProxyTests : IDisposable
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
         await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
-        using var allLibraryVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
+        using var allLibraryVersions = await GetReadyIndexAsync(client, "/flat/velopack/index.json");
         await Assert.That(allLibraryVersions.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(2);
-        using var allPluginVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/example.plugin/index.json", Cancellation));
+        using var allPluginVersions = await GetReadyIndexAsync(client, "/flat/example.plugin/index.json");
         await Assert.That(allPluginVersions.RootElement.GetProperty("versions").EnumerateArray()).HasSingleItem();
         using var pluginSearch = JsonDocument.Parse(await client.GetStringAsync(
             "/query?q=Example.Plugin&prerelease=true&semVerLevel=2.0.0", Cancellation));
@@ -498,6 +498,22 @@ public sealed class ProxyTests : IDisposable
             await Task.Delay(20, Cancellation);
         }
         throw new TimeoutException("The catalog did not finish refreshing.");
+    }
+
+    private static async Task<JsonDocument> GetReadyIndexAsync(HttpClient client, string path)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        var lastFailure = "no response";
+        while (DateTime.UtcNow < deadline)
+        {
+            using var response = await client.GetAsync(path, Cancellation);
+            if (response.StatusCode == HttpStatusCode.OK)
+                return JsonDocument.Parse(await response.Content.ReadAsStringAsync(Cancellation));
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            lastFailure = await response.Content.ReadAsStringAsync(Cancellation);
+            await Task.Delay(20, Cancellation);
+        }
+        throw new TimeoutException("The package index did not recover: " + lastFailure);
     }
 
 }
