@@ -619,19 +619,31 @@ public sealed class ArtifactIntegrityTests
     }
 
     [Test]
-    public async Task DisabledUnixFileLockingFailsClosed()
+    public async Task UnixPublicationRemainsLockedWhenDotnetFileLockingIsDisabled()
     {
         if (OperatingSystem.IsWindows()) return;
         var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
         if (childDirectory is not null)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            var index = int.Parse(Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_INDEX")!);
             var github = new FakeGitHub("unlocked");
-            var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github);
-            var result = await CaptureAsync(() => cache.GetAsync(github.Packages, timeout.Token));
-            await File.WriteAllTextAsync(Path.Combine(childDirectory, "result-0"),
-                result.Error is IOException error && error.Message.Contains("Exclusive file locking is unavailable",
-                    StringComparison.Ordinal) ? "locking unavailable" : result.Error?.ToString() ?? "success",
+            var log = new RecordingLogger
+            {
+                OnHash = () => File.WriteAllText(Path.Combine(childDirectory, $"hashed-{index}"), "hashed")
+            };
+            var cache = new ArtifactCache(
+                new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github, log);
+            var pending = CaptureAsync(() => cache.GetAsync(github.Packages, cancellation.Token));
+            if (index == 0)
+            {
+                await WaitForFileAsync(Path.Combine(childDirectory, "cancel-disabled-writer"), timeout.Token);
+                cancellation.Cancel();
+            }
+            var result = await pending;
+            await File.WriteAllTextAsync(Path.Combine(childDirectory, $"result-{index}"),
+                result.Error is OperationCanceledException ? "cancelled" : result.Error?.ToString() ?? "success",
                 timeout.Token);
             return;
         }
@@ -639,24 +651,48 @@ public sealed class ArtifactIntegrityTests
         using var fixture = new Fixture();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         var path = fixture.PathFor(fixture.GitHub.Packages);
-        var child = StartTestChild(nameof(DisabledUnixFileLockingFailsClosed), fixture.Directory, 0,
-            disableFileLocking: true);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var cancelWriter = Path.Combine(fixture.Directory, "cancel-disabled-writer");
+        var children = new List<TestChild>();
         try
         {
-            await child.RequireExitAsync(0, deadline.Token);
-            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token))
-                .IsEqualTo("locking unavailable");
+            var cancelled = StartTestChild(nameof(UnixPublicationRemainsLockedWhenDotnetFileLockingIsDisabled),
+                fixture.Directory, 0, disableFileLocking: true);
+            children.Add(cancelled);
+            await WaitForChildSignalAsync(Path.Combine(fixture.Directory, "hashed-0"), cancelled, deadline.Token);
+            await Task.Delay(150, deadline.Token);
+            await cancelled.EnsureRunningAsync();
             await Assert.That(File.Exists(path)).IsFalse();
             await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+            await File.WriteAllTextAsync(cancelWriter, "cancel", deadline.Token);
+            await cancelled.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token))
+                .IsEqualTo("cancelled");
             await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
 
+            var resumed = StartTestChild(nameof(UnixPublicationRemainsLockedWhenDotnetFileLockingIsDisabled),
+                fixture.Directory, 1, disableFileLocking: true);
+            children.Add(resumed);
+            await WaitForChildSignalAsync(Path.Combine(fixture.Directory, "hashed-1"), resumed, deadline.Token);
+            await Task.Delay(150, deadline.Token);
+            await resumed.EnsureRunningAsync();
+            await Assert.That(File.Exists(path)).IsFalse();
+            await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+            held.Dispose();
+            await resumed.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-1"), deadline.Token))
+                .IsEqualTo("success");
             await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token)).IsEqualTo(path);
             await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
                 .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, deadline.Token)));
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
         }
         finally
         {
-            await FinishChildrenAsync([child]);
+            held.Dispose();
+            await File.WriteAllTextAsync(cancelWriter, "cancel", Cancellation);
+            await FinishChildrenAsync(children);
         }
     }
 
