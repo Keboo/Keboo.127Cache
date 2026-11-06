@@ -200,6 +200,20 @@ public class Canary
     if (!$rejected) { throw 'A coverage report with a missing test module record was accepted.' }
     Write-Host 'PASS: losing a module record leaves an unpaired coverage report and is rejected.'
 
+    $duplicateRecord = Join-Path $record.DirectoryName 'ci-module-collision.trx'
+    Copy-Item -LiteralPath $record.FullName -Destination $duplicateRecord
+    $rejected = $false
+    try {
+        $null = @(Get-CiCoverageReports -CoverageDirectory $passingCoverage)
+    } catch {
+        if ($_.Exception.Message -notlike '*Multiple test modules share the same Cobertura report*') { throw }
+        $rejected = $true
+    } finally {
+        Remove-Item -LiteralPath $duplicateRecord
+    }
+    if (!$rejected) { throw 'Two test module records sharing one report were accepted.' }
+    Write-Host 'PASS: two module records cannot share one coverage report.'
+
     $publication = Join-Path $root 'published-report'
     $null = New-Item -ItemType Directory -Path $publication
     Set-Content -LiteralPath (Join-Path $publication 'SummaryGithub.md') -Value '# Summary' -Encoding utf8
