@@ -32,6 +32,5 @@
     <PackageVersion Include="TUnit" Version="1.80.0" />
     <PackageVersion Include="TUnit.Assertions" Version="1.80.0" />
     <PackageVersion Include="TUnit.Engine" Version="1.80.0" />
-    <PackageVersion Include="xunit.v3.mtp-v2" Version="3.2.2" />
   </ItemGroup>
 </Project>

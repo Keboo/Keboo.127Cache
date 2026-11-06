@@ -305,6 +305,46 @@ public sealed class RuntimeConfigurationTests : IDisposable
     [Test]
     [Arguments(false)]
     [Arguments(true)]
+    public async Task CachedOpenPrBuildRemainsVisibleWhenNewerArtifactsAreUnavailable(bool expired)
+    {
+        var github = new PackageGitHub(_directory)
+        {
+            OpenPullRequests = [new(42)],
+            Runs = [new(100, 1, "cached", "completed", "success", "pull_request", [new(42)])]
+        };
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Server:CacheDirectory"] = Path.Combine(_directory, "cache"),
+            ["Sources:0:Name"] = "example",
+            ["Sources:0:Repository"] = "owner/repo",
+            ["Sources:0:Workflow"] = "ci.yml",
+            ["Sources:0:Artifact"] = "packages"
+        }).Build();
+        var services = new ServiceCollection().AddProxy(configuration);
+        services.AddSingleton<IGitHubClient>(github);
+        using var provider = services.BuildServiceProvider();
+        var catalog = provider.GetRequiredService<PackageCatalog>();
+        var memoryCache = (MemoryCache)provider.GetRequiredService<IMemoryCache>();
+
+        var original = await catalog.GetPackagesAsync(CancellationToken.None);
+        await Assert.That(original.Any(x => x.Id == "Example.Package" && x.Build.RunId == 100)).IsTrue();
+
+        github.Runs = [new(101, 1, "newer", "completed", "success", "pull_request", [new(42)])];
+        github.UnavailableArtifactRun = 101;
+        github.ExpiredUnavailableArtifact = expired;
+        memoryCache.Compact(1);
+        var fallback = await catalog.GetPackagesAsync(CancellationToken.None);
+        await Assert.That(fallback.Any(x => x.Id == "Example.Package" && x.Build.RunId == 100)).IsTrue();
+
+        github.UnavailableArtifactRun = null;
+        memoryCache.Compact(1);
+        var recovered = await catalog.GetPackagesAsync(CancellationToken.None);
+        await Assert.That(recovered.Any(x => x.Id == "Example.Package" && x.Build.RunId == 101)).IsTrue();
+    }
+
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
     public async Task ExistingInstallerSelectsTheVpkVersionRatherThanAnUnrelatedPackage(bool previouslyGuessed)
     {
         var github = new PackageGitHub(_directory, includeVpk: true) { OpenPullRequests = [new(42)] };
@@ -620,6 +660,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
         public Artifact Packages => _artifact;
         public PullRequestInfo[] OpenPullRequests { get; set; } = [];
         public WorkflowRun[]? Runs { get; set; }
+        public long? UnavailableArtifactRun { get; set; }
+        public bool ExpiredUnavailableArtifact { get; set; }
         public int ArtifactQueries { get; private set; }
         public int Downloads { get; private set; }
         public int VersionDownloads { get; private set; }
@@ -694,6 +736,9 @@ public sealed class RuntimeConfigurationTests : IDisposable
         public Task<IReadOnlyList<Artifact>> GetArtifactsAsync(long runId, CancellationToken cancellationToken)
         {
             ArtifactQueries++;
+            if (runId == UnavailableArtifactRun)
+                return Task.FromResult<IReadOnlyList<Artifact>>(ExpiredUnavailableArtifact
+                    ? [_artifact with { Id = _artifact.Id + 1, Expired = true }] : []);
             return Task.FromResult<IReadOnlyList<Artifact>>(_versionArtifact is null
                 ? [_artifact] : [_artifact, _versionArtifact]);
         }

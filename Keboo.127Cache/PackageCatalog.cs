@@ -219,8 +219,7 @@ public sealed class PackageCatalog
                 .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
                     || _options.RunIds.Contains(x.RunId))
                 .ToArray();
-            var candidates = eligibleRuns.Select(x => (RunId: x.Run.Id, x.Run.Attempt, x.PullRequest))
-                .Concat(availableCached.Select(x => (x.RunId, x.Attempt, x.PullRequest)));
+            var candidates = availableCached.Select(x => (x.RunId, x.Attempt, x.PullRequest));
             var selected = candidates.GroupBy(x => x.PullRequest)
                 .Select(g => g.OrderByDescending(x => x.RunId).ThenByDescending(x => x.Attempt).First())
                 .ToHashSet();
