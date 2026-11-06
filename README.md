@@ -159,8 +159,11 @@ $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
-and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`, with additional
+artifact-integrity regression tests in `Keboo.127Cache.Tests`.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
+On Linux and macOS, the artifact-integrity tests require a C compiler available
+as `cc` to build their native `flock` fault injector.
 
 The packed-tool smoke test installs the one package in the output directory using
 an isolated local-only NuGet source and cache. It starts the installed command with
