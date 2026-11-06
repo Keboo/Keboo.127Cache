@@ -57,6 +57,16 @@ function Assert-WorkflowContract {
         throw 'Only the canonical package job may pack the tool.'
     }
 
+    $metadataTest = Get-StepBlock $package 'Test package metadata'
+    Assert-Pattern $metadataTest 'Test-PackageMetadata\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''' `
+        'The canonical package must pass its metadata and mutation tests.'
+    $pushTest = Get-StepBlock $package 'Test publish outcome reporting offline'
+    Assert-Pattern $pushTest 'Test-NuGetPushOutput\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''' `
+        'The guarded push outcome must be tested with an offline stub.'
+    if ($metadataTest -match '(?m)^[ \t]*if:' -or $pushTest -match '(?m)^[ \t]*if:') {
+        throw 'Package metadata and offline push tests must run unconditionally.'
+    }
+
     $fingerprint = Get-StepBlock $package 'Fingerprint canonical package'
     Assert-Pattern $fingerprint '(?m)^[ \t]*id:[ \t]*fingerprint[ \t]*$' 'The package fingerprint step must have an output ID.'
     Assert-Pattern $fingerprint '\$packages\.Count[ \t]*-ne[ \t]*1' 'The package job must fingerprint exactly one package.'
@@ -74,6 +84,12 @@ function Assert-WorkflowContract {
     if ($package.IndexOf('      - name: Fingerprint canonical package') -gt
         $package.IndexOf('      - name: Upload canonical NuGet artifact')) {
         throw 'The canonical package must be fingerprinted before it is uploaded.'
+    }
+    if ($package.IndexOf('      - name: Test package metadata') -gt
+        $package.IndexOf('      - name: Fingerprint canonical package') -or
+        $package.IndexOf('      - name: Test publish outcome reporting offline') -gt
+        $package.IndexOf('      - name: Fingerprint canonical package')) {
+        throw 'Package metadata and offline push tests must precede fingerprinting.'
     }
 
     Assert-Pattern $build '(?m)^    needs:[ \t]*package[ \t]*$' 'The matrix must wait for the canonical package.'
@@ -133,6 +149,10 @@ function Assert-WorkflowContract {
     $download = Get-StepBlock $build 'Download canonical NuGet artifact'
     Assert-CanonicalDownload $download 'The matrix'
     Assert-Pattern $download '(?m)^[ \t]*path:[ \t]*NuGet[ \t]*$' 'The matrix must extract the canonical artifact into NuGet.'
+    $downloadedMetadata = Get-StepBlock $build 'Test downloaded package metadata'
+    Assert-CanonicalHashInput $downloadedMetadata 'The matrix metadata test'
+    Assert-Pattern $downloadedMetadata 'Test-PackageMetadata\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''[^\r\n]*-ExpectedSha256[ \t]+\$env:EXPECTED_PACKAGE_SHA256' `
+        'The matrix must validate downloaded package metadata.'
     $smoke = Get-StepBlock $build 'Test packed tool installation and server'
     Assert-CanonicalHashInput $smoke 'The matrix smoke test'
     Assert-Pattern $smoke 'Test-PackedTool\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''[^\r\n]*-ExpectedSha256[ \t]+\$env:EXPECTED_PACKAGE_SHA256' `
@@ -146,8 +166,10 @@ function Assert-WorkflowContract {
     $installState = Get-StepBlock $build 'Test install-state recovery'
     Assert-Pattern $installState 'Test-InstallState\.ps1' 'The matrix must retain the install-state test.'
     if ($build.IndexOf('      - name: Download canonical NuGet artifact') -gt
+        $build.IndexOf('      - name: Test downloaded package metadata') -or
+        $build.IndexOf('      - name: Test downloaded package metadata') -gt
         $build.IndexOf('      - name: Test packed tool installation and server')) {
-        throw 'The matrix must download the canonical package before smoke-testing it.'
+        throw 'The matrix must download and validate the canonical package before smoke-testing it.'
     }
 
     Assert-Pattern $deploy '(?m)^    if:[ \t]*\$\{\{[ \t]*false[ \t]*\}\}[ \t]*$' `
@@ -168,6 +190,13 @@ function Assert-WorkflowContract {
         $deploy.IndexOf('      - name: NuGet login')) {
         throw 'Deployment must verify the artifact before obtaining publishing credentials.'
     }
+    $releasePush = Get-StepBlock $deploy 'Push NuGet (Trusted Publishing)'
+    Assert-Pattern $releasePush 'dotnet[ \t]+nuget[ \t]+push[ \t]+\$packages\[0\]\.FullName' `
+        'Deployment must push the single verified package.'
+    Assert-Pattern $releasePush '(?m)^            --source[^\r\n]*--skip-duplicate[^\r\n]*--no-symbols[^\r\n]*--force-english-output[^\r\n]*$' `
+        'Deployment must skip duplicates, avoid symbol pushes, and force English output.'
+    Assert-Pattern $releasePush 'NUGET_PUBLISH_OUTCOME=published' 'Deployment must report a new package.'
+    Assert-Pattern $releasePush 'NUGET_PUBLISH_OUTCOME=duplicate' 'Deployment must report a duplicate package.'
 }
 
 function Assert-CoverageCommentContract {
@@ -295,6 +324,13 @@ if ($index -lt 0) { throw 'Could not mutate the matrix package hash binding.' }
 $mutated = $source.Remove($index, $hashBinding.Length).Insert($index, 'EXPECTED_PACKAGE_SHA256: independently-computed')
 Assert-MutationRejected $mutated 'The matrix smoke test must use the canonical package SHA-256'
 
+$metadataStep = $source.IndexOf('      - name: Test downloaded package metadata', [StringComparison]::Ordinal)
+$metadataCommand = 'Test-PackageMetadata.ps1'
+$index = if ($metadataStep -ge 0) { $source.IndexOf($metadataCommand, $metadataStep, [StringComparison]::Ordinal) } else { -1 }
+if ($index -lt 0) { throw 'Could not mutate the downloaded package metadata check.' }
+$mutated = $source.Remove($index, $metadataCommand.Length).Insert($index, 'DisabledMetadataCheck.ps1')
+Assert-MutationRejected $mutated 'The matrix must validate downloaded package metadata'
+
 $packCommand = 'run: dotnet pack Keboo.127Cache --configuration Release --no-build --output NuGet'
 $mutated = $source.Replace($packCommand, 'run: dotnet --info')
 $index = $mutated.IndexOf('      - name: Download canonical NuGet artifact', [StringComparison]::Ordinal)
@@ -306,3 +342,8 @@ $guard = 'if: ${{ false }}'
 $mutated = $source.Replace($guard, 'if: ${{ true }}')
 if ($mutated -eq $source) { throw 'Could not mutate the deployment guard.' }
 Assert-MutationRejected $mutated 'Deployment must remain hard-disabled'
+
+$pushOptions = '--skip-duplicate --no-symbols --force-english-output'
+$mutated = $source.Replace($pushOptions, '--no-symbols --force-english-output')
+if ($mutated -eq $source) { throw 'Could not mutate the duplicate-skip option.' }
+Assert-MutationRejected $mutated 'Deployment must skip duplicates'
