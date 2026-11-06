@@ -280,7 +280,7 @@ public sealed class ArtifactIntegrityTests
     [Test]
     public async Task ConcurrentReadersAndWritersNeverPublishMismatchedPairs()
     {
-        for (var iteration = 0; iteration < 32; iteration++)
+        for (var iteration = 0; iteration < 96; iteration++)
         {
             using var fixture = new Fixture();
             var rendezvous = new DownloadRendezvous();
@@ -306,6 +306,30 @@ public sealed class ArtifactIntegrityTests
                 || actual.SequenceEqual(otherGitHub.PackageBytes)).IsTrue();
             await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation)).IsEqualTo(path);
         }
+    }
+
+    [Test]
+    public async Task ArtifactPublicationWaitsForAnExclusiveWriterAndCanBeCancelled()
+    {
+        using var fixture = new Fixture();
+        var path = fixture.PathFor(fixture.GitHub.Packages);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+
+        await ExpectCancellationAsync(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, cancellation.Token));
+        await Assert.That(File.Exists(path)).IsFalse();
+        await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+        await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var waiting = fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token);
+        await Task.Delay(50);
+        await Assert.That(waiting.IsCompleted).IsFalse();
+        held.Dispose();
+        await Assert.That(await waiting).IsEqualTo(path);
+        var actual = await File.ReadAllBytesAsync(path, Cancellation);
+        await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation)).IsEqualTo(Digest(actual));
     }
 
     [Test]

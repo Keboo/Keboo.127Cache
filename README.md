@@ -107,7 +107,9 @@ rechecked on each feed request.
 
 The local record is published before its ZIP. Failed or cancelled downloads
 are not published, and a record left by an interrupted publication must match
-a subsequent download. A missing, invalid, or mismatched record for an
+a subsequent download. Concurrent publishers coordinate using a stable
+per-artifact `.zip.lock` file, which may remain after shutdown and must not be
+removed while the cache is in use. A missing, invalid, or mismatched record for an
 already-cached digest-less artifact is not silently replaced: restore the record
 from a trusted backup, or explicitly evict both the ZIP and its record and
 download again if the artifact is still available.
