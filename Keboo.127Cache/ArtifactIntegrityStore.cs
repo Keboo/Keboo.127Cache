@@ -45,8 +45,7 @@ internal sealed class ArtifactIntegrityStore(ILogger<ArtifactCache> logger)
         FileStream stream;
         try
         {
-            stream = new FileStream(RecordPath(path), FileMode.Open, FileAccess.Read, FileShare.Read,
-                bufferSize: DigestLength, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            stream = await OpenReadAsync(RecordPath(path), DigestLength, cancellationToken);
         }
         catch (FileNotFoundException)
         {
@@ -77,6 +76,26 @@ internal sealed class ArtifactIntegrityStore(ILogger<ArtifactCache> logger)
 
     private static InvalidDataException InvalidRecord(long artifactId) =>
         new($"Artifact {artifactId} has an invalid local SHA256 record. Restore the record or explicitly evict the artifact.");
+
+    private static async Task<FileStream> OpenReadAsync(string path, int bufferSize, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    bufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            }
+            catch (IOException exception) when (attempt < 50 && IsSharingViolation(exception))
+            {
+                // A concurrent Windows rename can briefly deny access to a published file.
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+            }
+        }
+    }
+
+    private static bool IsSharingViolation(IOException exception) =>
+        OperatingSystem.IsWindows() && ((exception.HResult & 0xffff) is 32 or 33);
 
     public async Task WriteRecordAsync(string path, long artifactId, string digest, CancellationToken cancellationToken)
     {
@@ -128,8 +147,7 @@ internal sealed class ArtifactIntegrityStore(ILogger<ArtifactCache> logger)
     public async Task<HashedFile> HashAsync(string path, long artifactId, CancellationToken cancellationToken)
     {
         var before = GetStamp(path);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = await OpenReadAsync(path, 128 * 1024, cancellationToken);
         var digest = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
         var after = GetStamp(path);
         if (before != after || stream.Length != after.Length)

@@ -210,6 +210,37 @@ public sealed class ArtifactIntegrityTests
     }
 
     [Test]
+    public async Task TemporarilyLockedCacheFilesCanBeRetriedOrCancelled()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new Fixture();
+        var path = await fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation);
+        var record = path + ".sha256";
+        var digest = await File.ReadAllTextAsync(record, Cancellation);
+        using var locked = new FileStream(record, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+            await ExpectCancellationAsync(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, cancellation.Token));
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var pending = fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token);
+        await Task.Delay(50);
+        await Assert.That(pending.IsCompleted).IsFalse();
+        locked.Dispose();
+        await Assert.That(await pending).IsEqualTo(path);
+        await Assert.That(await File.ReadAllTextAsync(record, Cancellation)).IsEqualTo(digest);
+
+        using var lockedZip = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        var restarted = new ArtifactCache(fixture.Options, fixture.GitHub);
+        var pendingZip = restarted.GetAsync(fixture.GitHub.Packages, deadline.Token);
+        await Task.Delay(50);
+        await Assert.That(pendingZip.IsCompleted).IsFalse();
+        lockedZip.Dispose();
+        await Assert.That(await pendingZip).IsEqualTo(path);
+        await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(1);
+    }
+
+    [Test]
     public async Task SuppliedDigestsRemainAuthoritativeAndUnsupportedDigestsNeverFallBack()
     {
         using var fixture = new Fixture();
@@ -248,54 +279,62 @@ public sealed class ArtifactIntegrityTests
     [Test]
     public async Task ConcurrentReadersAndWritersNeverPublishMismatchedPairs()
     {
-        using var fixture = new Fixture();
-        var rendezvous = new DownloadRendezvous();
-        var otherGitHub = new FakeGitHub("different bytes");
-        fixture.GitHub.Rendezvous = rendezvous;
-        otherGitHub.Rendezvous = rendezvous;
-        var otherCache = new ArtifactCache(fixture.Options, otherGitHub, new RecordingLogger());
+        for (var iteration = 0; iteration < 32; iteration++)
+        {
+            using var fixture = new Fixture();
+            var rendezvous = new DownloadRendezvous();
+            var otherGitHub = new FakeGitHub("different bytes");
+            fixture.GitHub.Rendezvous = rendezvous;
+            otherGitHub.Rendezvous = rendezvous;
+            var otherCache = new ArtifactCache(fixture.Options, otherGitHub, new RecordingLogger());
 
-        var first = CaptureAsync(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation));
-        var second = CaptureAsync(() => otherCache.GetAsync(otherGitHub.Packages, Cancellation));
-        await rendezvous.Ready.WaitAsync(TimeSpan.FromSeconds(30), Cancellation);
-        rendezvous.Release();
-        var results = await Task.WhenAll(first, second);
-        await Assert.That(results.Count(result => result.Path is not null)).IsEqualTo(1);
-        await Assert.That(results.Count(result => result.Error is InvalidDataException)).IsEqualTo(1);
+            var first = CaptureAsync(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation));
+            var second = CaptureAsync(() => otherCache.GetAsync(otherGitHub.Packages, Cancellation));
+            await rendezvous.Ready.WaitAsync(TimeSpan.FromSeconds(30), Cancellation);
+            rendezvous.Release();
+            var results = await Task.WhenAll(first, second);
+            await Assert.That(results.Count(result => result.Path is not null)).IsEqualTo(1);
+            var failure = results.Single(result => result.Error is not null).Error!;
+            if (failure is not InvalidDataException)
+                throw new InvalidOperationException($"Unexpected concurrent failure in iteration {iteration}: {failure}", failure);
 
-        var path = fixture.PathFor(fixture.GitHub.Packages);
-        var actual = await File.ReadAllBytesAsync(path, Cancellation);
-        await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation)).IsEqualTo(Digest(actual));
-        await Assert.That(actual.SequenceEqual(fixture.GitHub.PackageBytes)
-            || actual.SequenceEqual(otherGitHub.PackageBytes)).IsTrue();
-        await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation)).IsEqualTo(path);
+            var path = fixture.PathFor(fixture.GitHub.Packages);
+            var actual = await File.ReadAllBytesAsync(path, Cancellation);
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation)).IsEqualTo(Digest(actual));
+            await Assert.That(actual.SequenceEqual(fixture.GitHub.PackageBytes)
+                || actual.SequenceEqual(otherGitHub.PackageBytes)).IsTrue();
+            await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation)).IsEqualTo(path);
+        }
     }
 
     [Test]
     public async Task ConcurrentInstancesConvergeOnOneVerifiedPair()
     {
-        using var fixture = new Fixture();
-        var rendezvous = new DownloadRendezvous();
-        var otherGitHub = new FakeGitHub("unused", fixture.GitHub.PackageBytes);
-        fixture.GitHub.Rendezvous = rendezvous;
-        otherGitHub.Rendezvous = rendezvous;
-        var otherCache = new ArtifactCache(fixture.Options, otherGitHub, new RecordingLogger());
-        var supplied = otherGitHub.Packages with { Digest = "sha256:" + Digest(otherGitHub.PackageBytes) };
+        for (var iteration = 0; iteration < 16; iteration++)
+        {
+            using var fixture = new Fixture();
+            var rendezvous = new DownloadRendezvous();
+            var otherGitHub = new FakeGitHub("unused", fixture.GitHub.PackageBytes);
+            fixture.GitHub.Rendezvous = rendezvous;
+            otherGitHub.Rendezvous = rendezvous;
+            var otherCache = new ArtifactCache(fixture.Options, otherGitHub, new RecordingLogger());
+            var supplied = otherGitHub.Packages with { Digest = "sha256:" + Digest(otherGitHub.PackageBytes) };
 
-        var first = Enumerable.Range(0, 8)
-            .Select(_ => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation)).ToArray();
-        var second = Enumerable.Range(0, 8)
-            .Select(_ => otherCache.GetAsync(supplied, Cancellation)).ToArray();
-        await rendezvous.Ready.WaitAsync(TimeSpan.FromSeconds(30), Cancellation);
-        rendezvous.Release();
-        var paths = await Task.WhenAll(first.Concat(second));
-        var path = fixture.PathFor(fixture.GitHub.Packages);
-        await Assert.That(paths.All(result => result == path)).IsTrue();
-        await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(1);
-        await Assert.That(otherGitHub.PackageDownloads).IsEqualTo(1);
-        await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation))
-            .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, Cancellation)));
-        await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+            var first = Enumerable.Range(0, 8)
+                .Select(_ => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation)).ToArray();
+            var second = Enumerable.Range(0, 8)
+                .Select(_ => otherCache.GetAsync(supplied, Cancellation)).ToArray();
+            await rendezvous.Ready.WaitAsync(TimeSpan.FromSeconds(30), Cancellation);
+            rendezvous.Release();
+            var paths = await Task.WhenAll(first.Concat(second));
+            var path = fixture.PathFor(fixture.GitHub.Packages);
+            await Assert.That(paths.All(result => result == path)).IsTrue();
+            await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(1);
+            await Assert.That(otherGitHub.PackageDownloads).IsEqualTo(1);
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation))
+                .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, Cancellation)));
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+        }
     }
 
     [Test]
