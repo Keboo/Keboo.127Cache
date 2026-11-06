@@ -11,14 +11,37 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $solution = (Resolve-Path -LiteralPath $SolutionPath).Path
 . (Join-Path $PSScriptRoot 'Get-CiCoverageReports.ps1')
 
-function Assert-ProjectReport {
-    param([string] $CoveragePath, [System.IO.FileInfo[]] $Reports, [string] $Project)
-    $matches = @($Reports | Where-Object {
-        $relative = [IO.Path]::GetRelativePath($CoveragePath, $_.FullName)
-        $name = $relative.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))[0]
-        $name -ceq $Project
-    })
-    if ($matches.Count -eq 0) { throw "No fixed-name report was generated for $Project." }
+function Get-ProjectModulePath {
+    param([string] $Project)
+    $output = @(& dotnet msbuild $Project -nologo '-property:Configuration=Release' '-getProperty:TargetPath' 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) {
+        $output | ForEach-Object { Write-Host $_ }
+        throw "Could not evaluate the test module for $Project."
+    }
+    $module = [IO.Path]::GetFullPath($output[0].ToString().Trim())
+    if (!(Test-Path -LiteralPath $module -PathType Leaf)) { throw "Test module does not exist: $module." }
+    return $module
+}
+
+function Get-ModuleReport {
+    param([System.IO.FileInfo[]] $Reports, [string] $ModulePath)
+    $comparer = if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $matches = @(
+        foreach ($report in $Reports) {
+            $records = @(Get-ChildItem -LiteralPath $report.Directory.Parent.FullName `
+                -Filter 'ci-module-*.trx' -File)
+            if ($records.Count -ne 1) { throw "Expected one test module record for $($report.FullName)." }
+            [xml] $trx = Get-Content -LiteralPath $records[0].FullName -Raw
+            $codeBases = @($trx.SelectNodes("//*[local-name()='TestMethod']/@codeBase"))
+            if (@($codeBases | Where-Object { $comparer.Equals($_.Value, $ModulePath) }).Count -gt 0) {
+                $report
+            }
+        }
+    )
+    if ($matches.Count -ne 1) {
+        throw "Expected one fixed-name report for module $ModulePath; found $($matches.Count)."
+    }
+    return $matches[0]
 }
 
 function Assert-CoveragePublication {
@@ -44,8 +67,12 @@ function Assert-CoveragePublication {
 
 $baselinePath = (Resolve-Path -LiteralPath $BaselineCoverageDirectory).Path
 $baseline = @(Get-CiCoverageReports -CoverageDirectory $baselinePath)
-foreach ($project in @('Keboo.127Cache.Tests', 'Keboo.127Cache.Proxy.Tests')) {
-    Assert-ProjectReport -CoveragePath $baselinePath -Reports $baseline -Project $project
+$requiredModules = @(
+    Join-Path $repositoryRoot 'Keboo.127Cache.Tests' 'Keboo.127Cache.Tests.csproj'
+    Join-Path $repositoryRoot 'Keboo.127Cache.Proxy.Tests' 'Keboo.127Cache.Proxy.Tests.csproj'
+) | ForEach-Object { Get-ProjectModulePath -Project $_ }
+foreach ($module in $requiredModules) {
+    $null = Get-ModuleReport -Reports $baseline -ModulePath $module
 }
 
 $id = [Guid]::NewGuid().ToString('N')
@@ -143,25 +170,27 @@ public class Canary
         $passingOutput | ForEach-Object { Write-Host $_ }
         throw 'The passing discovery probes were not executed successfully.'
     }
-    foreach ($project in $projects) {
-        $assembly = Join-Path -Path (Split-Path -Parent $project) -ChildPath 'bin' `
-            -AdditionalChildPath 'Release', 'net10.0', 'CiDiscoveryProbe.dll'
-        if (!$passingText.Contains($assembly)) { throw "The test module did not run: $assembly." }
+    $probeModules = @($projects | ForEach-Object { Get-ProjectModulePath -Project $_ })
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    foreach ($module in $probeModules) {
+        if ($passingText.IndexOf($module, $comparison) -lt 0) { throw "The test module did not run: $module." }
     }
     $reports = @(Get-CiCoverageReports -CoverageDirectory $passingCoverage)
     if ($reports.Count -ne ($baseline.Count + 2)) {
         throw "Expected two new coverage reports beyond $($baseline.Count); found $($reports.Count)."
     }
-    foreach ($project in @('Keboo.127Cache.Tests', 'Keboo.127Cache.Proxy.Tests')) {
-        Assert-ProjectReport -CoveragePath $passingCoverage -Reports $reports -Project $project
+    foreach ($module in $requiredModules) {
+        $null = Get-ModuleReport -Reports $reports -ModulePath $module
     }
-    $probeReports = @($reports | Where-Object {
-        $relative = [IO.Path]::GetRelativePath($passingCoverage, $_.FullName)
-        $name = $relative.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))[0]
-        $name.StartsWith('CiDiscoveryProbe', [StringComparison]::Ordinal)
-    })
-    if ($probeReports.Count -ne 2) {
+    $probeReports = @($probeModules | ForEach-Object { Get-ModuleReport -Reports $reports -ModulePath $_ })
+    $comparer = if ($IsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    if ($probeReports.Count -ne 2 -or $comparer.Equals($probeModules[0], $probeModules[1]) -or
+        $comparer.Equals($probeReports[0].FullName, $probeReports[1].FullName)) {
         throw 'Two added projects with the same name must each have an isolated coverage report.'
+    }
+    for ($index = 0; $index -lt $probeModules.Count; $index++) {
+        Write-Host "CI_DISCOVERY_MODULE=$($probeModules[$index])"
+        Write-Host "CI_DISCOVERY_REPORT=$($probeReports[$index].FullName)"
     }
     $outputLines = @(Get-Content -LiteralPath $outputFile | Where-Object { $_ -clike 'reports=*' })
     $expectedOutput = 'reports=' + (($reports | ForEach-Object FullName) -join ';')
@@ -171,6 +200,33 @@ public class Canary
     Write-Host "PASS: two added same-name projects ran and each produced a fixed-name report ($($baseline.Count) -> $($reports.Count))."
 
     $missingReport = $probeReports[0]
+    $record = @(Get-ChildItem -LiteralPath $missingReport.Directory.Parent.FullName -Filter 'ci-module-*.trx' -File)[0]
+    $originalRecord = [IO.File]::ReadAllBytes($record.FullName)
+    try {
+        [xml] $mutatedRecord = Get-Content -LiteralPath $record.FullName -Raw
+        $codeBases = @($mutatedRecord.SelectNodes("//*[local-name()='TestMethod']/@codeBase") |
+            Where-Object { $comparer.Equals($_.Value, $probeModules[0]) })
+        if ($codeBases.Count -eq 0) { throw 'Could not mutate the actual probe module identity.' }
+        foreach ($codeBase in $codeBases) { $codeBase.Value = $probeModules[1] }
+        $mutatedRecord.Save($record.FullName)
+        foreach ($case in @(
+                @{ Module = $probeModules[0]; Expected = 0 },
+                @{ Module = $probeModules[1]; Expected = 2 }
+            )) {
+            $rejected = $false
+            try {
+                $null = Get-ModuleReport -Reports $reports -ModulePath $case.Module
+            } catch {
+                if (!$_.Exception.Message.Contains("found $($case.Expected).")) { throw }
+                $rejected = $true
+            }
+            if (!$rejected) { throw "A changed module identity was accepted for $($case.Module)." }
+        }
+    } finally {
+        [IO.File]::WriteAllBytes($record.FullName, $originalRecord)
+    }
+    Write-Host 'PASS: changing an actual module record identity is rejected as missing and ambiguous.'
+
     $renamedReport = Join-Path $missingReport.DirectoryName 'wrong.cobertura.xml'
     Move-Item -LiteralPath $missingReport.FullName -Destination $renamedReport
     $rejected = $false
@@ -185,7 +241,6 @@ public class Canary
     if (!$rejected) { throw 'A renamed fixed-name coverage report was accepted.' }
     Write-Host 'PASS: renaming an actual coverage report is rejected.'
 
-    $record = @(Get-ChildItem -LiteralPath $missingReport.Directory.Parent.FullName -Filter 'ci-module-*.trx' -File)[0]
     $renamedRecord = $record.FullName + '.missing'
     Move-Item -LiteralPath $record.FullName -Destination $renamedRecord
     $rejected = $false

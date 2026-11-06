@@ -122,6 +122,11 @@ jobs:
         run: |
           & (Join-Path 'scripts' 'Test-CiDiscovery.ps1') -BaselineCoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
 
+      - name: Test solution discovery regressions
+        if: runner.os == 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Test-CiDiscoveryRegression.ps1') -BaselineCoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
+
       - name: ReportGenerator
         if: runner.os == 'Linux'
         uses: danielpalme/ReportGenerator-GitHub-Action@5.5.12

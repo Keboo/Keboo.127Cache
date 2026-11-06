@@ -102,6 +102,11 @@ function Assert-WorkflowContract {
         'The matrix must exercise the solution discovery guard.'
     Assert-Pattern $discovery "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" `
         'Linux must exercise the solution discovery guard.'
+    $discoveryRegressions = Get-StepBlock $build 'Test solution discovery regressions'
+    Assert-Pattern $discoveryRegressions 'Test-CiDiscoveryRegression\.ps1[^\r\n]*-BaselineCoverageDirectory[ \t]+\(Join-Path[ \t]+''TestResults''[ \t]+''ci-coverage''\)' `
+        'The matrix must exercise both discovery regressions against the solution coverage.'
+    Assert-Pattern $discoveryRegressions "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" `
+        'Linux must exercise the discovery regressions.'
     $report = Get-StepBlock $build 'ReportGenerator'
     Assert-Pattern $report "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" 'Linux must generate the merged coverage report.'
     Assert-Pattern $report 'reports:[ \t]*\$\{\{[ \t]*steps\.coverage\.outputs\.reports[ \t]*\}\}' `
@@ -244,6 +249,11 @@ $otherPlatforms = "if: runner.os != 'Linux'"
 $mutated = $source.Replace($otherPlatforms, "if: runner.os == 'Windows'")
 if ($mutated -eq $source) { throw 'Could not mutate the Windows/macOS test condition.' }
 Assert-MutationRejected $mutated 'Both Windows and macOS must run the solution tests'
+
+$regressionScript = 'Test-CiDiscoveryRegression.ps1'
+$mutated = $source.Replace($regressionScript, 'Skip-CiDiscoveryRegression.ps1')
+if ($mutated -eq $source) { throw 'Could not mutate the discovery regression command.' }
+Assert-MutationRejected $mutated 'The matrix must exercise both discovery regressions'
 
 $reportBinding = 'reports: ${{ steps.coverage.outputs.reports }}'
 $mutated = $source.Replace($reportBinding, 'reports: incomplete.xml')

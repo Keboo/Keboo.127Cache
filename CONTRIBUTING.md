@@ -46,6 +46,15 @@ CI checks that every test module has its own report, passes all reports to
 ReportGenerator without a fixed project list, and includes the original inputs
 in the `CodeCoverage` artifact and its pull-request summary.
 
+Project names need not be unique: the SDK may hash both result directories when
+names collide. The discovery guard maps each report to the module path in its
+TRX record instead of inferring identity from the directory name. After the
+solution coverage run, exercise the duplicate-name and probe-prefix regressions:
+
+```powershell
+& (Join-Path 'scripts' 'Test-CiDiscoveryRegression.ps1') -BaselineCoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
+```
+
 To generate project-local reports with a fixed filename instead:
 
 ```powershell
