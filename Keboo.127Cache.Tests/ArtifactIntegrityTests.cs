@@ -542,6 +542,48 @@ public sealed class ArtifactIntegrityTests
     }
 
     [Test]
+    public async Task DisabledUnixFileLockingFailsClosed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
+        if (childDirectory is not null)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+            var github = new FakeGitHub("unlocked");
+            var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github);
+            var result = await CaptureAsync(() => cache.GetAsync(github.Packages, timeout.Token));
+            await File.WriteAllTextAsync(Path.Combine(childDirectory, "result-0"),
+                result.Error is IOException error && error.Message.Contains("Exclusive file locking is unavailable",
+                    StringComparison.Ordinal) ? "locking unavailable" : result.Error?.ToString() ?? "success",
+                timeout.Token);
+            return;
+        }
+
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var path = fixture.PathFor(fixture.GitHub.Packages);
+        var child = StartTestChild(nameof(DisabledUnixFileLockingFailsClosed), fixture.Directory, 0,
+            disableFileLocking: true);
+        try
+        {
+            await child.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token))
+                .IsEqualTo("locking unavailable");
+            await Assert.That(File.Exists(path)).IsFalse();
+            await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+
+            await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token)).IsEqualTo(path);
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
+                .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, deadline.Token)));
+        }
+        finally
+        {
+            await FinishChildrenAsync([child]);
+        }
+    }
+
+    [Test]
     public async Task ConcurrentInstancesConvergeOnOneVerifiedPair()
     {
         for (var iteration = 0; iteration < 16; iteration++)
@@ -734,7 +776,7 @@ public sealed class ArtifactIntegrityTests
         }
     }
 
-    private static TestChild StartTestChild(string method, string directory, int index)
+    private static TestChild StartTestChild(string method, string directory, int index, bool disableFileLocking = false)
     {
         var start = new ProcessStartInfo("dotnet")
         {
@@ -756,6 +798,7 @@ public sealed class ArtifactIntegrityTests
         start.ArgumentList.Add("off");
         start.Environment["K127_INTEGRITY_CHILD_DIRECTORY"] = directory;
         start.Environment["K127_INTEGRITY_CHILD_INDEX"] = index.ToString();
+        if (disableFileLocking) start.Environment["DOTNET_SYSTEM_IO_DISABLEFILELOCKING"] = "1";
         var process = Process.Start(start) ?? throw new InvalidOperationException("Failed to start integrity test child.");
         return new TestChild(process, process.StandardOutput.ReadToEndAsync(), process.StandardError.ReadToEndAsync());
     }

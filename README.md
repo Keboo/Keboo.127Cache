@@ -104,10 +104,19 @@ rechecked on each feed request.
 
 The local record is published before its ZIP. Failed or cancelled downloads
 are not published, and a record left by an interrupted publication must match
-a subsequent download. A missing, invalid, or mismatched record for an
-already-cached digest-less artifact is not silently replaced: restore the record
-from a trusted backup, or explicitly evict both the ZIP and its record and
-download again if the artifact is still available.
+a subsequent download. Concurrent cache instances download independently, then
+coordinate publication using a stable per-artifact `.zip.lock` file. The lock
+file may remain after a process exits; do not remove it or its parent directory
+while any cache instance is running. On Unix, this coordination uses advisory
+file locks and requires a filesystem that supports them. Publication fails closed
+if exclusive locking is unavailable or disabled; other writers and older
+versions that do not honor the lock must not share the cache. Filesystems shared
+between machines must enforce those locks across all participating machines.
+Interrupted processes may leave unique `.tmp` files, which are ignored and may
+be removed only when the cache is not in use. A missing, invalid, or mismatched
+record for an already-cached digest-less artifact is not silently replaced:
+restore the record from a trusted backup, or explicitly evict both the ZIP and
+its record and download again if the artifact is still available.
 
 The locally recorded hash is **trust on first download**, not proof of the
 provider's original content. Protect the cache directory from untrusted writers:
