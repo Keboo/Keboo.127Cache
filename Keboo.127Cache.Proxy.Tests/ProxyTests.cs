@@ -3,21 +3,21 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
 
-using NuGet.Packaging;
-using NuGet.Common;
-using NuGet.Configuration;
-using NuGet.Protocol;
-using NuGet.Protocol.Core.Types;
-using NuGet.Versioning;
-
 using Keboo._127Cache;
-
-using TUnit.Assertions.Enums;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+
+using NuGet.Common;
+using NuGet.Configuration;
+using NuGet.Packaging;
+using NuGet.Protocol;
+using NuGet.Protocol.Core.Types;
+using NuGet.Versioning;
+
+using TUnit.Assertions.Enums;
 
 namespace Keboo._127Cache.Proxy.Tests;
 
@@ -343,31 +343,21 @@ public sealed class ProxyTests : IDisposable
     }
 
     [Test]
-    public async Task HttpFeedHasConsistentIdentitiesAndDependencies()
+    public async Task HttpFeedWarmupDoesNotDownloadArtifactContents()
     {
-        _options.BaseUrl = "http://127.0.0.1:0";
-        var builder = WebApplication.CreateBuilder();
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["Urls"] = _options.BaseUrl,
-            ["Proxy:BaseUrl"] = _options.BaseUrl,
-            ["Proxy:CacheDirectory"] = _options.CacheDirectory,
-            ["Proxy:PullRequests:0"] = "755"
-        });
-        builder.Services.AddProxy(builder.Configuration);
-        builder.Services.AddSingleton<IGitHubClient>(_github);
-        await using var app = builder.Build();
-        app.UseExceptionHandler();
-        app.MapProxy();
-        await app.StartAsync(Cancellation);
-        _options.BaseUrl = await Assert.That(app.Urls).HasSingleItem();
-        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = _options.BaseUrl;
+        await using var app = await StartHttpFeedAsync();
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
         await Assert.That(_github.RunQueries).IsEqualTo(1);
         await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
         await Assert.That(_github.VersionDownloads).IsEqualTo(0);
         await Assert.That(_github.PackageDownloads).IsEqualTo(0);
-        using var client = new HttpClient { BaseAddress = new Uri(_options.BaseUrl) };
+    }
+
+    [Test]
+    public async Task HttpFlatContainerAndRegistrationsHaveConsistentIdentitiesAndDependencies()
+    {
+        await using var app = await StartHttpFeedAsync();
+        using var client = CreateHttpClient(app);
         using var index = JsonDocument.Parse(await client.GetStringAsync("/v3/index.json", Cancellation));
         await Assert.That(index.RootElement.GetProperty("resources")[0].GetProperty("@type").GetString())
             .IsEqualTo("PackageBaseAddress/3.0.0");
@@ -403,6 +393,19 @@ public sealed class ProxyTests : IDisposable
         var manifestBuild = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         var cachedManifest = PackageRewriter.ReadManifest(await CreatePackageCache().GetAsync("velopack", manifestBuild, Cancellation));
         await Assert.That(nuspec).IsEquivalentTo(cachedManifest, CollectionOrdering.Matching);
+        using var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head,
+            $"/flat/vpk/{version}/vpk.{version}.nupkg"), Cancellation);
+        await Assert.That(head.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(await head.Content.ReadAsByteArrayAsync(Cancellation)).IsEmpty();
+        await Assert.That((await client.GetAsync("/flat/other/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
+    }
+
+    [Test]
+    public async Task HttpSearchFiltersPrereleaseAndToolPackages()
+    {
+        await using var app = await StartHttpFeedAsync();
+        using var client = CreateHttpClient(app);
+        var version = await GetOnlyVersionAsync(client, "velopack");
         using var search = JsonDocument.Parse(await client.GetStringAsync("/query?q=velopack&prerelease=true&semVerLevel=2.0.0", Cancellation));
         await Assert.That(search.RootElement.GetProperty("totalHits").GetInt32()).IsEqualTo(2);
         await Assert.That(search.RootElement.GetProperty("data")[0].GetProperty("version").GetString()).IsEqualTo(version);
@@ -412,11 +415,14 @@ public sealed class ProxyTests : IDisposable
             "/query?prerelease=true&semVerLevel=2.0.0&packageType=DotnetTool", Cancellation));
         var toolEntry = await Assert.That(tools.RootElement.GetProperty("data").EnumerateArray()).HasSingleItem();
         await Assert.That(toolEntry.GetProperty("id").GetString()).IsEqualTo("vpk");
-        using var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head,
-            $"/flat/vpk/{version}/vpk.{version}.nupkg"), Cancellation);
-        await Assert.That(head.StatusCode).IsEqualTo(HttpStatusCode.OK);
-        await Assert.That(await head.Content.ReadAsByteArrayAsync(Cancellation)).IsEmpty();
-        await Assert.That((await client.GetAsync("/flat/other/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
+    }
+
+    [Test]
+    public async Task NuGetProtocolReadsMetadataSearchAndAutocomplete()
+    {
+        await using var app = await StartHttpFeedAsync();
+        using var client = CreateHttpClient(app);
+        var version = await GetOnlyVersionAsync(client, "velopack");
         var source = Repository.Factory.GetCoreV3(new PackageSource(_options.BaseUrl + "/v3/index.json")
         {
             AllowInsecureConnections = true
@@ -441,6 +447,15 @@ public sealed class ProxyTests : IDisposable
         await Assert.That(autocomplete).IsNotNull();
         await Assert.That(await autocomplete.IdStartsWith("Velo", true, NullLogger.Instance, Cancellation))
             .IsEquivalentTo(new[] { "Velopack", "Velopack.Build" }, CollectionOrdering.Matching);
+    }
+
+    [Test]
+    public async Task HttpFeedIncludesOnlyPackagesPresentInEachRun()
+    {
+        await using var app = await StartHttpFeedAsync();
+        using var client = CreateHttpClient(app);
+        await GetOnlyVersionAsync(client, "velopack");
+        await GetOnlyVersionAsync(client, "example.plugin");
         app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
@@ -454,6 +469,19 @@ public sealed class ProxyTests : IDisposable
         using var pluginAutocomplete = JsonDocument.Parse(await client.GetStringAsync(
             "/autocomplete?id=Example.Plugin&prerelease=true&semVerLevel=2.0.0", Cancellation));
         await Assert.That(pluginAutocomplete.RootElement.GetProperty("data").EnumerateArray()).HasSingleItem();
+    }
+
+    [Test]
+    public async Task ClosingPullRequestHidesCachedPackagesFromHttpFeed()
+    {
+        await using var app = await StartHttpFeedAsync();
+        using var client = CreateHttpClient(app);
+        var version = await GetOnlyVersionAsync(client, "velopack");
+        app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
+        var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
+        memoryCache.Compact(1);
+        using var versions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
+        await Assert.That(versions.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(2);
         _github.OpenPullRequests = [];
         memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
@@ -468,7 +496,49 @@ public sealed class ProxyTests : IDisposable
         using var closedAutocomplete = JsonDocument.Parse(await client.GetStringAsync(
             "/autocomplete?id=Velopack&prerelease=true&semVerLevel=2.0.0", Cancellation));
         await Assert.That(closedAutocomplete.RootElement.GetProperty("data").EnumerateArray()).IsEmpty();
-        await app.StopAsync(Cancellation);
+    }
+
+    private async Task<WebApplication> StartHttpFeedAsync()
+    {
+        _options.BaseUrl = "http://127.0.0.1:0";
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.Sources.Clear();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Urls"] = _options.BaseUrl,
+            ["Proxy:BaseUrl"] = _options.BaseUrl,
+            ["Proxy:Repository"] = _options.Repository,
+            ["Proxy:CacheDirectory"] = _options.CacheDirectory,
+            ["Proxy:PullRequests:0"] = "755"
+        });
+        builder.Services.AddProxy(builder.Configuration);
+        builder.Services.AddSingleton<IGitHubClient>(_github);
+        var app = builder.Build();
+        var started = false;
+        try
+        {
+            app.UseExceptionHandler();
+            app.MapProxy();
+            await app.StartAsync(Cancellation);
+            _options.BaseUrl = await Assert.That(app.Urls).HasSingleItem();
+            app.Services.GetRequiredService<ProxyOptions>().BaseUrl = _options.BaseUrl;
+            started = true;
+            return app;
+        }
+        finally
+        {
+            if (!started) await app.DisposeAsync();
+        }
+    }
+
+    private static HttpClient CreateHttpClient(WebApplication app) =>
+        new(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(app.Urls.Single()) };
+
+    private static async Task<string> GetOnlyVersionAsync(HttpClient client, string id)
+    {
+        using var versions = JsonDocument.Parse(await client.GetStringAsync($"/flat/{id}/index.json", Cancellation));
+        var element = await Assert.That(versions.RootElement.GetProperty("versions").EnumerateArray()).HasSingleItem();
+        return element.GetString() ?? throw new InvalidDataException($"No version for {id}.");
     }
 
     public void Dispose()
