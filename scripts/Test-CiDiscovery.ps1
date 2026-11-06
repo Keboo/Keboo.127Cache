@@ -267,6 +267,8 @@ public class Canary
         $flatOutput | ForEach-Object { Write-Host $_ }
         throw 'The coverage guard did not reject the actual driver with a conflating flat layout.'
     }
+    # The nonzero exit belongs to the rejected mutation, not this successful guard.
+    $global:LASTEXITCODE = 0
     Write-Host 'PASS: a mutation of the actual driver to a conflating flat layout is rejected.'
 } finally {
     $env:GITHUB_OUTPUT = $originalGitHubOutput
