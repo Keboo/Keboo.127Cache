@@ -130,7 +130,12 @@ jobs:
           targetdir: coveragereport
           reporttypes: Html;MarkdownSummaryGithub
           title: 'Code Coverage'
-  
+
+      - name: Include coverage inputs
+        if: runner.os == 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Publish-CiCoverageInputs.ps1') -CoverageDirectory (Join-Path 'TestResults' 'ci-coverage') -ReportDirectory 'coveragereport'
+
       - name: Write PR Number
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         run: |

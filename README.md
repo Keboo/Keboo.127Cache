@@ -133,10 +133,12 @@ by its immutable ID and verifies its SHA-256 before and after installation. The
 disabled deployment job also requires the matrix to pass and verifies the same
 artifact and hash before any publishing step.
 
-Linux tests the entire solution with coverage; the coverage extension generates a
-separate report per test module, without a fixed project list. CI also adds a
-failing test project to a copy of the solution to verify discovery, and mutates
-a valid package to verify that the smoke test rejects the wrong artifact.
+Linux tests the entire solution with coverage; each test module gets its own
+`TestResults/coverage.cobertura.xml`, without a fixed project list. The merged
+report, its original inputs, and their paths are included in the `CodeCoverage`
+artifact and pull-request summary. CI also adds failing and passing test
+projects to a copy of the solution to verify discovery, and mutates a valid
+package to verify that the smoke test rejects the wrong artifact.
 
 ## Release safety
 

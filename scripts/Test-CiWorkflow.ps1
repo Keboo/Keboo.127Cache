@@ -91,13 +91,40 @@ function Assert-WorkflowContract {
         'The matrix must cover Windows, Linux, and macOS.'
     $linuxTests = Get-StepBlock $build 'dotnet test with coverage'
     Assert-Pattern $linuxTests "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" 'Linux must run the coverage step.'
-    Assert-Pattern $linuxTests 'Invoke-CiTests\.ps1[^\r\n]*-CoverageDirectory' `
+    Assert-Pattern $linuxTests 'Invoke-CiTests\.ps1[^\r\n]*-CoverageDirectory[ \t]+\(Join-Path[ \t]+''TestResults''[ \t]+''ci-coverage''\)' `
         'Linux coverage must test the whole solution through the shared test command.'
     $otherTests = Get-StepBlock $build 'dotnet test'
     Assert-Pattern $otherTests 'Invoke-CiTests\.ps1' 'Windows and macOS must use the solution test command.'
+    Assert-Pattern $otherTests "if:[ \t]*runner\.os[ \t]*!=[ \t]*'Linux'" `
+        'Both Windows and macOS must run the solution tests.'
     $discovery = Get-StepBlock $build 'Test solution discovery guard'
     Assert-Pattern $discovery 'Test-CiDiscovery\.ps1[^\r\n]*-BaselineCoverageDirectory' `
         'The matrix must exercise the solution discovery guard.'
+    Assert-Pattern $discovery "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" `
+        'Linux must exercise the solution discovery guard.'
+    $report = Get-StepBlock $build 'ReportGenerator'
+    Assert-Pattern $report "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" 'Linux must generate the merged coverage report.'
+    Assert-Pattern $report 'reports:[ \t]*\$\{\{[ \t]*steps\.coverage\.outputs\.reports[ \t]*\}\}' `
+        'ReportGenerator must merge the discovered coverage reports.'
+    Assert-Pattern $report '(?m)^[ \t]*targetdir:[ \t]*coveragereport[ \t]*$' `
+        'ReportGenerator must write to the uploaded coverage directory.'
+    Assert-Pattern $report '(?m)^[ \t]*reporttypes:[ \t]*Html;MarkdownSummaryGithub[ \t]*$' `
+        'ReportGenerator must produce HTML and the PR summary.'
+    $inputs = Get-StepBlock $build 'Include coverage inputs'
+    Assert-Pattern $inputs "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" `
+        'Linux must include the coverage inputs in the artifact and summary.'
+    Assert-Pattern $inputs 'Publish-CiCoverageInputs\.ps1[^\r\n]*-CoverageDirectory[ \t]+\(Join-Path[ \t]+''TestResults''[ \t]+''ci-coverage''\)[^\r\n]*-ReportDirectory[ \t]+''coveragereport''' `
+        'The coverage artifact and summary must include the reports used by ReportGenerator.'
+    $coverageUpload = Get-StepBlock $build 'Upload Code Coverage Report'
+    Assert-Pattern $coverageUpload "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" 'Linux must upload the coverage artifact.'
+    Assert-Pattern $coverageUpload 'uses:[ \t]*actions/upload-artifact@' 'Coverage must be uploaded as an Actions artifact.'
+    Assert-Pattern $coverageUpload '(?m)^[ \t]*name:[ \t]*CodeCoverage[ \t]*$' 'The coverage artifact must be named CodeCoverage.'
+    Assert-Pattern $coverageUpload '(?m)^[ \t]*path:[ \t]*coveragereport[ \t]*$' 'The coverage artifact must contain the report and inputs.'
+    Assert-Pattern $coverageUpload 'if-no-files-found:[ \t]*error' 'Missing coverage artifacts must fail the upload.'
+    if ($build.IndexOf('      - name: ReportGenerator') -gt $build.IndexOf('      - name: Include coverage inputs') -or
+        $build.IndexOf('      - name: Include coverage inputs') -gt $build.IndexOf('      - name: Upload Code Coverage Report')) {
+        throw 'Coverage inputs must be included after report generation and before artifact upload.'
+    }
     $download = Get-StepBlock $build 'Download canonical NuGet artifact'
     Assert-CanonicalDownload $download 'The matrix'
     Assert-Pattern $download '(?m)^[ \t]*path:[ \t]*NuGet[ \t]*$' 'The matrix must extract the canonical artifact into NuGet.'
@@ -106,6 +133,8 @@ function Assert-WorkflowContract {
     Assert-Pattern $smoke 'Test-PackedTool\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''[^\r\n]*-ExpectedSha256[ \t]+\$env:EXPECTED_PACKAGE_SHA256' `
         'The matrix must smoke-test the downloaded NuGet package against its canonical SHA-256.'
     $provenance = Get-StepBlock $build 'Test packed tool provenance guard'
+    Assert-Pattern $provenance "if:[ \t]*runner\.os[ \t]*==[ \t]*'Linux'" `
+        'Linux must exercise the package provenance guard.'
     Assert-CanonicalHashInput $provenance 'The provenance mutation'
     Assert-Pattern $provenance 'Test-PackedToolProvenance\.ps1[^\r\n]*-ExpectedSha256[ \t]+\$env:EXPECTED_PACKAGE_SHA256' `
         'The matrix must exercise the package provenance guard.'
@@ -136,6 +165,14 @@ function Assert-WorkflowContract {
     }
 }
 
+function Assert-CoverageCommentContract {
+    param([string] $Source)
+    Assert-Pattern $Source 'gh[ \t]+run[ \t]+download[^\r\n]*-n[ \t]+CodeCoverage' `
+        'The PR comment workflow must download the CodeCoverage artifact.'
+    Assert-Pattern $Source '(?m)^[ \t]*path:[ \t]*SummaryGithub\.md[ \t]*$' `
+        'The PR comment must use the generated coverage summary.'
+}
+
 function Assert-MutationRejected {
     param([string] $Source, [string] $ExpectedMessage)
     $rejected = $false
@@ -152,6 +189,10 @@ function Assert-MutationRejected {
 $source = (Get-Content -LiteralPath $WorkflowPath -Raw).Replace("`r`n", "`n")
 Assert-WorkflowContract $source
 Write-Host 'PASS: the checked-in workflow uses one canonical package and tests the solution.'
+$commentPath = Join-Path (Split-Path -Parent $WorkflowPath) 'pr-code-coverage-comment.yml'
+$commentSource = (Get-Content -LiteralPath $commentPath -Raw).Replace("`r`n", "`n")
+Assert-CoverageCommentContract $commentSource
+Write-Host 'PASS: the coverage comment uses the uploaded report summary.'
 
 $readiness = Get-StepBlock (Get-JobBlock $source 'build') 'Require canonical package'
 $match = [regex]::Match($readiness, '(?ms)^        run: \|\n(?<commands>.*)\z')
@@ -198,6 +239,33 @@ $fixedListCommand = "& (Join-Path 'scripts' 'FixedProjectList.ps1') -CoverageDir
 $mutated = $source.Replace($coverageCommand, $fixedListCommand)
 if ($mutated -eq $source) { throw 'Could not mutate the Linux coverage command.' }
 Assert-MutationRejected $mutated 'Linux coverage must test the whole solution'
+
+$otherPlatforms = "if: runner.os != 'Linux'"
+$mutated = $source.Replace($otherPlatforms, "if: runner.os == 'Windows'")
+if ($mutated -eq $source) { throw 'Could not mutate the Windows/macOS test condition.' }
+Assert-MutationRejected $mutated 'Both Windows and macOS must run the solution tests'
+
+$reportBinding = 'reports: ${{ steps.coverage.outputs.reports }}'
+$mutated = $source.Replace($reportBinding, 'reports: incomplete.xml')
+if ($mutated -eq $source) { throw 'Could not mutate the coverage report binding.' }
+Assert-MutationRejected $mutated 'ReportGenerator must merge the discovered coverage reports'
+
+$inputScript = 'Publish-CiCoverageInputs.ps1'
+$mutated = $source.Replace($inputScript, 'Skip-CiCoverageInputs.ps1')
+if ($mutated -eq $source) { throw 'Could not mutate the coverage input publication.' }
+Assert-MutationRejected $mutated 'The coverage artifact and summary must include the reports'
+
+$mutatedComment = $commentSource.Replace('path: SummaryGithub.md', 'path: OtherSummary.md')
+if ($mutatedComment -eq $commentSource) { throw 'Could not mutate the coverage comment path.' }
+$rejected = $false
+try {
+    Assert-CoverageCommentContract $mutatedComment
+} catch {
+    if ($_.Exception.Message -notlike '*PR comment must use the generated coverage summary*') { throw }
+    $rejected = $true
+}
+if (!$rejected) { throw 'A coverage comment using the wrong summary was accepted.' }
+Write-Host 'PASS: coverage comment mutation rejected: wrong summary path.'
 
 $artifactBinding = 'artifact-ids: ${{ needs.package.outputs.artifact-id }}'
 $index = $source.IndexOf($artifactBinding, [StringComparison]::Ordinal)
