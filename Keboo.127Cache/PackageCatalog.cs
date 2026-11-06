@@ -32,6 +32,7 @@ public sealed class PackageCatalog
     private readonly object _contentRefreshGate = new();
     private readonly object _buildRefreshGate = new();
     private readonly object _offlineVersionGate = new();
+    private readonly object _incompleteGate = new();
     private readonly Dictionary<long, Task<string>> _offlineVersionReads = [];
     private readonly CancellationToken _stopping;
     private readonly string _file;
@@ -50,6 +51,8 @@ public sealed class PackageCatalog
     private bool _catalogUnreadable;
     private bool _runsUnreadable;
     private volatile bool _incompleteUnreadable;
+    private volatile bool _incompleteRetryable;
+    private long _incompleteGeneration;
     private Task<Discovery>? _refreshTask;
     private PartialDiscovery? _partialDiscovery;
     private ContentRefresh? _contentRefresh;
@@ -464,6 +467,9 @@ public sealed class PackageCatalog
                 _logger.LogWarning("Catalog discovery failed: {Error}", error);
                 throw new DiscoveryUnavailableException(error);
             }
+            if (Volatile.Read(ref _pinnedWorkflowError) is { } pinnedError
+                && !error.Contains(pinnedError, StringComparison.Ordinal))
+                error += " " + pinnedError;
             var snapshot = MatchingSnapshot();
             var fallback = FindFallback(error);
             if (fallback is null && snapshot is null)
@@ -618,8 +624,12 @@ public sealed class PackageCatalog
         _snapshot = snapshot;
         _snapshotError = null;
         Volatile.Write(ref _pinnedWorkflowError, null);
-        _incompleteUnreadable = false;
-        Volatile.Write(ref _partialDiscovery, null);
+        lock (_incompleteGate)
+        {
+            _incompleteUnreadable = false;
+            _incompleteRetryable = false;
+            Volatile.Write(ref _partialDiscovery, null);
+        }
         lock (_healthGate)
             _health = new CatalogHealth(_contentError is null ? "ok" : "degraded", _options.Repository, _contentError,
                 snapshot.LastSuccessfulRefreshUtc,
@@ -630,7 +640,11 @@ public sealed class PackageCatalog
 
     private async Task PersistIncompleteAsync(Discovery incomplete, CancellationToken cancellationToken)
     {
-        Volatile.Write(ref _partialDiscovery, new PartialDiscovery(OfflineSnapshot.Create(_options, []), incomplete));
+        lock (_incompleteGate)
+        {
+            _incompleteGeneration++;
+            Volatile.Write(ref _partialDiscovery, new PartialDiscovery(OfflineSnapshot.Create(_options, []), incomplete));
+        }
         try
         {
             await JsonSettings.WriteAtomicAsync(_incompleteFile, new IncompleteDiscoveryFile(
@@ -638,7 +652,11 @@ public sealed class PackageCatalog
                 _options.PullRequests.Distinct().Order().ToArray(), _options.RunIds.Distinct().Order().ToArray(),
                 _options.RunLimit, incomplete.Runs, incomplete.SkippedBuilds, incomplete.MetadataIncomplete,
                 incomplete.UnverifiedPinnedRuns), cancellationToken);
-            _incompleteUnreadable = false;
+            lock (_incompleteGate)
+            {
+                _incompleteUnreadable = false;
+                _incompleteRetryable = false;
+            }
         }
         catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
         {
@@ -682,6 +700,7 @@ public sealed class PackageCatalog
 
     private Discovery? FindFallback(string error)
     {
+        if (_incompleteUnreadable && _incompleteRetryable) LoadIncompleteDiscovery(retry: true);
         if (_incompleteUnreadable) return null;
         var partial = Volatile.Read(ref _partialDiscovery);
         if (partial is not null && partial.Configuration.Matches(_options))
@@ -712,9 +731,14 @@ public sealed class PackageCatalog
             null, MembershipUnknown: true, MetadataIncomplete: metadataIncomplete));
     }
 
-    private void LoadIncompleteDiscovery()
+    private void LoadIncompleteDiscovery(bool retry = false)
     {
-        if (!File.Exists(_incompleteFile)) return;
+        long generation;
+        lock (_incompleteGate)
+        {
+            if (retry && (!_incompleteUnreadable || !_incompleteRetryable || _partialDiscovery is not null)) return;
+            generation = _incompleteGeneration;
+        }
         try
         {
             var saved = JsonSerializer.Deserialize<IncompleteDiscoveryFile>(
@@ -735,17 +759,48 @@ public sealed class PackageCatalog
             var error = saved.UnverifiedPinnedRuns
                 ? "A pinned run could not be verified against the configured workflow. A complete live refresh is required."
                 : "A previous discovery was incomplete; a complete live refresh is required.";
-            if (saved.UnverifiedPinnedRuns) Volatile.Write(ref _pinnedWorkflowError, error);
             var discovery = new Discovery(runs, true, error, MatchingSnapshot(),
                 MembershipUnknown: !matchingSelection, SkippedBuilds: saved.SkippedBuilds,
                 MetadataIncomplete: saved.MetadataIncomplete || !matchingSelection,
                 UnverifiedPinnedRuns: saved.UnverifiedPinnedRuns);
-            _partialDiscovery = new PartialDiscovery(OfflineSnapshot.Create(_options, []), discovery);
+            lock (_incompleteGate)
+            {
+                // A live refresh may have produced newer state while this file was being read.
+                if (_incompleteGeneration != generation
+                    || (retry && (!_incompleteUnreadable || !_incompleteRetryable || _partialDiscovery is not null))) return;
+                if (saved.UnverifiedPinnedRuns) Volatile.Write(ref _pinnedWorkflowError, error);
+                Volatile.Write(ref _partialDiscovery, new PartialDiscovery(OfflineSnapshot.Create(_options, []), discovery));
+                _incompleteUnreadable = false;
+                _incompleteRetryable = false;
+            }
         }
-        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
         {
+            // A previously unreadable marker cannot become trusted merely because it disappeared.
+        }
+        catch (JsonException)
+        {
+            MarkIncompleteUnreadable(generation, retryable: false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            MarkIncompleteUnreadable(generation, retryable: true);
+        }
+    }
+
+    private void MarkIncompleteUnreadable(long generation, bool retryable)
+    {
+        var log = false;
+        lock (_incompleteGate)
+        {
+            if (_incompleteGeneration != generation || _partialDiscovery is not null) return;
+            log = !_incompleteUnreadable || _incompleteRetryable != retryable;
+            _incompleteRetryable = retryable;
             _incompleteUnreadable = true;
         }
+        if (log)
+            _logger.LogWarning("Incomplete discovery metadata is {Reason}.",
+                retryable ? "temporarily inaccessible" : "invalid");
     }
 
     private bool HasUnmatchedCatalogBuilds(RunArtifacts[] runs, IReadOnlySet<int>? openPullRequests) =>

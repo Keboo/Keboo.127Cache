@@ -205,8 +205,9 @@ When discovery has observed an unavailable build, inconsistent metadata, or a
 pinned workflow mismatch, an `incomplete-discovery.json` marker preserves that
 uncertainty across restarts without replacing the last successful snapshot. A
 complete live refresh removes the marker. An unreadable marker fails closed
-until a complete refresh; it is not silently treated as a successful empty
-discovery.
+rather than becoming a successful empty discovery. Transient read errors are
+retried, allowing a valid marker to restore its partial state; invalid metadata
+remains blocked until a complete live refresh.
 
 `GET /health` returns HTTP 200 with `status` (`ok` or `degraded`), a safe
 `error` message, and `lastSuccessfulRefreshUtc` (or `null` if there has been no
