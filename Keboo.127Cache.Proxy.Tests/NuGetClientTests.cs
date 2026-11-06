@@ -21,7 +21,7 @@ public sealed class NuGetClientTests
     [Category("EndToEnd")]
     public async Task StablePackageRestoresWithItsRewrittenInArtifactDependency()
     {
-        await using var fixture = new NuGetRestoreFixture();
+        await using var fixture = new NuGetClientFixture();
         await fixture.StartAsync(includeOlderRun: false, Cancellation);
         const string pluginVersion = "2.0.0-pr.755.run.100.attempt.1.artifact.2";
         const string libraryVersion = "1.3.67-pr.755.run.100.attempt.1.artifact.2";
@@ -50,7 +50,7 @@ public sealed class NuGetClientTests
     [Category("EndToEnd")]
     public async Task StableFloatingRangeRestoresTheNewestRun()
     {
-        await using var fixture = new NuGetRestoreFixture();
+        await using var fixture = new NuGetClientFixture();
         await fixture.StartAsync(includeOlderRun: true, Cancellation);
         const string newest = "1.3.67-pr.755.run.100.attempt.1.artifact.2";
         const string older = "1.3.67-pr.755.run.99.attempt.1.artifact.3";
@@ -67,7 +67,7 @@ public sealed class NuGetClientTests
     }
 }
 
-internal sealed class NuGetRestoreFixture : IAsyncDisposable
+internal sealed class NuGetClientFixture : IAsyncDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "k127-nuget-e2e-" + Guid.NewGuid().ToString("N"));
     private WebApplication? _app;
@@ -75,10 +75,10 @@ internal sealed class NuGetRestoreFixture : IAsyncDisposable
 
     public string PackagesDirectory => Path.Combine(_root, "consumer-packages");
 
-    public async Task StartAsync(bool includeOlderRun, CancellationToken cancellationToken)
+    public async Task StartAsync(bool includeOlderRun, CancellationToken cancellationToken, string? additionalPackagePath = null)
     {
         Directory.CreateDirectory(_root);
-        var github = new FakeGitHub(_root, "1.3.67");
+        var github = new FakeGitHub(_root, "1.3.67", additionalPackagePath);
         var externalSource = Path.Combine(_root, "external-source");
         Directory.CreateDirectory(externalSource);
         FakeGitHub.WritePackage(Path.Combine(externalSource, "Newtonsoft.Json.13.0.4.nupkg"), "Newtonsoft.Json", "13.0.4", null);
@@ -141,14 +141,82 @@ internal sealed class NuGetRestoreFixture : IAsyncDisposable
                 new XElement("ItemGroup", new XElement("PackageReference", new XAttribute("Include", id), new XAttribute("Version", version)))))
             .Save(project);
 
-        var start = new ProcessStartInfo("dotnet")
+        await RunProcessAsync("dotnet", consumer,
+            ["restore", project, "--configfile", _configFile, "--packages", PackagesDirectory, "--no-cache", "--verbosity", "minimal"],
+            cancellationToken);
+        return JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(consumer, "obj", "project.assets.json"), cancellationToken));
+    }
+
+    public async Task<string> CreateToolPackageAsync(CancellationToken cancellationToken)
+    {
+        var producer = Path.Combine(_root, "tool-producer");
+        Directory.CreateDirectory(producer);
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "repo.global.json"), Path.Combine(producer, "global.json"), overwrite: true);
+        var config = Path.Combine(producer, "NuGet.config");
+        new XDocument(new XElement("configuration", new XElement("packageSources", new XElement("clear")))).Save(config);
+        var project = Path.Combine(producer, "Example.Tool.csproj");
+        new XDocument(
+            new XElement("Project", new XAttribute("Sdk", "Microsoft.NET.Sdk"),
+                new XElement("PropertyGroup",
+                    new XElement("OutputType", "Exe"),
+                    new XElement("TargetFramework", "net10.0"),
+                    new XElement("PackageId", "Example.Tool"),
+                    new XElement("Version", "3.1.4"),
+                    new XElement("Authors", "test"),
+                    new XElement("Description", "Test tool package"),
+                    new XElement("PackAsTool", "true"),
+                    new XElement("ToolCommandName", "example-fixture-tool"),
+                    new XElement("NuGetAudit", "false"))))
+            .Save(project);
+        await File.WriteAllTextAsync(Path.Combine(producer, "Program.cs"),
+            "System.Console.WriteLine(\"example-tool-executed\");", cancellationToken);
+        await RunProcessAsync("dotnet", producer,
+            ["restore", project, "--configfile", config, "--packages", PackagesDirectory, "--no-cache", "--verbosity", "minimal"],
+            cancellationToken);
+        var output = Path.Combine(producer, "packages");
+        await RunProcessAsync("dotnet", producer,
+            ["pack", project, "--no-restore", "--configuration", "Release", "--output", output, "--verbosity", "minimal"],
+            cancellationToken);
+        return Path.Combine(output, "Example.Tool.3.1.4.nupkg");
+    }
+
+    public async Task InstallToolAsync(string id, string version, CancellationToken cancellationToken)
+    {
+        if (_app is null || _configFile is null) throw new InvalidOperationException("The feed has not been started.");
+        var source = _app.Urls.Single() + "/v3/index.json";
+        var config = Path.Combine(_root, "Tool.NuGet.config");
+        // NuGet requires HTTP sources to be allowed in configuration, even with --add-source.
+        new XDocument(
+            new XElement("configuration",
+                new XElement("packageSources",
+                    new XElement("clear"),
+                    new XElement("add", new XAttribute("key", "proxy"), new XAttribute("value", source),
+                        new XAttribute("allowInsecureConnections", "true")))))
+            .Save(config);
+        await RunProcessAsync("dotnet", _root,
+            ["tool", "install", id, "--tool-path", Path.Combine(_root, "tools"),
+                "--version", version, "--add-source", source,
+                "--configfile", config, "--no-http-cache", "--verbosity", "minimal"],
+            cancellationToken);
+    }
+
+    public Task<string> ListToolsAsync(CancellationToken cancellationToken) =>
+        RunProcessAsync("dotnet", _root, ["tool", "list", "--tool-path", Path.Combine(_root, "tools")], cancellationToken);
+
+    public Task<string> RunToolAsync(string command, CancellationToken cancellationToken) =>
+        RunProcessAsync(Path.Combine(_root, "tools", command + (OperatingSystem.IsWindows() ? ".exe" : "")),
+            _root, [], cancellationToken);
+
+    private async Task<string> RunProcessAsync(string executable, string workingDirectory, string[] arguments, CancellationToken cancellationToken)
+    {
+        var start = new ProcessStartInfo(executable)
         {
-            WorkingDirectory = consumer,
+            WorkingDirectory = workingDirectory,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
-        foreach (var argument in new[] { "restore", project, "--configfile", _configFile, "--packages", PackagesDirectory, "--no-cache", "--verbosity", "minimal" })
+        foreach (var argument in arguments)
             start.ArgumentList.Add(argument);
         start.Environment["DOTNET_CLI_HOME"] = Path.Combine(_root, "dotnet-home");
         start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
@@ -167,7 +235,7 @@ internal sealed class NuGetRestoreFixture : IAsyncDisposable
         start.Environment["NO_PROXY"] = "localhost,127.0.0.1,::1";
         start.Environment["no_proxy"] = "localhost,127.0.0.1,::1";
 
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Failed to start dotnet restore.");
+        using var process = Process.Start(start) ?? throw new InvalidOperationException($"Failed to start {executable}.");
         var output = process.StandardOutput.ReadToEndAsync();
         var error = process.StandardError.ReadToEndAsync();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -187,8 +255,8 @@ internal sealed class NuGetRestoreFixture : IAsyncDisposable
         var stdout = await output;
         var stderr = await error;
         if (process.ExitCode != 0)
-            throw new InvalidOperationException($"dotnet restore failed ({process.ExitCode}).\n{stdout}\n{stderr}");
-        return JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(consumer, "obj", "project.assets.json"), cancellationToken));
+            throw new InvalidOperationException($"{executable} {string.Join(" ", arguments)} failed ({process.ExitCode}).\n{stdout}\n{stderr}");
+        return stdout;
     }
 
     public string InstalledPackage(string id, string version) =>
