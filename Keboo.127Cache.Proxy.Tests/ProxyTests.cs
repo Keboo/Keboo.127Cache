@@ -451,6 +451,18 @@ public sealed class ProxyTests : IDisposable
     }
 
     [Test]
+    public async Task AmbiguousPinnedForkRunReportsAnError()
+    {
+        _options.RunIds = [100];
+        var head = new PullRequestHead("shared-sha", "feature", new("alice/widgets"));
+        _github.OpenPullRequests = [new(755, head), new(756, head)];
+        _github.Runs = [new(100, 1, "shared-sha", "completed", "success", "pull_request", [], "feature", new("alice/widgets"))];
+
+        await Assert.That(async () => await CreateCatalog().GetRunArtifactsAsync(Cancellation)).ThrowsExactly<InvalidDataException>();
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(0);
+    }
+
+    [Test]
     public async Task PinnedForkPullRequestHistoryErrorsAreNotAnEmptySuccessfulFeed()
     {
         _options.RunIds = [99];

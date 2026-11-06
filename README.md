@@ -93,9 +93,9 @@ does not download their contents.
 
 When GitHub omits a run's PR association, as it often does for forks, the app
 matches the current open PR head SHA and, when available, its head repository
-and branch. Ambiguous matches are skipped with a warning rather than attributed
-to the wrong PR. Previously discovered cached runs remain available while the PR
-stays open.
+and branch. Ambiguous unpinned matches are skipped with a warning; ambiguous
+explicitly pinned runs report an error rather than being attributed to the wrong
+PR. Previously discovered cached runs remain available while the PR stays open.
 
 For an explicitly pinned fork run whose SHA is no longer the PR head, the app
 reuses an exact cached association when available. Otherwise, it checks that the
