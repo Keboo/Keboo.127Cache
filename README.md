@@ -93,12 +93,37 @@ IDs still have to belong to an open PR. The app refreshes GitHub discovery on
 startup and after the in-memory cache expires. Startup discovery lists run
 artifacts but does not download their contents.
 
-Run metadata and raw artifact ZIPs are cached by artifact ID. Downloaded ZIPs
-are SHA256-verified and reused across restarts. On first package access, every
-NuGet package in that build's `packages` artifact is discovered from its nuspec,
-rewritten to an immutable PR/run-specific version, and cached. The feed exposes
-only the packages actually present in each build. Dependencies on packages in
-the same artifact are pinned to their corresponding rewritten versions.
+Run metadata and raw artifact ZIPs are cached by artifact ID. A supplied
+`sha256:` digest is verified before a ZIP is cached; mismatched, malformed, or
+unsupported supplied digests fail closed. When no digest is supplied, the app
+warns once per artifact per cache instance and records the first download's
+SHA-256 in an adjacent `.zip.sha256` file. Cached bytes are checked against the
+upstream digest or this local record whenever the raw ZIP is accessed, including
+after a restart. Successful checks are remembered using file size and
+timestamps, so unchanged ZIPs are not rehashed on every access. Already
+rewritten packages are separate cached files and do not cause the raw ZIP to be
+rechecked on each feed request.
+
+The local record is published before its ZIP. Failed or cancelled downloads
+are not published, and a record left by an interrupted publication must match
+a subsequent download. A missing, invalid, or mismatched record for an
+already-cached digest-less artifact is not silently replaced: restore the record
+from a trusted backup, or explicitly evict both the ZIP and its record and
+download again if the artifact is still available.
+
+The locally recorded hash is **trust on first download**, not proof of the
+provider's original content. Protect the cache directory from untrusted writers:
+someone who can change both the ZIP and its record can forge a matching pair.
+The verification memo also cannot detect a same-size modification whose
+observed timestamps do not change (including due to filesystem timestamp
+resolution) until the next full verification, such as after a restart. It
+does not prevent changes between verification and use.
+
+On first package access, every NuGet package in that build's `packages` artifact
+is discovered from its nuspec, rewritten to an immutable PR/run-specific
+version, and cached. The feed exposes only the packages actually present in each
+build. Dependencies on packages in the same artifact are pinned to their
+corresponding rewritten versions.
 
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet
