@@ -6,11 +6,19 @@
     <TargetFramework>net10.0</TargetFramework>
     <Version>0.0.1</Version>
     <PackageId>Keboo.127Cache</PackageId>
+    <Authors>Keboo</Authors>
+    <Description>A local NuGet feed for packages produced by GitHub Actions pull request builds.</Description>
+    <PackageProjectUrl>https://github.com/Keboo/Keboo.127Cache</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Keboo/Keboo.127Cache</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>nuget;proxy;cache;github-actions;dotnet-tool</PackageTags>
+    <PackageIcon>icon.png</PackageIcon>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>keboo-127cache</ToolCommandName>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="..\assets\icon.png" Pack="true" PackagePath="\" />
     <PackageReference Include="System.CommandLine" />
     <PackageReference Include="NuGet.Packaging" />
   </ItemGroup>

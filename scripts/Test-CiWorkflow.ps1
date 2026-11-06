@@ -57,6 +57,16 @@ function Assert-WorkflowContract {
         throw 'Only the canonical package job may pack the tool.'
     }
 
+    $metadataTest = Get-StepBlock $package 'Test package metadata'
+    Assert-Pattern $metadataTest 'Test-PackageMetadata\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''' `
+        'The canonical package must pass its metadata and mutation tests.'
+    $pushTest = Get-StepBlock $package 'Test publish outcome reporting offline'
+    Assert-Pattern $pushTest 'Test-NuGetPushOutput\.ps1[^\r\n]*-PackageDirectory[ \t]+''NuGet''' `
+        'The guarded push outcome must be tested with an offline stub.'
+    if ($metadataTest -match '(?m)^[ \t]*if:' -or $pushTest -match '(?m)^[ \t]*if:') {
+        throw 'Package metadata and offline push tests must run unconditionally.'
+    }
+
     $fingerprint = Get-StepBlock $package 'Fingerprint canonical package'
     Assert-Pattern $fingerprint '(?m)^[ \t]*id:[ \t]*fingerprint[ \t]*$' 'The package fingerprint step must have an output ID.'
     Assert-Pattern $fingerprint '\$packages\.Count[ \t]*-ne[ \t]*1' 'The package job must fingerprint exactly one package.'
@@ -74,6 +84,12 @@ function Assert-WorkflowContract {
     if ($package.IndexOf('      - name: Fingerprint canonical package') -gt
         $package.IndexOf('      - name: Upload canonical NuGet artifact')) {
         throw 'The canonical package must be fingerprinted before it is uploaded.'
+    }
+    if ($package.IndexOf('      - name: Test package metadata') -gt
+        $package.IndexOf('      - name: Fingerprint canonical package') -or
+        $package.IndexOf('      - name: Test publish outcome reporting offline') -gt
+        $package.IndexOf('      - name: Fingerprint canonical package')) {
+        throw 'Package metadata and offline push tests must precede fingerprinting.'
     }
 
     Assert-Pattern $build '(?m)^    needs:[ \t]*package[ \t]*$' 'The matrix must wait for the canonical package.'
@@ -134,6 +150,13 @@ function Assert-WorkflowContract {
         $deploy.IndexOf('      - name: NuGet login')) {
         throw 'Deployment must verify the artifact before obtaining publishing credentials.'
     }
+    $releasePush = Get-StepBlock $deploy 'Push NuGet (Trusted Publishing)'
+    Assert-Pattern $releasePush 'dotnet[ \t]+nuget[ \t]+push[ \t]+\$packages\[0\]\.FullName' `
+        'Deployment must push the single verified package.'
+    Assert-Pattern $releasePush '(?m)^            --source[^\r\n]*--skip-duplicate[^\r\n]*--no-symbols[^\r\n]*--force-english-output[^\r\n]*$' `
+        'Deployment must skip duplicates, avoid symbol pushes, and force English output.'
+    Assert-Pattern $releasePush 'NUGET_PUBLISH_OUTCOME=published' 'Deployment must report a new package.'
+    Assert-Pattern $releasePush 'NUGET_PUBLISH_OUTCOME=duplicate' 'Deployment must report a duplicate package.'
 }
 
 function Assert-MutationRejected {
@@ -228,3 +251,8 @@ $guard = 'if: ${{ false }}'
 $mutated = $source.Replace($guard, 'if: ${{ true }}')
 if ($mutated -eq $source) { throw 'Could not mutate the deployment guard.' }
 Assert-MutationRejected $mutated 'Deployment must remain hard-disabled'
+
+$pushOptions = '--skip-duplicate --no-symbols --force-english-output'
+$mutated = $source.Replace($pushOptions, '--no-symbols --force-english-output')
+if ($mutated -eq $source) { throw 'Could not mutate the duplicate-skip option.' }
+Assert-MutationRejected $mutated 'Deployment must skip duplicates'
