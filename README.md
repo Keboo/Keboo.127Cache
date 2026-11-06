@@ -9,11 +9,13 @@ do not need to be maintained by hand.
 
 - .NET 10 SDK/runtime
 - GitHub CLI (`gh`) installed and authenticated with permission to read the
-  repository's pull requests, workflow runs, and artifacts
+  repository's pull requests, workflow runs, and artifacts for live discovery
+  and downloads. An existing offline snapshot can be served without `gh`.
 
 The tool only downloads artifact contents when a feed request needs them.
-At startup it queries open pull requests, completed successful workflow runs,
-and artifact metadata, then caches that metadata locally.
+At startup it begins querying open pull requests, completed successful workflow
+runs, and artifact metadata in the background; the listener does not wait for
+GitHub.
 
 ## Install and run
 
@@ -88,8 +90,8 @@ Example:
 The tool serves the latest completed, successful run for each selected open PR.
 Queued, running, failed, cancelled, and non-PR runs are excluded. Explicit run
 IDs still have to belong to an open PR. The app refreshes GitHub discovery on
-startup and after the in-memory cache expires. Startup lists run artifacts but
-does not download their contents.
+startup and after the in-memory cache expires. Startup discovery lists run
+artifacts but does not download their contents.
 
 Run metadata and raw artifact ZIPs are cached by artifact ID. Downloaded ZIPs
 are SHA256-verified and reused across restarts. On first package access, every
@@ -106,6 +108,54 @@ The app refuses simultaneous instances sharing a cache directory, and refuses a
 cache belonging to a different repository or workflow. Closed PRs disappear from
 the feed on the next discovery refresh.
 
+## Offline use and health
+
+Before going offline, complete at least one successful discovery and request
+the desired packages so their artifacts or rewritten packages are cached. The
+app saves the **visible build set** from each successful discovery separately
+from historical `runs.json` metadata. It will not guess visibility from
+historical runs: caches created by an older version need one successful refresh
+with this version before they can be used offline. The snapshot is specific to
+the repository, workflow, artifact names, PR/run selections, and run limit.
+Changing these settings requires another successful refresh.
+
+If GitHub discovery or a required download fails, the server remains running
+and serves usable packages from the last successful snapshot. Open-PR membership
+is stale: a PR closed since that refresh can remain visible, while newly opened
+PRs or newer builds can be missing. Each later feed request retries discovery;
+failures are not cached as an empty successful result. Once discovery succeeds,
+the feed uses the newly refreshed membership. Historical metadata and cached
+packages are not deleted when a PR disappears from the feed.
+
+`GET /health` returns HTTP 200 with `status` (`ok` or `degraded`), a safe
+`error` message, and `lastSuccessfulRefreshUtc` (or `null` if there has been no
+successful snapshot). It responds without waiting for GitHub and initially
+reports degraded while discovery is pending. `ok` reflects the last successful
+refresh, not a continuous connectivity check; `/health` itself does not trigger
+a retry. The response also reports `snapshotBuilds` and, after checking an
+offline snapshot, counts of `availableCachedBuilds`, `unavailableBuilds`,
+`unavailablePackages`, and `unavailableBuildMetadata`.
+
+Stale feed responses carry `X-127Cache-Status: degraded` and a stale `Warning`
+header. If only part of the snapshot is usable, the status header is
+`degraded-partial`: cached packages remain downloadable by ID and version, but
+search, autocomplete, and `/builds` return 503 because they cannot enumerate a
+complete result. An unknown or missing package also returns 503 in this state
+rather than a misleading 404. Cached raw artifacts can reconstruct missing
+rewritten packages offline, including artifacts that have since expired; damaged
+or unreadable cache files are preserved. Missing expired artifacts cannot be
+downloaded. A discovered build with missing or uncached expired required
+artifacts makes discovery incomplete; the app falls back to the last usable
+snapshot or returns 503 rather than silently omitting that build.
+
+When there is no matching successful snapshot, the snapshot contains no
+builds, or none of its packages are locally usable, feed requests (including
+the service index) return HTTP 503 with problem details and `Retry-After`, not
+an empty successful feed. Check `/health` for the reason. If `gh` is missing,
+install it from <https://cli.github.com/>; if authentication has expired, run
+`gh auth login` and `gh auth status` and check repository access. Diagnostics do
+not include raw CLI stderr or tokens.
+
 ## Development
 
 ```powershell
@@ -120,7 +170,9 @@ $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
-and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`. The TUnit project
+also builds a small fake `gh` executable for process-level offline and
+authentication tests.
 
 The packed-tool smoke test installs the one package in the output directory using
 an isolated local-only NuGet source and cache. It starts the installed command with

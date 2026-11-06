@@ -17,6 +17,7 @@ public static class ProxyExtensions
         services.AddSingleton<PackageCatalog>();
         services.AddSingleton<PackageCache>();
         services.AddHostedService<CatalogWarmupService>();
+        services.AddExceptionHandler<DiscoveryExceptionHandler>();
         services.AddProblemDetails();
         return services;
     }
@@ -24,7 +25,50 @@ public static class ProxyExtensions
     public static void MapProxy(this WebApplication app)
     {
         var options = app.Services.GetRequiredService<ProxyOptions>();
-        app.MapGet("/health", () => Results.Ok(new { status = "ok", repository = options.Repository }));
+        app.Use(async (context, next) =>
+        {
+            if (!IsFeedPath(context.Request.Path))
+            {
+                await next(context);
+                return;
+            }
+
+            var catalog = context.RequestServices.GetRequiredService<PackageCatalog>();
+            using var scope = catalog.BeginFeedRequest();
+            var availability = await catalog.EnsureFeedAvailableAsync(context.RequestAborted);
+            var getAvailability = catalog.CaptureRequestAvailability();
+            context.Response.OnStarting(() =>
+            {
+                var current = getAvailability();
+                if (current.IsDegraded)
+                {
+                    context.Response.Headers.CacheControl = "no-store";
+                    context.Response.Headers["X-127Cache-Status"] = current.IsPartial ? "degraded-partial" : "degraded";
+                    context.Response.Headers.Warning = "110 - \"Response is stale\"";
+                    if (current.IsPartial && (context.Response.StatusCode == StatusCodes.Status404NotFound
+                        || (context.Response.StatusCode < 400 && IsEnumerationPath(context.Request.Path))))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        context.Response.Headers.RetryAfter = "5";
+                    }
+                }
+                return Task.CompletedTask;
+            });
+            if (availability.IsPartial && IsEnumerationPath(context.Request.Path))
+                throw new DiscoveryUnavailableException(
+                    "The offline snapshot is incomplete. Search, autocomplete, and build enumeration cannot report complete results.");
+            try
+            {
+                await next(context);
+            }
+            catch (Exception exception) when (exception is not DiscoveryUnavailableException && !context.Response.HasStarted
+                && DiscoveryFailure.CanHandleContent(exception, context.RequestAborted))
+            {
+                throw new DiscoveryUnavailableException(catalog.ReportLateContentFailure(exception));
+            }
+        });
+
+        app.MapGet("/health", (PackageCatalog catalog) => Results.Ok(catalog.GetHealth()));
         app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) => Results.Ok(await catalog.GetBuildsAsync(ct)));
         app.MapMethods("/v3/index.json", ["GET", "HEAD"], () => Results.Json(new
         {
@@ -40,4 +84,12 @@ public static class ProxyExtensions
         }));
         FeedEndpoints.Map(app);
     }
+
+    private static bool IsFeedPath(PathString path) =>
+        path.StartsWithSegments("/v3") || path.StartsWithSegments("/flat")
+        || path.StartsWithSegments("/registration") || path.StartsWithSegments("/query")
+        || path.StartsWithSegments("/autocomplete") || path.StartsWithSegments("/builds");
+
+    private static bool IsEnumerationPath(PathString path) =>
+        path.StartsWithSegments("/query") || path.StartsWithSegments("/autocomplete") || path.StartsWithSegments("/builds");
 }

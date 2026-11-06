@@ -17,7 +17,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="FakeGh\**\*.cs" />
     <ProjectReference Include="..\Keboo.127Cache\Keboo.127Cache.csproj" />
+    <ProjectReference Include="FakeGh\FakeGh.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>
@@ -27,5 +29,12 @@
     <Using Include="Moq" />
     <Using Include="Moq.AutoMock" />
   </ItemGroup>
+
+  <Target Name="CopyFakeGh" AfterTargets="Build">
+    <ItemGroup>
+      <FakeGhFiles Include="$(MSBuildProjectDirectory)\FakeGh\bin\$(Configuration)\net10.0\gh*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FakeGhFiles)" DestinationFolder="$(OutDir)fake-gh" />
+  </Target>
 
 </Project>

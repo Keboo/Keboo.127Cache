@@ -24,5 +24,6 @@
   </Folder>
   <Project Path="Keboo.127Cache/Keboo.127Cache.csproj" />
   <Project Path="Keboo.127Cache.Tests/Keboo.127Cache.Tests.csproj" />
+  <Project Path="Keboo.127Cache.Tests\FakeGh\FakeGh.csproj" />
   <Project Path="Keboo.127Cache.Proxy.Tests/Keboo.127Cache.Proxy.Tests.csproj" />
 </Solution>

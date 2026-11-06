@@ -205,14 +205,15 @@ public sealed class ProxyTests : IDisposable
     {
         _options.RunIds = [100];
         _github.Expired = true;
-        await Assert.ThrowsAsync<InvalidDataException>(() => CreateCatalog().GetBuildsAsync(Cancellation));
+        var error = await Assert.ThrowsAsync<DiscoveryUnavailableException>(() => CreateCatalog().GetBuildsAsync(Cancellation));
+        Assert.Contains("expired", error.Message);
     }
 
     [Fact]
     public async Task DiscoveryErrorsDoNotBecomeEmptySuccessfulFeeds()
     {
         _github.FailDiscovery = true;
-        await Assert.ThrowsAsync<IOException>(() => CreateCatalog().GetBuildsAsync(Cancellation));
+        await Assert.ThrowsAsync<DiscoveryUnavailableException>(() => CreateCatalog().GetBuildsAsync(Cancellation));
     }
 
     [Fact]
@@ -318,7 +319,7 @@ public sealed class ProxyTests : IDisposable
     {
         var catalog = CreateCatalog();
         _github.FailDiscovery = true;
-        await Assert.ThrowsAsync<IOException>(() => catalog.GetBuildsAsync(Cancellation));
+        await Assert.ThrowsAsync<DiscoveryUnavailableException>(() => catalog.GetBuildsAsync(Cancellation));
         _github.FailDiscovery = false;
         Assert.Single(await catalog.GetBuildsAsync(Cancellation));
         Assert.Equal(2, _github.OpenPullRequestQueries);
@@ -353,6 +354,7 @@ public sealed class ProxyTests : IDisposable
         app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync(Cancellation);
+        await app.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(Cancellation);
         Assert.Equal(1, _github.OpenPullRequestQueries);
         Assert.Equal(1, _github.RunQueries);
         Assert.Equal(1, _github.ArtifactQueries);
