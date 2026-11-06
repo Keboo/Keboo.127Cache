@@ -155,6 +155,7 @@ $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
 and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
 
 The packed-tool smoke test installs the one package in the output directory using
 an isolated local-only NuGet source and cache. It starts the installed command with
@@ -166,10 +167,12 @@ by its immutable ID and verifies its SHA-256 before and after installation. The
 disabled deployment job also requires the matrix to pass and verifies the same
 artifact and hash before any publishing step.
 
-Linux tests the entire solution with coverage; the coverage extension generates a
-separate report per test module, without a fixed project list. CI also adds a
-failing test project to a copy of the solution to verify discovery, and mutates
-a valid package to verify that the smoke test rejects the wrong artifact.
+Linux tests the entire solution with coverage; each test module gets its own
+`TestResults/coverage.cobertura.xml`, without a fixed project list. The merged
+report, its original inputs, and their paths are included in the `CodeCoverage`
+artifact and pull-request summary. CI also adds failing and passing test
+projects to a copy of the solution to verify discovery, and mutates a valid
+package to verify that the smoke test rejects the wrong artifact.
 
 ## Release safety
 
