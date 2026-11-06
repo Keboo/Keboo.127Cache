@@ -90,9 +90,12 @@ Example:
 The tool discovers the latest completed, successful run for each selected open
 PR and retains previously cached runs for that PR, even if they fall outside
 the current run listing. Queued, running, failed, cancelled, and non-PR runs
-are excluded. Explicit run IDs still have to belong to an open PR. The app
-refreshes GitHub discovery on startup and after the in-memory cache expires.
-Startup discovery lists run artifacts but does not download their contents.
+are excluded. Explicit run IDs still have to belong to an open PR and the
+configured workflow. For IDs outside the workflow listing, the app verifies
+the run's workflow ID against the configured workflow before including it.
+The app refreshes GitHub discovery on startup and after the in-memory cache
+expires. Startup discovery lists run artifacts but does not download their
+contents.
 
 Run metadata and raw artifact ZIPs are cached by artifact ID. A supplied
 `sha256:` digest is verified before a ZIP is cached; mismatched, malformed, or
@@ -133,7 +136,10 @@ On first package access, every NuGet package in that build's `packages` artifact
 is discovered from its nuspec, rewritten to an immutable PR/run-specific
 version, and cached. The feed exposes only the packages actually present in each
 build. Dependencies on packages in the same artifact are pinned to their
-corresponding rewritten versions.
+corresponding rewritten versions. Before use, each cached nupkg's ZIP entries
+are read in full and checked for their recorded lengths and CRCs; a readable
+nuspec alone does not establish a healthy payload. CRCs detect corruption, not
+malicious replacement by someone who can also change the recorded CRC.
 
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet
@@ -150,7 +156,10 @@ the desired packages so their artifacts or rewritten packages are cached. The
 app saves the **visible build set** from each successful discovery separately
 from historical `runs.json` metadata. The snapshot is specific to the
 repository, workflow, artifact names, PR/run selections, and run limit. A
-mismatched or corrupt snapshot is not replaced with guessed visibility.
+corrupt snapshot or one from a different source is not replaced with guessed
+visibility. If only selections or the run limit change, source-matching
+historical runs may still be filtered and served offline, but their membership
+is explicitly `unknown`; excluded selections remain excluded.
 
 Released caches without a snapshot can still be used offline when their
 `runs.json` identifies the configured repository and workflow. The app filters
@@ -159,13 +168,16 @@ those historical runs by the configured artifact names and PR/run selections.
 and omit other builds. No refresh time or authoritative snapshot is invented.
 Aggregate search, autocomplete, and `/builds` return 503 in this legacy mode;
 known readable packages and complete per-package indexes remain usable with an
-explicit `unknown` membership header. If the catalog and run metadata disagree,
-version indexes also return 503 rather than hiding a cached version. A
-catalog-only cache cannot establish the workflow identity and is not guessed.
-Live discovery can establish current membership and corroborate cached runs
-listed by the configured workflow; known cached runs that cannot be
-corroborated keep version indexes incomplete until their run metadata is
-restored or validated.
+explicit `unknown` membership and `legacy-unverified` provenance. A legacy
+`runs.json` workflow label does not prove whether a run was originally added
+through a repository-wide pin. Known unverified pinned runs are excluded until
+live workflow and artifact association verification succeeds; other legacy runs
+may also have originated from an unrecorded pin. Operators requiring strict
+workflow provenance should not use this unverified legacy fallback. A
+catalog-only cache cannot establish workflow identity and is not guessed.
+If catalog and run metadata disagree, version indexes return 503 rather than
+hiding a cached version. Live discovery can corroborate matching runs and their
+artifact identities; uncorroborated metadata remains incomplete.
 
 If GitHub discovery or a required download fails, the server remains running
 and serves usable packages from the last successful snapshot. Open-PR membership
@@ -175,7 +187,25 @@ can serve it while a single shared discovery retry is in progress, without
 waiting for the `gh` timeout. Each later request retries after a failure;
 failures are not cached as an empty successful result. Once discovery succeeds,
 the feed uses the newly refreshed membership. Historical metadata and cached
-packages are not deleted when a PR disappears from the feed.
+packages are not deleted when a PR disappears from the feed. A blocked download,
+catalog gate, or offline artifact repair does not make unrelated cached requests
+wait indefinitely; requests fall back to verifiable local content or return 503
+after a short bounded wait. A cold feed with blocked discovery returns 503.
+
+The app retains a source- and build-bound package inventory under `inventories`
+after successful materialization. It can therefore distinguish an unavailable
+Beta-only build from one that might contain another Alpha version, even if its
+rewritten directory and raw ZIP are later removed. The inventory includes a
+local SHA-256 checksum to detect accidental changes; it is not an authenticated
+provider statement. Someone able to change both its contents and checksum can
+forge it, so protect the entire cache from untrusted writers. Invalid or
+disagreeing inventories cannot prove index completeness.
+
+When discovery has observed an unavailable build or inconsistent metadata, an
+`incomplete-discovery.json` marker preserves that uncertainty across restarts
+without replacing the last successful snapshot. A complete live refresh removes
+the marker. An unreadable marker fails closed until a complete refresh; it is
+not silently treated as a successful empty discovery.
 
 `GET /health` returns HTTP 200 with `status` (`ok` or `degraded`), a safe
 `error` message, and `lastSuccessfulRefreshUtc` (or `null` if there has been no
@@ -187,26 +217,29 @@ unresolved content failure, not a continuous connectivity or integrity check;
 `snapshotBuilds` and, after checking cached content, counts of
 `availableCachedBuilds`, `unavailableBuilds`, `unavailablePackages`, and
 `unavailableBuildMetadata`. A known content failure remains degraded after a
-metadata refresh until a complete content check succeeds.
+metadata refresh until a complete content check succeeds. `provenance` is
+`verified`, `legacy-unverified`, `incomplete`, or `unknown`; verification
+describes the run/workflow and artifact association, not a package signature.
 
 Degraded feed responses carry `X-127Cache-Status`, `X-127Cache-Membership`,
-and a stale `Warning` header. The status is `degraded-partial` when content or
-discovery is incomplete. Search, autocomplete, and `/builds` then return 503
-instead of claiming complete results. Flat and registration version indexes
-return 503 with problem details if a known version of that package is
-unavailable, or an unavailable build's package inventory is unknown. A known
-healthy package remains downloadable by ID and version; an unrelated package
-index can succeed when the available inventories prove its cached versions are
-complete. An unknown or missing package returns 503 rather than a misleading
-404.
+`X-127Cache-Provenance`, and a stale `Warning` header. The status is
+`degraded-partial` when content or discovery is incomplete. Search,
+autocomplete, and `/builds` then return 503 instead of claiming complete
+results. Flat and registration version indexes return 503 with problem details
+if a known version of that package is unavailable, or an unavailable build's
+package inventory is unknown. A known healthy package remains downloadable by
+ID and version; an unrelated package index can succeed with `degraded-partial`
+when retained inventories prove its cached versions are complete. An unknown
+or missing package returns 503 rather than a misleading 404.
 
 Missing or expired **unpinned** discovered builds are skipped without hiding
 healthy builds, but discovery remains degraded and incomplete and no successful
-snapshot is written. A successful per-package index in this case carries the
-`degraded-partial` header: a skipped uncached build could have contained other
-versions. An unavailable pinned build fails explicitly. Cached raw artifacts
-can reconstruct missing rewritten packages offline, including artifacts that
-have since expired; damaged or unreadable cache files are preserved. A
+snapshot is written. An unknown skipped build could contain any package, so
+version indexes return 503; an already-known healthy package remains
+downloadable by its exact ID and version. An unavailable pinned build fails
+explicitly. Cached raw artifacts can reconstruct missing rewritten packages
+offline, including artifacts that have since expired; damaged or unreadable
+cache files are preserved. A
 digest-less legacy ZIP without its SHA-256 record cannot be used for
 reconstruction, although an already rewritten readable package remains usable.
 

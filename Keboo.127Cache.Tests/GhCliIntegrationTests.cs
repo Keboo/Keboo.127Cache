@@ -21,6 +21,110 @@ public sealed class GhCliIntegrationTests : IDisposable
         await CheckGhFailureAsync(authFailure: true);
     }
 
+    [Test]
+    [Arguments("match")]
+    [Arguments("mismatch")]
+    [Arguments("wrong-id")]
+    [Arguments("missing-workflow")]
+    public async Task RepositoryWidePinnedRunsMustBelongToConfiguredWorkflow(string scenario)
+    {
+        var matches = scenario == "match";
+        var fixture = Path.Combine(_directory, scenario);
+        Directory.CreateDirectory(fixture);
+        var fakeGh = Path.Combine(AppContext.BaseDirectory, "fake-gh");
+        var executable = Path.Combine(fakeGh, OperatingSystem.IsWindows() ? "gh.exe" : "gh");
+        await Assert.That(File.Exists(executable)).IsTrue();
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var address = $"http://127.0.0.1:{port}";
+        var cache = Path.Combine(fixture, "cache");
+        var config = Path.Combine(fixture, "proxy.json");
+        await File.WriteAllTextAsync(config, JsonSerializer.Serialize(new
+        {
+            Urls = address,
+            Proxy = new
+            {
+                Repository = "fixture/project",
+                Workflow = "build.yml",
+                RunIds = new[] { 100 },
+                CacheDirectory = cache,
+                BaseUrl = address
+            }
+        }));
+        var runtime = Path.TrimEndingDirectorySeparator(RuntimeEnvironment.GetRuntimeDirectory());
+        var dotnetRoot = Directory.GetParent(runtime)!.Parent!.Parent!.FullName;
+        var start = new ProcessStartInfo
+        {
+            FileName = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet"),
+            WorkingDirectory = fixture,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        foreach (var argument in new[] { typeof(Program).Assembly.Location, "serve", "--config", config })
+            start.ArgumentList.Add(argument);
+        foreach (var key in start.Environment.Keys.Where(key =>
+            key.StartsWith("Proxy__", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("Urls", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("ASPNETCORE_URLS", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("DOTNET_URLS", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("GH_TOKEN", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("GITHUB_TOKEN", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("GH_ENTERPRISE_TOKEN", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("GITHUB_ENTERPRISE_TOKEN", StringComparison.OrdinalIgnoreCase)).ToArray())
+            start.Environment.Remove(key);
+        start.Environment["PATH"] = fakeGh;
+        start.Environment["DOTNET_ROOT"] = dotnetRoot;
+        start.Environment["K127_FAKE_GH_PIN"] = scenario;
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("The server process did not start.");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(4) };
+            await WaitForServerAsync(process, client);
+            var deadline = DateTime.UtcNow.AddSeconds(25);
+            while (DateTime.UtcNow < deadline)
+            {
+                using var health = JsonDocument.Parse(await client.GetStringAsync("/health"));
+                var status = health.RootElement.GetProperty("status").GetString();
+                var diagnostic = health.RootElement.GetProperty("error").GetString();
+                if (status == "ok" || diagnostic?.Contains("workflow", StringComparison.OrdinalIgnoreCase) == true
+                    || diagnostic?.Contains("authentication", StringComparison.OrdinalIgnoreCase) == true)
+                    break;
+                await Task.Delay(50);
+            }
+            using var response = await client.GetAsync("/v3/index.json");
+            if (matches)
+            {
+                await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var runs = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(cache, "runs.json")));
+                await Assert.That(runs.RootElement.GetProperty("runs")[0].GetProperty("workflowVerified").GetBoolean()).IsTrue();
+            }
+            else
+            {
+                await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+                using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                await Assert.That(problem.RootElement.GetProperty("detail").GetString()!).Contains("workflow");
+                await Assert.That(File.Exists(Path.Combine(cache, "visible-runs.json"))).IsFalse();
+            }
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            await output;
+            await error;
+        }
+    }
+
     private async Task CheckGhFailureAsync(bool authFailure)
     {
         const string marker = "synthetic-sensitive-marker";

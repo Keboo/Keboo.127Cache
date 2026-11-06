@@ -45,6 +45,7 @@ public static class ProxyExtensions
                     context.Response.Headers.CacheControl = "no-store";
                     context.Response.Headers["X-127Cache-Status"] = current.IsPartial ? "degraded-partial" : "degraded";
                     context.Response.Headers["X-127Cache-Membership"] = current.Membership;
+                    context.Response.Headers["X-127Cache-Provenance"] = current.Provenance;
                     context.Response.Headers.Warning = "110 - \"Response is stale\"";
                 }
                 return Task.CompletedTask;

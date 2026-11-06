@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 using Keboo._127Cache;
 
@@ -51,6 +55,18 @@ public sealed class OfflineFeedTests : IDisposable
             using var health = await GetJsonAsync(server.Client, "/health");
             await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
             await Assert.That(health.RootElement.GetProperty("lastSuccessfulRefreshUtc").ValueKind).IsEqualTo(JsonValueKind.Null);
+            using (var response = await server.Client.GetAsync("/v3/index.json").WaitAsync(TimeSpan.FromSeconds(3)))
+            {
+                await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+                await Assert.That(response.Content.Headers.ContentType?.MediaType).IsEqualTo("application/problem+json");
+                using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+            }
+            block.TrySetResult();
+            _github.DiscoveryBlock = null;
+            await RetryUntilHealthyAsync(server.Client);
+            using var recovered = await GetJsonAsync(server.Client, "/v3/index.json");
+            await Assert.That(recovered.RootElement.GetProperty("version").GetString()).IsEqualTo("3.0.0");
         }
         finally
         {
@@ -177,6 +193,7 @@ public sealed class OfflineFeedTests : IDisposable
         await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(index.Headers.GetValues("X-127Cache-Status").Single()).Contains("degraded");
         await Assert.That(index.Headers.GetValues("X-127Cache-Membership").Single()).IsEqualTo("unknown");
+        await Assert.That(index.Headers.GetValues("X-127Cache-Provenance").Single()).IsEqualTo("legacy-unverified");
         using var json = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
         var versions = json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
         await Assert.That(versions).IsEquivalentTo(new[]
@@ -194,6 +211,7 @@ public sealed class OfflineFeedTests : IDisposable
         using var health = await GetJsonAsync(server.Client, "/health");
         await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
         await Assert.That(health.RootElement.GetProperty("membership").GetString()).IsEqualTo("unknown");
+        await Assert.That(health.RootElement.GetProperty("provenance").GetString()).IsEqualTo("legacy-unverified");
         await Assert.That(health.RootElement.GetProperty("lastSuccessfulRefreshUtc").ValueKind).IsEqualTo(JsonValueKind.Null);
         await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("membership");
         await Assert.That((await File.ReadAllBytesAsync(RunsPath)).SequenceEqual(runsBefore)).IsTrue();
@@ -298,6 +316,121 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
+    public async Task LegacyPinnedRunWithoutWorkflowProofFailsClosedUntilLiveCorroboration()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        await using (var online = await StartAsync(runIds: [100]))
+            version = await SingleVersionAsync(online.Client, "alpha");
+        var snapshot = JsonNode.Parse(await File.ReadAllTextAsync(SnapshotPath))!.AsObject();
+        snapshot["schemaVersion"] = 1;
+        foreach (var run in snapshot["runs"]!.AsArray()) run!.AsObject().Remove("workflowVerified");
+        await File.WriteAllTextAsync(SnapshotPath, snapshot.ToJsonString(JsonSettings.Options));
+        var runs = JsonNode.Parse(await File.ReadAllTextAsync(RunsPath))!.AsObject();
+        runs.Remove("schemaVersion");
+        foreach (var run in runs["runs"]!.AsArray()) run!.AsObject().Remove("workflowVerified");
+        await File.WriteAllTextAsync(RunsPath, runs.ToJsonString(JsonSettings.Options));
+        var originalSnapshot = await File.ReadAllBytesAsync(SnapshotPath);
+        var originalRuns = await File.ReadAllBytesAsync(RunsPath);
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        _github.FailDownloads = true;
+
+        await using var offline = await StartAsync(runIds: [100]);
+        foreach (var route in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json", PackageUrl("alpha", version) })
+        {
+            using var response = await offline.Client.GetAsync(route);
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        }
+        using (var health = await GetJsonAsync(offline.Client, "/health"))
+            await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("workflow");
+        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(originalSnapshot)).IsTrue();
+        await Assert.That((await File.ReadAllBytesAsync(RunsPath)).SequenceEqual(originalRuns)).IsTrue();
+
+        _github.DiscoveryError = null;
+        _github.FailDownloads = false;
+        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(offline.Client, "alpha")).IsEqualTo(version);
+        using var repairedRuns = JsonDocument.Parse(await File.ReadAllTextAsync(RunsPath));
+        await Assert.That(repairedRuns.RootElement.GetProperty("runs")[0].GetProperty("workflowVerified").GetBoolean()).IsTrue();
+    }
+
+    [Test]
+    public async Task AmbiguousLegacyPinIsExcludedWithoutClaimingOtherIndexesComplete()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
+        _github.OpenPullRequests = [new(1), new(2)];
+        string alphaVersion;
+        string betaVersion;
+        await using (var online = await StartAsync(runIds: [200]))
+        {
+            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
+            betaVersion = await SingleVersionAsync(online.Client, "beta");
+        }
+        foreach (var path in new[] { SnapshotPath, RunsPath })
+        {
+            var file = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+            file["schemaVersion"] = 1;
+            foreach (var run in file["runs"]!.AsArray()) run!.AsObject().Remove("workflowVerified");
+            await File.WriteAllTextAsync(path, file.ToJsonString(JsonSettings.Options));
+        }
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        await using var offline = await StartAsync(runIds: [200]);
+        using (var alphaIndex = await offline.Client.GetAsync("/flat/alpha/index.json"))
+            await Assert.That(alphaIndex.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using (var alpha = await offline.Client.GetAsync(PackageUrl("alpha", alphaVersion)))
+        {
+            await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.OK);
+            await Assert.That(alpha.Headers.GetValues("X-127Cache-Provenance").Single()).IsEqualTo("incomplete");
+        }
+        using (var beta = await offline.Client.GetAsync(PackageUrl("beta", betaVersion)))
+            await Assert.That(beta.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using var health = await GetJsonAsync(offline.Client, "/health");
+        await Assert.That(health.RootElement.GetProperty("provenance").GetString()).IsEqualTo("incomplete");
+    }
+
+    [Test]
+    public async Task LiveCorroborationVerifiesLegacyRunArtifactAssociation()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
+        _github.OpenPullRequests = [new(1), new(2)];
+        string alphaVersion;
+        string betaVersion;
+        await using (var online = await StartAsync())
+        {
+            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
+            betaVersion = await SingleVersionAsync(online.Client, "beta");
+        }
+
+        foreach (var path in new[] { SnapshotPath, RunsPath })
+        {
+            var file = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+            file["schemaVersion"] = 1;
+            var runs = file["runs"]!.AsArray();
+            var alpha = runs.Single(run => run!["runId"]!.GetValue<long>() == 100)!.AsObject();
+            var beta = runs.Single(run => run!["runId"]!.GetValue<long>() == 200)!.AsObject();
+            alpha["packages"] = beta["packages"]!.DeepClone();
+            foreach (var run in runs) run!.AsObject().Remove("workflowVerified");
+            await File.WriteAllTextAsync(path, file.ToJsonString(JsonSettings.Options));
+        }
+        var queriesBefore = _github.ArtifactQueries.Length;
+
+        await using var server = await StartAsync();
+        await RetryUntilHealthyAsync(server.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(server.Client, "alpha")).IsEqualTo(alphaVersion);
+        await Assert.That(await SingleVersionAsync(server.Client, "beta")).IsEqualTo(betaVersion);
+        await Assert.That(_github.ArtifactQueries.Skip(queriesBefore).ToArray()).Contains(100L);
+        using var repairedRuns = JsonDocument.Parse(await File.ReadAllTextAsync(RunsPath));
+        var repaired = repairedRuns.RootElement.GetProperty("runs").EnumerateArray()
+            .Single(run => run.GetProperty("runId").GetInt64() == 100);
+        await Assert.That(repaired.GetProperty("workflowVerified").GetBoolean()).IsTrue();
+        await Assert.That(repaired.GetProperty("packages").GetProperty("id").GetInt64())
+            .IsEqualTo(_github.PackagesArtifact(100).Id);
+    }
+
+    [Test]
     public async Task CatalogOnlyCannotPromoteUnverifiedOldRunAfterOnlineDiscovery()
     {
         var fixture = Path.Combine(AppContext.BaseDirectory, "Fixtures", "ReleasedMain-7625362.zip");
@@ -374,6 +507,8 @@ public sealed class OfflineFeedTests : IDisposable
 
         _github.DiscoveryError = null;
         _github.OpenPullRequests = [new(755)];
+        var latestRun = runs.Runs.Single(run => run.RunId == 100);
+        _github.AddArtifactMetadata(latestRun.RunId, latestRun.VersionArtifact, latestRun.Packages);
         _github.Runs = [new(100, 1, "head", "completed", "success", "pull_request", [new(755)])];
         await RetryUntilMembershipAsync(server.Client, "current");
         using var refreshedIndex = await server.Client.GetAsync("/flat/velopack/index.json");
@@ -450,6 +585,297 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
+    [Arguments(false, false)]
+    [Arguments(true, false)]
+    [Arguments(true, true)]
+    public async Task HungArtifactDownloadDoesNotBlockUnrelatedCachedRequests(bool blockVersionArtifact, bool alphaRawOnly)
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
+        _github.OpenPullRequests = [new(1), new(2)];
+        string alphaVersion;
+        string betaVersion;
+        byte[] alphaBytes;
+        await using (var online = await StartAsync())
+        {
+            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
+            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaBytes = await online.Client.GetByteArrayAsync(PackageUrl("alpha", alphaVersion));
+        }
+
+        if (alphaRawOnly)
+            Directory.Delete(Path.GetDirectoryName(CachedPackagePath(100, 1, "alpha", alphaVersion))!, recursive: true);
+        var blockedArtifact = blockVersionArtifact ? _github.VersionArtifact(200) : _github.PackagesArtifact(200);
+        File.Delete(Path.Combine(CacheDirectory, "artifacts", blockedArtifact.Id + ".zip"));
+        if (blockVersionArtifact)
+        {
+            var catalogPath = Path.Combine(CacheDirectory, "catalog.json");
+            var catalog = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
+            catalog.Builds.RemoveAll(build => build.RunId == 200);
+            await JsonSettings.WriteAtomicAsync(catalogPath, catalog, CancellationToken.None);
+        }
+        else
+        {
+            File.Delete(CachedPackagePath(200, 2, "beta", betaVersion));
+        }
+
+        var block = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _github.BlockDownloadForArtifact = blockedArtifact.Id;
+        _github.DownloadBlock = block;
+        await using var server = await StartAsync();
+        await RetryUntilHealthyAsync(server.Client);
+        using var requestTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var triggering = server.Client.GetAsync("/flat/beta/index.json", requestTimeout.Token);
+        try
+        {
+            await _github.DownloadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var downloadsWhileBlocked = _github.DownloadCalls;
+            var alphaIndex = server.Client.GetAsync("/flat/alpha/index.json", requestTimeout.Token);
+            var alphaRegistration = server.Client.GetAsync("/registration/alpha/index.json", requestTimeout.Token);
+            var alphaPackage = server.Client.GetAsync(PackageUrl("alpha", alphaVersion), requestTimeout.Token);
+            var search = server.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0", requestTimeout.Token);
+            var health = server.Client.GetAsync("/health", requestTimeout.Token);
+            var responses = await Task.WhenAll(alphaIndex, alphaRegistration, alphaPackage, search, health)
+                .WaitAsync(TimeSpan.FromSeconds(3));
+            try
+            {
+                await Assert.That(responses[0].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                await Assert.That(responses[0].Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
+                using var flat = JsonDocument.Parse(await responses[0].Content.ReadAsStringAsync());
+                await Assert.That(flat.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(alphaVersion);
+                await Assert.That(responses[1].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var registration = JsonDocument.Parse(await responses[1].Content.ReadAsStringAsync());
+                await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
+                    .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(alphaVersion);
+                await Assert.That(responses[2].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                var delivered = await responses[2].Content.ReadAsByteArrayAsync();
+                if (!alphaRawOnly) await Assert.That(delivered.SequenceEqual(alphaBytes)).IsTrue();
+                using (var package = new PackageArchiveReader(new MemoryStream(delivered)))
+                    await Assert.That(package.GetIdentity().Version.ToNormalizedString()).IsEqualTo(alphaVersion);
+                await Assert.That(_github.DownloadCalls).IsEqualTo(downloadsWhileBlocked);
+                await Assert.That(responses[3].StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+                await Assert.That(responses[4].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var status = JsonDocument.Parse(await responses[4].Content.ReadAsStringAsync());
+                await Assert.That(status.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
+            }
+            finally
+            {
+                foreach (var response in responses) response.Dispose();
+            }
+        }
+        finally
+        {
+            block.TrySetResult();
+        }
+        using (var first = await triggering.WaitAsync(TimeSpan.FromSeconds(10))) { }
+        _github.DownloadBlock = null;
+        await RetryUntilHealthyAsync(server.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(server.Client, "alpha")).IsEqualTo(alphaVersion);
+        await Assert.That(await SingleVersionAsync(server.Client, "beta")).IsEqualTo(betaVersion);
+    }
+
+    [Test]
+    public async Task HungRepairOfOnePackageDoesNotBlockAnotherPackageInTheSameBuild()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha", "Beta")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        byte[] original;
+        await using (var online = await StartAsync())
+        {
+            version = await SingleVersionAsync(online.Client, "alpha");
+            original = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
+        }
+        File.Delete(CachedPackagePath(100, 1, "beta", version));
+        File.Delete(Path.Combine(CacheDirectory, "artifacts", _github.PackagesArtifact(100).Id + ".zip"));
+        var block = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _github.BlockDownloadForArtifact = _github.PackagesArtifact(100).Id;
+        _github.DownloadBlock = block;
+        await using var server = await StartAsync();
+        await RetryUntilHealthyAsync(server.Client);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var triggering = server.Client.GetAsync("/flat/beta/index.json", timeout.Token);
+        try
+        {
+            await _github.DownloadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var responses = await Task.WhenAll(
+                server.Client.GetAsync("/flat/alpha/index.json", timeout.Token),
+                server.Client.GetAsync("/registration/alpha/index.json", timeout.Token),
+                server.Client.GetAsync(PackageUrl("alpha", version), timeout.Token),
+                server.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0", timeout.Token))
+                .WaitAsync(TimeSpan.FromSeconds(3));
+            try
+            {
+                await Assert.That(responses[0].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                await Assert.That(responses[0].Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
+                using var flat = JsonDocument.Parse(await responses[0].Content.ReadAsStringAsync());
+                await Assert.That(flat.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
+                await Assert.That(responses[1].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var registration = JsonDocument.Parse(await responses[1].Content.ReadAsStringAsync());
+                await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
+                    .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(version);
+                await Assert.That(responses[2].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                await Assert.That((await responses[2].Content.ReadAsByteArrayAsync()).SequenceEqual(original)).IsTrue();
+                await Assert.That(responses[3].StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            }
+            finally
+            {
+                foreach (var response in responses) response.Dispose();
+            }
+        }
+        finally
+        {
+            block.TrySetResult();
+        }
+        using (var first = await triggering.WaitAsync(TimeSpan.FromSeconds(10))) { }
+        _github.DownloadBlock = null;
+        await RetryUntilHealthyAsync(server.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(server.Client, "beta")).IsEqualTo(version);
+    }
+
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task HeldCatalogGateDoesNotBlockCachedFeedOrHealth(bool offlineMode)
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        byte[] original;
+        await using (var online = await StartAsync())
+        {
+            version = await SingleVersionAsync(online.Client, "alpha");
+            original = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
+        }
+        if (offlineMode) _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        await using var offline = await StartAsync();
+        if (offlineMode) await WaitForHealthErrorAsync(offline.Client, "gh auth status");
+        else await RetryUntilHealthyAsync(offline.Client);
+        var catalog = offline.App.Services.GetRequiredService<PackageCatalog>();
+        var gate = (SemaphoreSlim)typeof(PackageCatalog).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(catalog)!;
+        await gate.WaitAsync();
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var responses = await Task.WhenAll(
+                offline.Client.GetAsync("/flat/alpha/index.json", timeout.Token),
+                offline.Client.GetAsync(PackageUrl("alpha", version), timeout.Token)).WaitAsync(TimeSpan.FromSeconds(3));
+            try
+            {
+                await Assert.That(responses[0].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var index = JsonDocument.Parse(await responses[0].Content.ReadAsStringAsync());
+                await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
+                await Assert.That(responses[1].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                await Assert.That((await responses[1].Content.ReadAsByteArrayAsync()).SequenceEqual(original)).IsTrue();
+                using var status = await GetJsonAsync(offline.Client, "/health").WaitAsync(TimeSpan.FromSeconds(3));
+                await Assert.That(status.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
+            }
+            finally
+            {
+                foreach (var response in responses) response.Dispose();
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+        if (!offlineMode) await RetryUntilHealthyAsync(offline.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(offline.Client, "alpha")).IsEqualTo(version);
+    }
+
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task HeldRawArtifactGateDoesNotBlockUnrelatedOfflinePackages(bool versionArtifact)
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
+        _github.OpenPullRequests = [new(1), new(2)];
+        string alphaVersion;
+        string betaVersion;
+        byte[] alphaBytes;
+        await using (var online = await StartAsync())
+        {
+            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
+            betaVersion = await SingleVersionAsync(online.Client, "beta");
+            alphaBytes = await online.Client.GetByteArrayAsync(PackageUrl("alpha", alphaVersion));
+        }
+
+        var betaPath = CachedPackagePath(200, 2, "beta", betaVersion);
+        if (versionArtifact)
+        {
+            var catalogPath = Path.Combine(CacheDirectory, "catalog.json");
+            var catalog = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
+            catalog.Builds.RemoveAll(build => build.RunId == 200);
+            await JsonSettings.WriteAtomicAsync(catalogPath, catalog, CancellationToken.None);
+        }
+        else
+            File.Delete(betaPath);
+
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        _github.FailDownloads = true;
+        await using var offline = await StartAsync();
+        ArtifactCache blockedCache;
+        if (versionArtifact)
+        {
+            var packageCache = offline.App.Services.GetRequiredService<PackageCache>();
+            var caches = (ConcurrentDictionary<long, ArtifactCache>)typeof(PackageCache)
+                .GetField("_versionArtifactCaches", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(packageCache)!;
+            blockedCache = caches.GetOrAdd(_github.VersionArtifact(200).Id,
+                _ => new ArtifactCache(offline.App.Services.GetRequiredService<ProxyOptions>(), _github));
+        }
+        else
+            blockedCache = offline.App.Services.GetRequiredService<ArtifactCache>();
+        var gate = (SemaphoreSlim)typeof(ArtifactCache).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(blockedCache)!;
+        await gate.WaitAsync();
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var responses = await Task.WhenAll(
+                offline.Client.GetAsync("/flat/alpha/index.json", timeout.Token),
+                offline.Client.GetAsync("/registration/alpha/index.json", timeout.Token),
+                offline.Client.GetAsync(PackageUrl("alpha", alphaVersion), timeout.Token),
+                offline.Client.GetAsync("/flat/beta/index.json", timeout.Token),
+                offline.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0", timeout.Token),
+                offline.Client.GetAsync("/health", timeout.Token)).WaitAsync(TimeSpan.FromSeconds(4));
+            try
+            {
+                await Assert.That(responses[0].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                await Assert.That(responses[0].Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
+                using var flat = JsonDocument.Parse(await responses[0].Content.ReadAsStringAsync());
+                await Assert.That(flat.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(alphaVersion);
+                await Assert.That(responses[1].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var registration = JsonDocument.Parse(await responses[1].Content.ReadAsStringAsync());
+                await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
+                    .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(alphaVersion);
+                await Assert.That(responses[2].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                await Assert.That((await responses[2].Content.ReadAsByteArrayAsync()).SequenceEqual(alphaBytes)).IsTrue();
+                await Assert.That(responses[3].StatusCode)
+                    .IsEqualTo(versionArtifact ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable);
+                await Assert.That(responses[4].StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+                await Assert.That(responses[5].StatusCode).IsEqualTo(HttpStatusCode.OK);
+                using var health = JsonDocument.Parse(await responses[5].Content.ReadAsStringAsync());
+                await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
+            }
+            finally
+            {
+                foreach (var response in responses) response.Dispose();
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        _github.DiscoveryError = null;
+        _github.FailDownloads = false;
+        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(offline.Client, "alpha")).IsEqualTo(alphaVersion);
+        await Assert.That(await SingleVersionAsync(offline.Client, "beta")).IsEqualTo(betaVersion);
+        await Assert.That(File.Exists(betaPath)).IsTrue();
+    }
+
+    [Test]
     [Arguments("missing")]
     [Arguments("expired")]
     public async Task UnpinnedMissingOrExpiredBuildDoesNotHideHealthyBuild(string failure)
@@ -459,11 +885,13 @@ public sealed class OfflineFeedTests : IDisposable
         if (failure == "missing") _github.MissingVersionArtifactForRun = 200;
         else _github.ExpiredRuns.Add(200);
         await using var server = await StartAsync();
+        await WaitForHealthErrorAsync(server.Client, failure);
         using var alpha = await server.Client.GetAsync("/flat/alpha/index.json");
-        await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
         await Assert.That(alpha.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
-        using var alphaIndex = JsonDocument.Parse(await alpha.Content.ReadAsStringAsync());
-        var version = alphaIndex.RootElement.GetProperty("versions")[0].GetString()!;
+        using var alphaProblem = JsonDocument.Parse(await alpha.Content.ReadAsStringAsync());
+        await Assert.That(alphaProblem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        const string version = "1.2.3-pr.1.run.100.attempt.1.artifact.1002";
         using var package = await server.Client.GetAsync(PackageUrl("alpha", version));
         await Assert.That(package.StatusCode).IsEqualTo(HttpStatusCode.OK);
         using var search = await server.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
@@ -471,6 +899,162 @@ public sealed class OfflineFeedTests : IDisposable
         using var health = await GetJsonAsync(server.Client, "/health");
         await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
         await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains(failure);
+    }
+
+    [Test]
+    [Arguments("expired")]
+    [Arguments("missing")]
+    [Arguments("discovery")]
+    public async Task SkippedNewerRunNeverProducesAnIncompleteSuccessfulVersionIndex(string failure)
+    {
+        var old = _github.AddBuild(100, 1, "Alpha");
+        var newer = _github.AddBuild(101, 1, "Alpha");
+        _github.Runs = [old];
+        _github.OpenPullRequests = [new(1)];
+        await using var server = await StartAsync();
+        var oldVersion = await SingleVersionAsync(server.Client, "alpha");
+        var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
+
+        _github.Runs = [newer, old];
+        if (failure == "missing") _github.MissingVersionArtifactForRun = 101;
+        else if (failure == "expired") _github.ExpiredRuns.Add(101);
+        else _github.FailArtifactsForRun = 101;
+        ExpireDiscovery(server);
+        await WaitForHealthErrorAsync(server.Client, failure == "discovery" ? "network connection" : failure);
+
+        foreach (var path in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
+        {
+            using var response = await server.Client.GetAsync(path);
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            await Assert.That(response.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
+            await Assert.That(response.Content.Headers.ContentType?.MediaType).IsEqualTo("application/problem+json");
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+            await Assert.That(problem.RootElement.TryGetProperty("versions", out _)).IsFalse();
+        }
+        using var package = await server.Client.GetAsync(PackageUrl("alpha", oldVersion));
+        await Assert.That(package.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        using var reader = new PackageArchiveReader(new MemoryStream(await package.Content.ReadAsByteArrayAsync()));
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(oldVersion);
+        using var search = await server.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
+        await Assert.That(search.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using var health = await GetJsonAsync(server.Client, "/health");
+        await Assert.That(health.RootElement.GetProperty("unavailableBuilds").GetInt32()).IsEqualTo(1);
+        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
+    }
+
+    [Test]
+    [Arguments(100)]
+    [Arguments(101)]
+    public async Task IncompleteDiscoverySurvivesRestartUntilACompleteRefresh(int runLimit)
+    {
+        var old = _github.AddBuild(100, 1, "Alpha");
+        var newer = _github.AddBuild(101, 1, "Alpha");
+        _github.Runs = [old];
+        _github.OpenPullRequests = [new(1)];
+        string oldVersion;
+        byte[] snapshot;
+        await using (var online = await StartAsync())
+        {
+            oldVersion = await SingleVersionAsync(online.Client, "alpha");
+            snapshot = await File.ReadAllBytesAsync(SnapshotPath);
+            _github.Runs = [newer, old];
+            _github.MissingVersionArtifactForRun = 101;
+            ExpireDiscovery(online);
+            await WaitForHealthErrorAsync(online.Client, "missing");
+            using var index = await online.Client.GetAsync("/flat/alpha/index.json");
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        }
+
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        _github.FailDownloads = true;
+        await using var offline = await StartAsync(runLimit: runLimit);
+        foreach (var route in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
+        {
+            using var response = await offline.Client.GetAsync(route);
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        }
+        using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion)))
+            await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
+
+        _github.DiscoveryError = null;
+        _github.FailDownloads = false;
+        _github.MissingVersionArtifactForRun = null;
+        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
+        var versions = await VersionsAsync(offline.Client, "alpha");
+        await Assert.That(versions.Length).IsEqualTo(2);
+        await Assert.That(versions).Contains(oldVersion);
+        await Assert.That(versions.Any(version => version.Contains(".run.101.", StringComparison.Ordinal))).IsTrue();
+    }
+
+    [Test]
+    public async Task CorruptIncompleteDiscoveryMarkerFailsClosedUntilLiveRefresh()
+    {
+        var old = _github.AddBuild(100, 1, "Alpha");
+        var newer = _github.AddBuild(101, 1, "Alpha");
+        _github.Runs = [old];
+        _github.OpenPullRequests = [new(1)];
+        await using (var online = await StartAsync())
+        {
+            await SingleVersionAsync(online.Client, "alpha");
+            _github.Runs = [newer, old];
+            _github.MissingVersionArtifactForRun = 101;
+            ExpireDiscovery(online);
+            await WaitForHealthErrorAsync(online.Client, "missing");
+        }
+        var marker = Path.Combine(CacheDirectory, "incomplete-discovery.json");
+        await File.WriteAllTextAsync(marker, "{broken");
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        await using var offline = await StartAsync();
+        using (var index = await offline.Client.GetAsync("/flat/alpha/index.json"))
+        {
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            using var problem = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("detail").GetString()!).Contains("incomplete discovery metadata");
+        }
+        await Assert.That(await File.ReadAllTextAsync(marker)).IsEqualTo("{broken");
+
+        _github.DiscoveryError = null;
+        _github.MissingVersionArtifactForRun = null;
+        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
+        await Assert.That((await VersionsAsync(offline.Client, "alpha")).Length).IsEqualTo(2);
+        await Assert.That(File.Exists(marker)).IsFalse();
+    }
+
+    [Test]
+    public async Task NoUsableCurrentRunsCannotFallBackToAClosedPrAsACompleteFeed()
+    {
+        var old = _github.AddBuild(100, 1, "Alpha");
+        var newer = _github.AddBuild(200, 2, "Alpha");
+        _github.Runs = [old];
+        _github.OpenPullRequests = [new(1)];
+        byte[] snapshot;
+        await using (var online = await StartAsync())
+        {
+            await SingleVersionAsync(online.Client, "alpha");
+            snapshot = await File.ReadAllBytesAsync(SnapshotPath);
+            _github.Runs = [newer];
+            _github.OpenPullRequests = [new(2)];
+            _github.MissingVersionArtifactForRun = 200;
+            ExpireDiscovery(online);
+            await WaitForHealthErrorAsync(online.Client, "missing");
+            using var index = await online.Client.GetAsync("/flat/alpha/index.json");
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            await Assert.That(async () => await online.App.Services.GetRequiredService<PackageCatalog>()
+                .GetRunArtifactsAsync(CancellationToken.None)).ThrowsExactly<DiscoveryUnavailableException>();
+            await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
+        }
+
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        await using var offline = await StartAsync();
+        using var restarted = await offline.Client.GetAsync("/flat/alpha/index.json");
+        await Assert.That(restarted.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using var problem = JsonDocument.Parse(await restarted.Content.ReadAsStringAsync());
+        await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
     }
 
     [Test]
@@ -607,62 +1191,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.DiscoveryError = new IOException("Synthetic offline failure.");
         _github.FailDownloads = true;
         await using var offline = await StartAsync();
-        var consumer = Path.Combine(_directory, "consumer");
-        Directory.CreateDirectory(consumer);
-        var project = Path.Combine(consumer, "consumer.csproj");
-        var config = Path.Combine(consumer, "NuGet.config");
-        var packages = Path.Combine(consumer, "packages");
-        await File.WriteAllTextAsync(project, $$"""
-            <Project Sdk="Microsoft.NET.Sdk">
-              <PropertyGroup><TargetFramework>net10.0</TargetFramework><NuGetAudit>false</NuGetAudit>
-                <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally></PropertyGroup>
-              <ItemGroup><PackageReference Include="Alpha" Version="{{version}}" /></ItemGroup>
-            </Project>
-            """);
-        await File.WriteAllTextAsync(config, $$"""
-            <configuration><packageSources><clear />
-              <add key="offline" value="{{offline.Client.BaseAddress}}v3/index.json" allowInsecureConnections="true" />
-            </packageSources></configuration>
-            """);
-        var runtime = Path.TrimEndingDirectorySeparator(RuntimeEnvironment.GetRuntimeDirectory());
-        var dotnetRoot = Directory.GetParent(runtime)!.Parent!.Parent!.FullName;
-        var start = new ProcessStartInfo
-        {
-            FileName = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet"),
-            WorkingDirectory = consumer,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        foreach (var argument in new[] { "restore", project, "--configfile", config, "--packages", packages, "--no-cache", "--verbosity", "quiet" })
-            start.ArgumentList.Add(argument);
-        start.Environment["TEMP"] = consumer;
-        start.Environment["TMP"] = consumer;
-        start.Environment["TMPDIR"] = consumer;
-        start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("dotnet restore did not start.");
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-            await process.WaitForExitAsync(timeout.Token);
-        }
-        finally
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync();
-            }
-        }
-        if (process.ExitCode != 0)
-            throw new InvalidOperationException("Offline dotnet restore failed: " + await output + await error);
-        using var assets = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(consumer, "obj", "project.assets.json")));
-        await Assert.That(assets.RootElement.GetProperty("libraries").EnumerateObject()
-            .Any(property => property.Name.Equals("Alpha/" + version, StringComparison.OrdinalIgnoreCase))).IsTrue();
-        await Assert.That(File.Exists(Path.Combine(packages, "alpha", version, "lib", "net8.0", "payload.txt"))).IsTrue();
+        await RestoreAlphaAsync(offline, version, "single-consumer");
         await Assert.That(_github.DownloadCalls).IsEqualTo(downloads);
         using var health = await GetJsonAsync(offline.Client, "/health");
         await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
@@ -745,19 +1274,22 @@ public sealed class OfflineFeedTests : IDisposable
         _github.OpenPullRequests = [new(1)];
         _github.Runs = [first];
         await using var server = await StartAsync();
-        await SingleVersionAsync(server.Client, "alpha");
+        var alphaVersion = await SingleVersionAsync(server.Client, "alpha");
         var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
         var history = await File.ReadAllBytesAsync(RunsPath);
         _github.OpenPullRequests = [new(1), new(2), new(3)];
         _github.Runs = [first, second, third];
         _github.FailArtifactsForRun = 300;
         ExpireDiscovery(server);
-        await SingleVersionAsync(server.Client, "alpha");
         await WaitForHealthErrorAsync(server.Client, "network connection");
         await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
         await Assert.That((await File.ReadAllBytesAsync(RunsPath)).SequenceEqual(history)).IsTrue();
+        using var alpha = await server.Client.GetAsync("/flat/alpha/index.json");
+        await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
         using var beta = await server.Client.GetAsync("/flat/beta/index.json");
-        await Assert.That(beta.StatusCode).IsEqualTo(HttpStatusCode.NotFound);
+        await Assert.That(beta.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using var known = await server.Client.GetAsync(PackageUrl("alpha", alphaVersion));
+        await Assert.That(known.StatusCode).IsEqualTo(HttpStatusCode.OK);
         using var health = await GetJsonAsync(server.Client, "/health");
         await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
     }
@@ -826,6 +1358,71 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
+    public async Task RunLimitChangeRetainsSourceBoundOfflinePackagesWithoutClaimingMembership()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        byte[] package;
+        await using (var online = await StartAsync(runLimit: 100))
+        {
+            version = await SingleVersionAsync(online.Client, "alpha");
+            package = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
+        }
+        var savedSnapshot = await File.ReadAllBytesAsync(SnapshotPath);
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        _github.FailDownloads = true;
+        await using (var offline = await StartAsync(runLimit: 101))
+        {
+            using var index = await offline.Client.GetAsync("/flat/alpha/index.json");
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.OK);
+            await Assert.That(index.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
+            await Assert.That(index.Headers.GetValues("X-127Cache-Membership").Single()).IsEqualTo("unknown");
+            using var body = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
+            await Assert.That(body.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
+            using var registration = await GetJsonAsync(offline.Client, "/registration/alpha/index.json");
+            await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
+                .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(version);
+            await Assert.That((await offline.Client.GetByteArrayAsync(PackageUrl("alpha", version))).SequenceEqual(package)).IsTrue();
+            using var aggregate = await offline.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
+            await Assert.That(aggregate.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            using var health = await GetJsonAsync(offline.Client, "/health");
+            await Assert.That(health.RootElement.GetProperty("membership").GetString()).IsEqualTo("unknown");
+            await Assert.That(health.RootElement.GetProperty("lastSuccessfulRefreshUtc").ValueKind).IsEqualTo(JsonValueKind.Null);
+        }
+        await using (var excluded = await StartAsync([2], runLimit: 101))
+        {
+            using var response = await excluded.Client.GetAsync("/v3/index.json");
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        }
+        await Assert.That(async () => { await using var changed = await StartAsync(runLimit: 101, workflow: "other.yml"); })
+            .ThrowsExactly<InvalidDataException>();
+        await Assert.That(async () => { await using var changed = await StartAsync(runLimit: 101, repository: "other/project"); })
+            .ThrowsExactly<InvalidDataException>();
+        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(savedSnapshot)).IsTrue();
+    }
+
+    [Test]
+    public async Task NewlyRequestedUncachedPinCannotProduceACompleteOfflineIndex()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        await using (var online = await StartAsync())
+            version = await SingleVersionAsync(online.Client, "alpha");
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        await using var offline = await StartAsync(runIds: [200]);
+        foreach (var route in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
+        {
+            using var index = await offline.Client.GetAsync(route);
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        }
+        using var known = await offline.Client.GetAsync(PackageUrl("alpha", version));
+        await Assert.That(known.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(known.Headers.GetValues("X-127Cache-Membership").Single()).IsEqualTo("unknown");
+    }
+
+    [Test]
     public async Task MetadataOnlySnapshotIsNotAnAvailableOfflineFeed()
     {
         _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
@@ -860,6 +1457,14 @@ public sealed class OfflineFeedTests : IDisposable
             betaVersion = await SingleVersionAsync(online.Client, "beta");
         }
         var betaDirectory = Path.GetDirectoryName(CachedPackagePath(200, 2, "beta", betaVersion))!;
+        var retainedInventory = RetainedInventoryPath(200, 2);
+        using (var saved = JsonDocument.Parse(await File.ReadAllTextAsync(retainedInventory)))
+        {
+            await Assert.That(saved.RootElement.GetProperty("schemaVersion").GetInt32()).IsEqualTo(1);
+            await Assert.That(saved.RootElement.GetProperty("inventory").GetProperty("repository").GetString()).IsEqualTo("fixture/project");
+            await Assert.That(saved.RootElement.GetProperty("inventory").GetProperty("workflow").GetString()).IsEqualTo("build.yml");
+            await Assert.That(saved.RootElement.GetProperty("inventory").GetProperty("packages")[0].GetProperty("id").GetString()).IsEqualTo("Beta");
+        }
         Directory.Delete(betaDirectory, recursive: true);
         File.Delete(Path.Combine(CacheDirectory, "artifacts", _github.PackagesArtifact(200).Id + ".zip"));
         var history = await File.ReadAllBytesAsync(RunsPath);
@@ -869,19 +1474,67 @@ public sealed class OfflineFeedTests : IDisposable
         await using var offline = await StartAsync();
         using (var alphaIndex = await offline.Client.GetAsync("/flat/alpha/index.json"))
         {
-            await Assert.That(alphaIndex.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            await Assert.That(alphaIndex.Content.Headers.ContentType?.MediaType).IsEqualTo("application/problem+json");
+            await Assert.That(alphaIndex.StatusCode).IsEqualTo(HttpStatusCode.OK);
+            await Assert.That(alphaIndex.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
+            using var json = JsonDocument.Parse(await alphaIndex.Content.ReadAsStringAsync());
+            await Assert.That(json.RootElement.GetProperty("versions").EnumerateArray()
+                .Select(element => element.GetString()!).ToArray()).IsEquivalentTo(new[] { alphaVersion });
         }
+        using (var registration = await GetJsonAsync(offline.Client, "/registration/alpha/index.json"))
+            await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
+                .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(alphaVersion);
         using (var alpha = await offline.Client.GetAsync(PackageUrl("alpha", alphaVersion)))
             await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.OK);
         using var beta = await offline.Client.GetAsync("/flat/beta/index.json");
         await Assert.That(beta.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using var search = await offline.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
+        await Assert.That(search.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        await RestoreAlphaAsync(offline, alphaVersion, "mixed-consumer");
         using var health = await GetJsonAsync(offline.Client, "/health");
         await Assert.That(health.RootElement.GetProperty("snapshotBuilds").GetInt32()).IsEqualTo(2);
         await Assert.That(health.RootElement.GetProperty("availableCachedBuilds").GetInt32()).IsEqualTo(1);
         await Assert.That(health.RootElement.GetProperty("unavailableBuilds").GetInt32()).IsEqualTo(1);
         await Assert.That((await File.ReadAllBytesAsync(RunsPath)).SequenceEqual(history)).IsTrue();
         await Assert.That(_github.DownloadCalls).IsEqualTo(downloads);
+    }
+
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task MissingOrTamperedRetainedInventoryCannotProveAnUnrelatedPackageIndex(bool tamper)
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
+        _github.OpenPullRequests = [new(1), new(2)];
+        string alphaVersion;
+        string betaVersion;
+        await using (var online = await StartAsync())
+        {
+            alphaVersion = await SingleVersionAsync(online.Client, "alpha");
+            betaVersion = await SingleVersionAsync(online.Client, "beta");
+        }
+        var retained = RetainedInventoryPath(200, 2);
+        string? changed = null;
+        if (tamper)
+        {
+            changed = (await File.ReadAllTextAsync(retained)).Replace("\"Beta\"", "\"Gamma\"", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(retained, changed);
+        }
+        else File.Delete(retained);
+        Directory.Delete(Path.GetDirectoryName(CachedPackagePath(200, 2, "beta", betaVersion))!, recursive: true);
+        File.Delete(Path.Combine(CacheDirectory, "artifacts", _github.PackagesArtifact(200).Id + ".zip"));
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        _github.FailDownloads = true;
+        await using var offline = await StartAsync();
+        foreach (var route in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
+        {
+            using var index = await offline.Client.GetAsync(route);
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            using var problem = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        }
+        using var known = await offline.Client.GetAsync(PackageUrl("alpha", alphaVersion));
+        await Assert.That(known.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        if (tamper) await Assert.That(await File.ReadAllTextAsync(retained)).IsEqualTo(changed);
     }
 
     [Test]
@@ -1099,6 +1752,65 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task ReadableNuspecDoesNotMakeCorruptPayloadHealthy(bool offline)
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        await using (var online = await StartAsync())
+            version = await SingleVersionAsync(online.Client, "alpha");
+        var path = CachedPackagePath(100, 1, "alpha", version);
+        var original = await File.ReadAllBytesAsync(path);
+        var corrupt = CorruptCompressedEntry(original, "lib/net8.0/payload.txt");
+        await File.WriteAllBytesAsync(path, corrupt);
+        using (var reader = new PackageArchiveReader(path))
+            await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(version);
+        using (var archive = ZipFile.OpenRead(path))
+        {
+            var entry = archive.GetEntry("lib/net8.0/payload.txt")!;
+            using var content = new MemoryStream();
+            using (var input = entry.Open()) await input.CopyToAsync(content);
+            await Assert.That(Crc32(content.ToArray())).IsNotEqualTo(entry.Crc32);
+        }
+
+        var downloads = _github.DownloadCalls;
+        if (offline)
+        {
+            _github.DiscoveryError = new IOException("Synthetic offline failure.");
+            _github.FailDownloads = true;
+        }
+        await using var server = await StartAsync();
+        using (var response = await server.Client.GetAsync(PackageUrl("alpha", version)))
+        {
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            await Assert.That(response.Content.Headers.ContentType?.MediaType).IsEqualTo("application/problem+json");
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        }
+        using (var index = await server.Client.GetAsync("/flat/alpha/index.json"))
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using (var health = await GetJsonAsync(server.Client, "/health"))
+            await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
+        await Assert.That((await File.ReadAllBytesAsync(path)).SequenceEqual(corrupt)).IsTrue();
+
+        File.Delete(path);
+        var recoveredVersion = await RetryVersionAsync(server.Client, "alpha");
+        await Assert.That(recoveredVersion).IsEqualTo(version);
+        var repaired = await server.Client.GetByteArrayAsync(PackageUrl("alpha", version));
+        using (var archive = new ZipArchive(new MemoryStream(repaired), ZipArchiveMode.Read))
+        {
+            var entry = archive.GetEntry("lib/net8.0/payload.txt")!;
+            using var content = new MemoryStream();
+            using (var input = entry.Open()) await input.CopyToAsync(content);
+            await Assert.That(Encoding.UTF8.GetString(content.ToArray())).IsEqualTo("payload-Alpha");
+            await Assert.That(Crc32(content.ToArray())).IsEqualTo(entry.Crc32);
+        }
+        await Assert.That(_github.DownloadCalls).IsEqualTo(downloads);
+    }
+
+    [Test]
     public async Task PackagesRemainResolvableWhenBuildVersionMetadataIsMissing()
     {
         _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
@@ -1172,6 +1884,7 @@ public sealed class OfflineFeedTests : IDisposable
         await using var server = await StartAsync();
         using (var expired = await server.Client.GetAsync("/v3/index.json"))
             await Assert.That(expired.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        await WaitForHealthErrorAsync(server.Client, "expired artifacts");
         using (var health = await GetJsonAsync(server.Client, "/health"))
             await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("expired artifacts");
         await Assert.That(File.Exists(SnapshotPath)).IsFalse();
@@ -1180,6 +1893,7 @@ public sealed class OfflineFeedTests : IDisposable
         _github.MissingVersionArtifactForRun = 100;
         using (var missing = await server.Client.GetAsync("/v3/index.json"))
             await Assert.That(missing.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        await WaitForHealthErrorAsync(server.Client, "missing package/version artifacts");
         using (var health = await GetJsonAsync(server.Client, "/health"))
             await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("missing package/version artifacts");
         await Assert.That(File.Exists(SnapshotPath)).IsFalse();
@@ -1191,8 +1905,11 @@ public sealed class OfflineFeedTests : IDisposable
         _github.Runs = [latest, old];
         _github.ExpiredRuns.Add(101);
         ExpireDiscovery(server);
-        await Assert.That(await SingleVersionAsync(server.Client, "alpha")).IsEqualTo(oldVersion);
         await WaitForHealthErrorAsync(server.Client, "expired artifacts");
+        using var index = await server.Client.GetAsync("/flat/alpha/index.json");
+        await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        using var package = await server.Client.GetAsync(PackageUrl("alpha", oldVersion));
+        await Assert.That(package.StatusCode).IsEqualTo(HttpStatusCode.OK);
         using var degraded = await GetJsonAsync(server.Client, "/health");
         await Assert.That(degraded.RootElement.GetProperty("error").GetString()!).Contains("expired artifacts");
         await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
@@ -1242,7 +1959,8 @@ public sealed class OfflineFeedTests : IDisposable
         await Assert.That(server.Logs.Messages.Any(x => x.Contains(marker, StringComparison.Ordinal))).IsFalse();
     }
 
-    private async Task<TestServer> StartAsync(int[]? pullRequests = null, long[]? runIds = null)
+    private async Task<TestServer> StartAsync(int[]? pullRequests = null, long[]? runIds = null,
+        int runLimit = 100, string workflow = "build.yml", string repository = "fixture/project")
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -1255,8 +1973,9 @@ public sealed class OfflineFeedTests : IDisposable
             ["Urls"] = "http://127.0.0.1:0",
             ["Proxy:BaseUrl"] = "http://127.0.0.1:1",
             ["Proxy:CacheDirectory"] = CacheDirectory,
-            ["Proxy:Repository"] = "fixture/project",
-            ["Proxy:Workflow"] = "build.yml"
+            ["Proxy:Repository"] = repository,
+            ["Proxy:Workflow"] = workflow,
+            ["Proxy:RunLimit"] = runLimit.ToString()
         };
         if (pullRequests is not null)
             for (var index = 0; index < pullRequests.Length; index++) settings[$"Proxy:PullRequests:{index}"] = pullRequests[index].ToString();
@@ -1269,6 +1988,12 @@ public sealed class OfflineFeedTests : IDisposable
         builder.Services.AddProxy(builder.Configuration);
         builder.Services.AddSingleton<IGitHubClient>(_github);
         var app = builder.Build();
+        var requests = new ConcurrentQueue<string>();
+        app.Use(async (context, next) =>
+        {
+            requests.Enqueue(context.Request.Path.Value ?? "");
+            await next(context);
+        });
         app.UseExceptionHandler();
         app.MapProxy();
         try
@@ -1277,7 +2002,7 @@ public sealed class OfflineFeedTests : IDisposable
             var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses;
             var address = addresses.Single();
             app.Services.GetRequiredService<ProxyOptions>().BaseUrl = address;
-            return new TestServer(app, new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(10) }, logs);
+            return new TestServer(app, new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(10) }, logs, requests);
         }
         catch
         {
@@ -1288,6 +2013,73 @@ public sealed class OfflineFeedTests : IDisposable
 
     private static void ExpireDiscovery(TestServer server) =>
         ((MemoryCache)server.App.Services.GetRequiredService<IMemoryCache>()).Compact(1);
+
+    private async Task RestoreAlphaAsync(TestServer server, string version, string directoryName)
+    {
+        var consumer = Path.Combine(_directory, directoryName);
+        Directory.CreateDirectory(consumer);
+        var project = Path.Combine(consumer, "consumer.csproj");
+        var config = Path.Combine(consumer, "NuGet.config");
+        var packages = Path.Combine(consumer, "packages");
+        await File.WriteAllTextAsync(project, $$"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><NuGetAudit>false</NuGetAudit>
+                <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally></PropertyGroup>
+              <ItemGroup><PackageReference Include="Alpha" Version="[{{version}},)" /></ItemGroup>
+            </Project>
+            """);
+        await File.WriteAllTextAsync(config, $$"""
+            <configuration><packageSources><clear />
+              <add key="offline" value="{{server.Client.BaseAddress}}v3/index.json" allowInsecureConnections="true" />
+            </packageSources></configuration>
+            """);
+        var runtime = Path.TrimEndingDirectorySeparator(RuntimeEnvironment.GetRuntimeDirectory());
+        var dotnetRoot = Directory.GetParent(runtime)!.Parent!.Parent!.FullName;
+        var start = new ProcessStartInfo
+        {
+            FileName = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet"),
+            WorkingDirectory = consumer,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        foreach (var argument in new[] { "restore", project, "--configfile", config, "--packages", packages, "--no-cache", "--verbosity", "quiet" })
+            start.ArgumentList.Add(argument);
+        start.Environment["TEMP"] = consumer;
+        start.Environment["TMP"] = consumer;
+        start.Environment["TMPDIR"] = consumer;
+        start.Environment["DOTNET_CLI_HOME"] = consumer;
+        start.Environment["NUGET_HTTP_CACHE_PATH"] = Path.Combine(consumer, "http-cache");
+        start.Environment["NUGET_PLUGINS_CACHE_PATH"] = Path.Combine(consumer, "plugins-cache");
+        start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
+        server.Requests.Clear();
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("dotnet restore did not start.");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException("Offline dotnet restore failed: " + await output + await error);
+        using var assets = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(consumer, "obj", "project.assets.json")));
+        await Assert.That(assets.RootElement.GetProperty("libraries").EnumerateObject()
+            .Any(property => property.Name.Equals("Alpha/" + version, StringComparison.OrdinalIgnoreCase))).IsTrue();
+        await Assert.That(await File.ReadAllTextAsync(Path.Combine(packages, "alpha", version, "lib", "net8.0", "payload.txt")))
+            .IsEqualTo("payload-Alpha");
+        await Assert.That(server.Requests.Any(path => path.Equals("/flat/alpha/index.json", StringComparison.OrdinalIgnoreCase))).IsTrue();
+        await Assert.That(server.Requests.Any(path => path.Equals(PackageUrl("alpha", version), StringComparison.OrdinalIgnoreCase))).IsTrue();
+    }
 
     private async Task WaitForDiscoveryAsync(int expected)
     {
@@ -1311,6 +2103,25 @@ public sealed class OfflineFeedTests : IDisposable
     {
         using var json = await GetJsonAsync(client, $"/flat/{id}/index.json");
         return json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
+    }
+
+    private static async Task<string> RetryVersionAsync(HttpClient client, string id)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            using var response = await client.GetAsync($"/flat/{id}/index.json");
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                var versions = json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
+                await Assert.That(versions.Length).IsEqualTo(1);
+                return versions[0];
+            }
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            await Task.Delay(20);
+        }
+        throw new TimeoutException("The cached package index did not recover.");
     }
 
     private static async Task WaitForHealthErrorAsync(HttpClient client, string expected)
@@ -1360,16 +2171,74 @@ public sealed class OfflineFeedTests : IDisposable
 
     private static string PackageUrl(string id, string version) => $"/flat/{id}/{version}/{id}.{version}.nupkg";
 
+    private static byte[] CorruptCompressedEntry(byte[] original, string name)
+    {
+        using var originalArchive = new ZipArchive(new MemoryStream(original), ZipArchiveMode.Read);
+        var originalEntry = originalArchive.GetEntry(name)!;
+        using var originalContent = new MemoryStream();
+        using (var input = originalEntry.Open()) input.CopyTo(originalContent);
+        if (Crc32(originalContent.ToArray()) != originalEntry.Crc32)
+            throw new InvalidDataException("The original test payload already has a bad CRC.");
+
+        for (var header = 0; header <= original.Length - 30; header++)
+        {
+            if (BinaryPrimitives.ReadUInt32LittleEndian(original.AsSpan(header, 4)) != 0x04034b50) continue;
+            var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(original.AsSpan(header + 26, 2));
+            var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(original.AsSpan(header + 28, 2));
+            var data = header + 30 + nameLength + extraLength;
+            if (data > original.Length || header + 30 + nameLength > original.Length
+                || Encoding.UTF8.GetString(original, header + 30, nameLength) != name) continue;
+            for (var offset = data; offset < data + originalEntry.CompressedLength && offset < original.Length; offset++)
+            {
+                for (var bit = 0; bit < 8; bit++)
+                {
+                    var candidate = original.ToArray();
+                    candidate[offset] ^= (byte)(1 << bit);
+                    try
+                    {
+                        using var archive = new ZipArchive(new MemoryStream(candidate), ZipArchiveMode.Read);
+                        var entry = archive.GetEntry(name)!;
+                        using var changed = new MemoryStream();
+                        using (var input = entry.Open()) input.CopyTo(changed);
+                        if (!changed.ToArray().SequenceEqual(originalContent.ToArray())
+                            && Crc32(changed.ToArray()) != entry.Crc32)
+                            return candidate;
+                    }
+                    catch (InvalidDataException)
+                    {
+                    }
+                }
+            }
+        }
+        throw new InvalidOperationException("Could not create a readable compressed payload with a CRC mismatch.");
+    }
+
+    private static uint Crc32(byte[] bytes)
+    {
+        var crc = uint.MaxValue;
+        foreach (var value in bytes)
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++)
+                crc = (crc >> 1) ^ ((crc & 1) == 1 ? 0xedb88320u : 0u);
+        }
+        return ~crc;
+    }
+
     private string CachedPackagePath(long runId, int pullRequest, string id, string version) =>
         Path.Combine(CacheDirectory, "packages", "discovered", $"{pullRequest}.{runId}.1.{_github.PackagesArtifact(runId).Id}",
             $"{id}.{version}.nupkg");
+
+    private string RetainedInventoryPath(long runId, int pullRequest) =>
+        Path.Combine(CacheDirectory, "inventories", $"{pullRequest}.{runId}.1.{_github.PackagesArtifact(runId).Id}.json");
 
     public void Dispose()
     {
         if (Directory.Exists(_directory)) Directory.Delete(_directory, recursive: true);
     }
 
-    private sealed record TestServer(WebApplication App, HttpClient Client, CaptureLogs Logs) : IAsyncDisposable
+    private sealed record TestServer(WebApplication App, HttpClient Client, CaptureLogs Logs,
+        ConcurrentQueue<string> Requests) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {

@@ -9,6 +9,7 @@ namespace Keboo._127Cache;
 public sealed class DiscoveryUnavailableException(string message) : IOException(message);
 internal sealed class CacheMetadataUnavailableException : IOException;
 internal sealed class SnapshotPersistenceException : IOException;
+internal sealed class PinnedRunWorkflowException : IOException;
 
 internal static class DiscoveryFailure
 {
@@ -21,6 +22,8 @@ internal static class DiscoveryFailure
             return "Cached catalog or run metadata cannot be read. Restore it or choose a different cache directory; the original files were preserved.";
         if (exception is SnapshotPersistenceException)
             return "Could not save discovery metadata. Check the cache directory permissions and available space.";
+        if (exception is PinnedRunWorkflowException)
+            return "A pinned run could not be verified against the configured workflow. Check the run and workflow before retrying.";
         if (exception is Win32Exception)
             return "GitHub CLI 'gh' could not be started. Install it from https://cli.github.com/ and run 'gh auth login'.";
         if (exception is OperationCanceledException or TimeoutException)

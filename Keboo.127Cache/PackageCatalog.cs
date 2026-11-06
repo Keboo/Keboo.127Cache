@@ -14,8 +14,9 @@ public sealed record BuildEntry(
 public sealed record CatalogFile(string Repository, List<BuildEntry> Builds);
 public sealed record PublishedPackage(string Id, BuildEntry Build);
 public sealed record RunArtifacts(
-    long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact VersionArtifact);
-public sealed record RunArtifactsFile(string Repository, string Workflow, List<RunArtifacts> Runs);
+    long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact VersionArtifact,
+    bool WorkflowVerified = false);
+public sealed record RunArtifactsFile(string Repository, string Workflow, List<RunArtifacts> Runs, int SchemaVersion = 1);
 
 public sealed class PackageCatalog
 {
@@ -28,10 +29,15 @@ public sealed class PackageCatalog
     private readonly object _cacheKey = new();
     private readonly SemaphoreSlim _gate = new(1);
     private readonly object _refreshGate = new();
+    private readonly object _contentRefreshGate = new();
+    private readonly object _buildRefreshGate = new();
+    private readonly object _offlineVersionGate = new();
+    private readonly Dictionary<long, Task<string>> _offlineVersionReads = [];
     private readonly CancellationToken _stopping;
     private readonly string _file;
     private readonly string _runsFile;
     private readonly string _snapshotFile;
+    private readonly string _incompleteFile;
     private readonly object _healthGate = new();
     private readonly AsyncLocal<FeedRequestScope?> _requestScope = new();
     private List<RunArtifacts> _runs;
@@ -42,15 +48,23 @@ public sealed class PackageCatalog
     private string? _contentError;
     private bool _catalogUnreadable;
     private bool _runsUnreadable;
+    private volatile bool _incompleteUnreadable;
     private Task<Discovery>? _refreshTask;
     private PartialDiscovery? _partialDiscovery;
+    private ContentRefresh? _contentRefresh;
+    private BuildRefresh? _buildRefresh;
+    private static readonly TimeSpan RequestWait = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan OfflineWait = TimeSpan.FromMilliseconds(500);
+    private const string ContentPending = "Build content is still being prepared; cached results may be incomplete.";
 
     private sealed record Discovery(
         RunArtifacts[] Runs, bool IsStale, string? Error, OfflineSnapshot? Snapshot,
-        bool MembershipUnknown = false, int SkippedBuilds = 0, bool MetadataIncomplete = false)
+        bool MembershipUnknown = false, int SkippedBuilds = 0, bool MetadataIncomplete = false,
+        bool UnverifiedPinnedRuns = false, bool PersistencePending = false)
     {
         public bool IsPartial => SkippedBuilds > 0 || MetadataIncomplete;
         public string Membership => MembershipUnknown ? "unknown" : IsStale ? "stale" : "current";
+        public string Provenance => UnverifiedPinnedRuns ? "incomplete" : ProvenanceFor(Runs);
     }
 
     private sealed record OfflineResolution(
@@ -62,15 +76,23 @@ public sealed class PackageCatalog
     }
 
     private sealed record OnlineBuilds(BuildEntry[] Builds, Exception? Failure);
+    private sealed record OnlinePackages(PublishedPackage[] Packages, Exception? Failure);
+    private sealed record OfflineRun(BuildEntry? Build, CachedPackageAvailability Availability);
     private sealed record PartialDiscovery(OfflineSnapshot Configuration, Discovery Discovery);
+    private sealed record IncompleteDiscoveryFile(
+        int SchemaVersion, string Repository, string Workflow, string PackagesArtifact, string VersionArtifact,
+        int[] PullRequests, long[] RunIds, int RunLimit, RunArtifacts[] Runs, int SkippedBuilds,
+        bool MetadataIncomplete, bool UnverifiedPinnedRuns);
+    private sealed record ContentRefresh(RunArtifacts[] Runs, Task<OnlinePackages> Work);
+    private sealed record BuildRefresh(RunArtifacts[] Runs, Task<OnlineBuilds> Work);
 
-    internal sealed record FeedAvailability(bool IsDegraded, bool IsPartial, string Membership);
+    internal sealed record FeedAvailability(bool IsDegraded, bool IsPartial, string Membership, string Provenance);
 
     private sealed class FeedRequestScope(PackageCatalog catalog, FeedRequestScope? previous) : IDisposable
     {
         public Discovery? Discovery { get; set; }
         public OfflineResolution? Offline { get; set; }
-        public FeedAvailability Availability { get; set; } = new(false, false, "current");
+        public FeedAvailability Availability { get; set; } = new(false, false, "current", "unknown");
         public void Dispose() => catalog._requestScope.Value = previous;
     }
 
@@ -93,9 +115,12 @@ public sealed class PackageCatalog
         LoadRuns();
         _snapshotFile = Path.Combine(options.CacheDirectory, "visible-runs.json");
         _snapshot = OfflineSnapshot.Load(_snapshotFile, options, out _snapshotError);
+        _incompleteFile = Path.Combine(options.CacheDirectory, "incomplete-discovery.json");
+        LoadIncompleteDiscovery();
+        var matchingSnapshot = MatchingSnapshot();
         _health = new CatalogHealth("degraded", options.Repository, "Initial GitHub discovery has not completed.",
-            _snapshot?.LastSuccessfulRefreshUtc, _snapshot is null ? "unknown" : "stale",
-            _snapshot?.Runs.Length ?? 0, null, null, null, null);
+            matchingSnapshot?.LastSuccessfulRefreshUtc, matchingSnapshot is null ? "unknown" : "stale",
+            matchingSnapshot?.Runs.Length ?? 0, null, null, null, null, ProvenanceFor(matchingSnapshot?.Runs));
     }
 
     public async Task<PublishedPackage[]> GetPackagesAsync(CancellationToken cancellationToken)
@@ -106,8 +131,87 @@ public sealed class PackageCatalog
 
         try
         {
+            var work = StartContentRefresh(discovery.Runs);
+            if (work is not null)
+            {
+                if (!work.IsCompleted) MarkContentPending(discovery);
+                if (await CompletesWithinRequestAsync(work, cancellationToken))
+                {
+                    var result = await work;
+                    if (result.Failure is not null)
+                        return (await RecoverFromContentFailureAsync(result.Failure, discovery, cancellationToken)).Packages;
+                    MarkContentHealthy(discovery);
+                    return result.Packages;
+                }
+            }
+            return (await ResolvePendingContentAsync(discovery, cancellationToken)).Packages;
+        }
+        catch (Exception exception) when (exception is not DiscoveryUnavailableException
+            && DiscoveryFailure.CanHandleContent(exception, cancellationToken))
+        {
+            return (await RecoverFromContentFailureAsync(exception, discovery, cancellationToken)).Packages;
+        }
+    }
+
+    public async Task<BuildEntry[]> GetBuildsAsync(CancellationToken cancellationToken)
+    {
+        var discovery = await DiscoverAsync(cancellationToken);
+        if (discovery.IsStale)
+            return (await RequireOfflinePackagesAsync(discovery, cancellationToken)).Builds;
+        try
+        {
+            var work = StartBuildRefresh(discovery.Runs);
+            if (work is not null)
+            {
+                if (await CompletesWithinRequestAsync(work, cancellationToken))
+                {
+                    var online = await work;
+                    if (online.Failure is not null)
+                        return (await RecoverFromContentFailureAsync(online.Failure, discovery, cancellationToken)).Builds;
+                    return online.Builds;
+                }
+            }
+            return (await ResolvePendingContentAsync(discovery, cancellationToken)).Builds;
+        }
+        catch (Exception exception) when (exception is not DiscoveryUnavailableException
+            && DiscoveryFailure.CanHandleContent(exception, cancellationToken))
+        {
+            return (await RecoverFromContentFailureAsync(exception, discovery, cancellationToken)).Builds;
+        }
+    }
+
+    private Task<OnlinePackages>? StartContentRefresh(RunArtifacts[] runs)
+    {
+        lock (_contentRefreshGate)
+        {
+            if (_contentRefresh is { Work.IsCompleted: false } pending)
+                return pending.Runs.SequenceEqual(runs) ? pending.Work : null;
+            var work = MaterializePackagesAsync(runs, _stopping);
+            _contentRefresh = new ContentRefresh(runs, work);
+            ObserveFault(work);
+            return work;
+        }
+    }
+
+    private Task<OnlineBuilds>? StartBuildRefresh(RunArtifacts[] runs)
+    {
+        lock (_buildRefreshGate)
+        {
+            if (_buildRefresh is { Work.IsCompleted: false } pending)
+                return pending.Runs.SequenceEqual(runs) ? pending.Work : null;
+            var work = GetOnlineBuildsAsync(runs, _stopping);
+            _buildRefresh = new BuildRefresh(runs, work);
+            ObserveFault(work);
+            return work;
+        }
+    }
+
+    private async Task<OnlinePackages> MaterializePackagesAsync(RunArtifacts[] runs, CancellationToken cancellationToken)
+    {
+        try
+        {
             var result = new List<PublishedPackage>();
-            var online = await GetOnlineBuildsAsync(discovery.Runs, cancellationToken);
+            var online = await GetOnlineBuildsAsync(runs, cancellationToken);
             var failure = online.Failure;
             foreach (var build in online.Builds)
             {
@@ -126,38 +230,49 @@ public sealed class PackageCatalog
                     failure ??= exception;
                 }
             }
-            if (failure is not null)
-                return (await RecoverFromContentFailureAsync(failure, discovery, cancellationToken)).Packages;
-            MarkContentHealthy(discovery);
-            return result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), VersionComparer.VersionRelease).ToArray();
+            return new OnlinePackages(
+                result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), VersionComparer.VersionRelease).ToArray(), failure);
         }
-        catch (Exception exception) when (exception is not DiscoveryUnavailableException
-            && DiscoveryFailure.CanHandleContent(exception, cancellationToken))
+        catch (Exception exception) when (DiscoveryFailure.CanHandleContent(exception, cancellationToken))
         {
-            return (await RecoverFromContentFailureAsync(exception, discovery, cancellationToken)).Packages;
+            return new OnlinePackages([], exception);
         }
     }
 
-    public async Task<BuildEntry[]> GetBuildsAsync(CancellationToken cancellationToken)
+    private static void ObserveFault(Task task) =>
+        _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+    private static async Task<bool> CompletesWithinRequestAsync(
+        Task work, CancellationToken cancellationToken, TimeSpan? wait = null)
+    {
+        if (work.IsCompleted) return true;
+        var completed = await Task.WhenAny(work, Task.Delay(wait ?? RequestWait, cancellationToken));
+        cancellationToken.ThrowIfCancellationRequested();
+        return completed == work;
+    }
+
+    private void MarkContentPending(Discovery discovery)
+    {
+        if (!discovery.IsPartial) SetFailureHealth(ContentPending, discovery, contentFailure: true);
+    }
+
+    private async Task<OfflineResolution> ResolvePendingContentAsync(Discovery discovery, CancellationToken cancellationToken)
+    {
+        MarkContentPending(discovery);
+        var resolution = await RequireOfflinePackagesAsync(discovery, cancellationToken);
+        if (_requestScope.Value is { } scope)
+            scope.Availability = new FeedAvailability(true, true, discovery.Membership, discovery.Provenance);
+        return resolution;
+    }
+
+    public async Task<RunArtifacts[]> GetRunArtifactsAsync(CancellationToken cancellationToken)
     {
         var discovery = await DiscoverAsync(cancellationToken);
-        if (discovery.IsStale)
-            return (await RequireOfflinePackagesAsync(discovery, cancellationToken)).Builds;
-        try
-        {
-            var online = await GetOnlineBuildsAsync(discovery.Runs, cancellationToken);
-            return online.Failure is null ? online.Builds
-                : (await RecoverFromContentFailureAsync(online.Failure, discovery, cancellationToken)).Builds;
-        }
-        catch (Exception exception) when (exception is not DiscoveryUnavailableException
-            && DiscoveryFailure.CanHandleContent(exception, cancellationToken))
-        {
-            return (await RecoverFromContentFailureAsync(exception, discovery, cancellationToken)).Builds;
-        }
+        if (discovery.IsPartial && discovery.Runs.Length == 0)
+            throw new DiscoveryUnavailableException(discovery.Error + " No usable builds are available.");
+        return discovery.Runs;
     }
-
-    public async Task<RunArtifacts[]> GetRunArtifactsAsync(CancellationToken cancellationToken) =>
-        (await DiscoverAsync(cancellationToken)).Runs;
 
     public CatalogHealth GetHealth()
     {
@@ -177,7 +292,7 @@ public sealed class PackageCatalog
         var partial = discovery.IsPartial || HasContentFailure();
         if (discovery.IsStale)
             partial |= (await RequireOfflinePackagesAsync(discovery, cancellationToken)).IsPartial;
-        var availability = new FeedAvailability(discovery.IsStale || partial, partial, discovery.Membership);
+        var availability = new FeedAvailability(discovery.IsStale || partial, partial, discovery.Membership, discovery.Provenance);
         if (_requestScope.Value is { } scope) scope.Availability = availability;
         return availability;
     }
@@ -185,12 +300,14 @@ public sealed class PackageCatalog
     internal Func<FeedAvailability> CaptureRequestAvailability()
     {
         var scope = _requestScope.Value;
-        return () => scope?.Availability ?? new FeedAvailability(false, false, "current");
+        return () => scope?.Availability ?? new FeedAvailability(false, false, "current", "unknown");
     }
 
     internal void EnsurePackageIndexComplete(string id, bool hasVersions)
     {
         var scope = _requestScope.Value;
+        if (scope?.Discovery is { SkippedBuilds: > 0 })
+            throw new DiscoveryUnavailableException("A discovered build has an unknown package inventory, so package versions cannot be enumerated.");
         if (scope?.Discovery?.MetadataIncomplete == true)
             throw new DiscoveryUnavailableException("Cached build metadata is incomplete, so package versions cannot be enumerated.");
         if (scope?.Offline is { } offline
@@ -286,7 +403,17 @@ public sealed class PackageCatalog
         {
             var fallback = FindFallback(GetHealth().Error ?? "GitHub discovery is in progress.");
             if (fallback is not null && fallback.Runs.Any(_packages.MightHaveCachedContent))
+            {
+                if (fallback.PersistencePending && await CompletesWithinRequestAsync(refresh, cancellationToken, OfflineWait))
+                    return Remember(scope, await refresh.WaitAsync(cancellationToken));
                 return Remember(scope, fallback);
+            }
+            if (!await CompletesWithinRequestAsync(refresh, cancellationToken))
+            {
+                const string error = "GitHub discovery is still in progress. Retry when it completes.";
+                SetFailureHealth(error, fallback);
+                throw new DiscoveryUnavailableException(error);
+            }
         }
         return Remember(scope, await refresh.WaitAsync(cancellationToken));
     }
@@ -302,7 +429,9 @@ public sealed class PackageCatalog
             var health = GetHealth();
             if (pending is not null && (health.Status == "ok" || health.Error == "Initial GitHub discovery has not completed."))
                 SetFailureHealth(pending.Error!, pending);
-            return _refreshTask = RefreshAndHandleFailureAsync(_stopping);
+            var task = RefreshAndHandleFailureAsync(_stopping);
+            ObserveFault(task);
+            return _refreshTask = task;
         }
     }
 
@@ -315,12 +444,24 @@ public sealed class PackageCatalog
         catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
         {
             var error = DiscoveryFailure.Describe(exception);
+            if (exception is PinnedRunWorkflowException)
+            {
+                _memoryCache.Remove(_cacheKey);
+                Volatile.Write(ref _partialDiscovery, null);
+                SetFailureHealth(error, null);
+                _logger.LogWarning("Catalog discovery failed: {Error}", error);
+                throw new DiscoveryUnavailableException(error);
+            }
             var snapshot = MatchingSnapshot();
             var fallback = FindFallback(error);
             if (fallback is null && snapshot is null)
                 error += " " + (_snapshotError ?? "No matching successful discovery snapshot is available.");
             else if (fallback is null && snapshot?.Runs.Length == 0)
                 error += " The last successful snapshot contained no builds, so no offline feed is available.";
+            if (fallback is null && _incompleteUnreadable)
+                error += " Previously incomplete discovery metadata cannot be read; a complete live refresh is required.";
+            if (fallback is null && HasUnverifiedPinnedRuns())
+                error += " Legacy pinned runs cannot be verified against the configured workflow while offline.";
             if (fallback is not null) error = fallback.Error!;
             SetFailureHealth(error, fallback);
             _logger.LogWarning("Catalog discovery failed: {Error}", error);
@@ -372,14 +513,34 @@ public sealed class PackageCatalog
         foreach (var (run, pr) in runs)
         {
             // Completed immutable builds already known locally need no artifact API/download request.
-            if (next.Any(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr
-                && x.Packages.Name == _options.PackagesArtifact && x.VersionArtifact.Name == _options.VersionArtifact)) continue;
-            var artifacts = await _github.GetArtifactsAsync(run.Id, cancellationToken);
-            var packages = artifacts.SingleOrDefault(x => x.Name == _options.PackagesArtifact);
-            var version = artifacts.SingleOrDefault(x => x.Name == _options.VersionArtifact);
+            var existing = next.FindIndex(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr
+                && x.Packages.Name == _options.PackagesArtifact && x.VersionArtifact.Name == _options.VersionArtifact);
+            var cachedRun = existing >= 0 ? next[existing] : null;
+            if (cachedRun is { WorkflowVerified: true } && cachedRun.HeadSha == run.HeadSha)
+                continue;
+            IReadOnlyList<Artifact> artifacts;
+            try
+            {
+                artifacts = await _github.GetArtifactsAsync(run.Id, cancellationToken);
+            }
+            catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken)
+                && !_options.RunIds.Contains(run.Id))
+            {
+                skipped++;
+                skippedError ??= DiscoveryFailure.Describe(exception);
+                _logger.LogWarning("Skipping an unpinned build: {Error}", skippedError);
+                continue;
+            }
+            var packageMatches = artifacts.Where(x => x.Name == _options.PackagesArtifact).Take(2).ToArray();
+            var versionMatches = artifacts.Where(x => x.Name == _options.VersionArtifact).Take(2).ToArray();
+            var packages = packageMatches.Length == 1 ? packageMatches[0] : null;
+            var version = versionMatches.Length == 1 ? versionMatches[0] : null;
+            var preserved = cachedRun is not null && cachedRun.HeadSha == run.HeadSha
+                && cachedRun.Packages.Id == packages?.Id && cachedRun.VersionArtifact.Id == version?.Id
+                && _packages.MightHaveCachedContent(cachedRun);
             var problem = packages is null || version is null
                 ? $"Run {run.Id} has missing package/version artifacts."
-                : (packages.Expired && !_artifacts.Contains(packages)) || (version.Expired && !_artifacts.Contains(version))
+                : !preserved && ((packages.Expired && !_artifacts.Contains(packages)) || (version.Expired && !_artifacts.Contains(version)))
                     ? $"Run {run.Id} has expired artifacts that are not cached locally."
                     : null;
             if (problem is not null)
@@ -391,7 +552,7 @@ public sealed class PackageCatalog
                 continue;
             }
             next.RemoveAll(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr);
-            next.Add(new RunArtifacts(run.Id, run.Attempt, pr, run.HeadSha, packages!, version!));
+            next.Add(new RunArtifacts(run.Id, run.Attempt, pr, run.HeadSha, packages!, version!, WorkflowVerified: true));
         }
         foreach (var id in _options.RunIds)
         {
@@ -404,37 +565,39 @@ public sealed class PackageCatalog
                 || _options.RunIds.Contains(x.RunId))
             .Where(x => x.Packages.Name == _options.PackagesArtifact && x.VersionArtifact.Name == _options.VersionArtifact)
             .OrderBy(x => x.RunId).ThenBy(x => x.Attempt).ToArray();
-        var metadataIncomplete = HasUnmatchedCatalogBuilds(result, openPullRequests);
+        var unverifiedRuns = result.Any(run => !run.WorkflowVerified);
+        var metadataIncomplete = unverifiedRuns || HasUnmatchedCatalogBuilds(result, openPullRequests);
+        if (skipped > 0 || metadataIncomplete)
+        {
+            var error = skipped > 0 ? skippedError + " Discovery is incomplete; unpinned unavailable builds were skipped." : "";
+            if (metadataIncomplete) error += " Cached catalog and run metadata do not agree; package inventories may be incomplete.";
+            if (unverifiedRuns) error += " Some cached runs lack verified workflow provenance.";
+            var incomplete = ExcludeUnverifiedPins(new Discovery(result, result.Length == 0, error.Trim(), MatchingSnapshot(),
+                SkippedBuilds: skipped, MetadataIncomplete: metadataIncomplete));
+            if (incomplete is null) throw new PinnedRunWorkflowException();
+            await PersistIncompleteAsync(incomplete, cancellationToken);
+            SetFailureHealth(incomplete.Error!, incomplete);
+            return incomplete;
+        }
+
+        await PersistIncompleteAsync(new Discovery(result, true,
+            "Discovery metadata has not yet been committed.", MatchingSnapshot(),
+            MetadataIncomplete: true, PersistencePending: true), cancellationToken);
         try
         {
             await JsonSettings.WriteAtomicAsync(_runsFile,
-                new RunArtifactsFile(_options.Repository, _options.Workflow, next), cancellationToken);
+                new RunArtifactsFile(_options.Repository, _options.Workflow, next, SchemaVersion: 2), cancellationToken);
             _runs = next;
         }
         catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
         {
             throw new SnapshotPersistenceException();
         }
-        if (skipped > 0 || metadataIncomplete)
-        {
-            if (result.Length == 0)
-            {
-                if (skipped > 0) throw new InvalidDataException(skippedError);
-                throw new CacheMetadataUnavailableException();
-            }
-            var error = skipped > 0 ? skippedError + " Discovery is incomplete; unpinned unavailable builds were skipped." : "";
-            if (metadataIncomplete) error += " Cached catalog and run metadata do not agree; package inventories may be incomplete.";
-            var incomplete = new Discovery(result, false, error.Trim(), MatchingSnapshot(),
-                SkippedBuilds: skipped, MetadataIncomplete: metadataIncomplete);
-            Volatile.Write(ref _partialDiscovery, new PartialDiscovery(OfflineSnapshot.Create(_options, []), incomplete));
-            SetFailureHealth(incomplete.Error!, incomplete);
-            return incomplete;
-        }
-
         var snapshot = OfflineSnapshot.Create(_options, result);
         try
         {
             await JsonSettings.WriteAtomicAsync(_snapshotFile, snapshot, cancellationToken);
+            if (File.Exists(_incompleteFile)) File.Delete(_incompleteFile);
         }
         catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
         {
@@ -442,13 +605,32 @@ public sealed class PackageCatalog
         }
         _snapshot = snapshot;
         _snapshotError = null;
+        _incompleteUnreadable = false;
         Volatile.Write(ref _partialDiscovery, null);
         lock (_healthGate)
             _health = new CatalogHealth(_contentError is null ? "ok" : "degraded", _options.Repository, _contentError,
                 snapshot.LastSuccessfulRefreshUtc,
-                "current", snapshot.Runs.Length, null, null, null, null);
+                "current", snapshot.Runs.Length, null, null, null, null, ProvenanceFor(snapshot.Runs));
         _memoryCache.Set(_cacheKey, result, TimeSpan.FromSeconds(_options.RefreshSeconds));
         return new Discovery(result, false, null, snapshot);
+    }
+
+    private async Task PersistIncompleteAsync(Discovery incomplete, CancellationToken cancellationToken)
+    {
+        Volatile.Write(ref _partialDiscovery, new PartialDiscovery(OfflineSnapshot.Create(_options, []), incomplete));
+        try
+        {
+            await JsonSettings.WriteAtomicAsync(_incompleteFile, new IncompleteDiscoveryFile(
+                1, _options.Repository, _options.Workflow, _options.PackagesArtifact, _options.VersionArtifact,
+                _options.PullRequests.Distinct().Order().ToArray(), _options.RunIds.Distinct().Order().ToArray(),
+                _options.RunLimit, incomplete.Runs, incomplete.SkippedBuilds, incomplete.MetadataIncomplete,
+                incomplete.UnverifiedPinnedRuns), cancellationToken);
+            _incompleteUnreadable = false;
+        }
+        catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
+        {
+            throw new SnapshotPersistenceException();
+        }
     }
 
     private static Discovery Remember(FeedRequestScope? scope, Discovery discovery)
@@ -460,15 +642,47 @@ public sealed class PackageCatalog
     private OfflineSnapshot? MatchingSnapshot() =>
         _snapshot is { } snapshot && snapshot.Matches(_options) ? snapshot : null;
 
+    private static string ProvenanceFor(RunArtifacts[]? runs) =>
+        runs is not { Length: > 0 } ? "unknown" : runs.All(run => run.WorkflowVerified) ? "verified" : "legacy-unverified";
+
+    private bool IsUnverifiedPinnedRun(RunArtifacts run) =>
+        !run.WorkflowVerified && (_options.RunIds.Contains(run.RunId)
+            || (_snapshot is { } snapshot && snapshot.MatchesSource(_options)
+                && snapshot.RunIds is not null && snapshot.RunIds.Contains(run.RunId)));
+
+    private bool HasUnverifiedPinnedRuns() =>
+        (MatchingSnapshot()?.Runs ?? _runs.ToArray()).Any(IsUnverifiedPinnedRun);
+
+    private Discovery? ExcludeUnverifiedPins(Discovery discovery)
+    {
+        var runs = discovery.Runs.Where(run => !IsUnverifiedPinnedRun(run)).ToArray();
+        if (runs.Length == discovery.Runs.Length) return discovery;
+        if (runs.Length == 0) return null;
+        return discovery with
+        {
+            Runs = runs,
+            Error = discovery.Error + " Legacy pinned runs lack verified workflow provenance.",
+            MetadataIncomplete = true,
+            UnverifiedPinnedRuns = true
+        };
+    }
+
     private Discovery? FindFallback(string error)
     {
+        if (_incompleteUnreadable) return null;
         var partial = Volatile.Read(ref _partialDiscovery);
         if (partial is not null && partial.Configuration.Matches(_options))
-            return partial.Discovery with { IsStale = true, Error = error };
+        {
+            if (partial.Discovery.Error is { Length: > 0 } previous
+                && !error.Contains(previous, StringComparison.Ordinal))
+                error += " " + previous;
+            return ExcludeUnverifiedPins(partial.Discovery with { IsStale = true, Error = error });
+        }
         var snapshot = MatchingSnapshot();
         if (snapshot is not null)
-            return snapshot.Runs.Length == 0 ? null : new Discovery(snapshot.Runs, true, error, snapshot);
-        if (File.Exists(_snapshotFile) || !File.Exists(_runsFile) || _runsUnreadable) return null;
+            return snapshot.Runs.Length == 0 ? null : ExcludeUnverifiedPins(new Discovery(snapshot.Runs, true, error, snapshot));
+        if ((File.Exists(_snapshotFile) && (_snapshot is null || !_snapshot.MatchesSource(_options)))
+            || !File.Exists(_runsFile) || _runsUnreadable) return null;
         var runs = _runs.Where(run => run.Packages.Name == _options.PackagesArtifact
                 && run.VersionArtifact.Name == _options.VersionArtifact
                 && (_options.PullRequests.Length == 0 || _options.PullRequests.Contains(run.PullRequest)
@@ -477,11 +691,45 @@ public sealed class PackageCatalog
         if (runs.Length == 0) return null;
         const string legacy = "Legacy cache open-PR membership is unknown; closed PRs may be included.";
         if (!error.Contains(legacy, StringComparison.Ordinal)) error += " " + legacy;
-        var metadataIncomplete = HasUnmatchedCatalogBuilds(runs, null);
+        var metadataIncomplete = HasUnmatchedCatalogBuilds(runs, null)
+            || _options.RunIds.Any(id => runs.All(run => run.RunId != id));
         const string metadata = "Legacy catalog and run metadata do not agree; package inventories may be incomplete.";
         if (metadataIncomplete && !error.Contains(metadata, StringComparison.Ordinal)) error += " " + metadata;
-        return new Discovery(runs, true, error,
-            null, MembershipUnknown: true, MetadataIncomplete: metadataIncomplete);
+        return ExcludeUnverifiedPins(new Discovery(runs, true, error,
+            null, MembershipUnknown: true, MetadataIncomplete: metadataIncomplete));
+    }
+
+    private void LoadIncompleteDiscovery()
+    {
+        if (!File.Exists(_incompleteFile)) return;
+        try
+        {
+            var saved = JsonSerializer.Deserialize<IncompleteDiscoveryFile>(
+                File.ReadAllText(_incompleteFile), JsonSettings.Options);
+            if (saved is null || saved.SchemaVersion != 1
+                || saved.Repository != _options.Repository || saved.Workflow != _options.Workflow
+                || saved.PackagesArtifact != _options.PackagesArtifact || saved.VersionArtifact != _options.VersionArtifact
+                || saved.PullRequests is null || saved.RunIds is null || saved.RunLimit <= 0 || saved.Runs is null
+                || saved.SkippedBuilds < 0 || !(saved.SkippedBuilds > 0 || saved.MetadataIncomplete || saved.UnverifiedPinnedRuns)
+                || !OfflineSnapshot.Create(_options, saved.Runs).IsValid())
+                throw new JsonException("Invalid incomplete discovery metadata.");
+            var matchingSelection = saved.PullRequests.SequenceEqual(_options.PullRequests.Distinct().Order())
+                && saved.RunIds.SequenceEqual(_options.RunIds.Distinct().Order()) && saved.RunLimit == _options.RunLimit;
+            var runs = saved.Runs.Where(run =>
+                    _options.PullRequests.Length == 0 || _options.PullRequests.Contains(run.PullRequest)
+                    || _options.RunIds.Contains(run.RunId))
+                .ToArray();
+            var discovery = new Discovery(runs, true,
+                "A previous discovery was incomplete; a complete live refresh is required.", MatchingSnapshot(),
+                MembershipUnknown: !matchingSelection, SkippedBuilds: saved.SkippedBuilds,
+                MetadataIncomplete: saved.MetadataIncomplete || !matchingSelection,
+                UnverifiedPinnedRuns: saved.UnverifiedPinnedRuns);
+            _partialDiscovery = new PartialDiscovery(OfflineSnapshot.Create(_options, []), discovery);
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+        {
+            _incompleteUnreadable = true;
+        }
     }
 
     private bool HasUnmatchedCatalogBuilds(RunArtifacts[] runs, IReadOnlySet<int>? openPullRequests) =>
@@ -519,7 +767,7 @@ public sealed class PackageCatalog
             };
         }
         if (_requestScope.Value is { } scope)
-            scope.Availability = new FeedAvailability(false, false, "current");
+            scope.Availability = new FeedAvailability(false, false, "current", discovery.Provenance);
     }
 
     private void SetFailureHealth(string error, Discovery? discovery, bool contentFailure = false)
@@ -531,7 +779,8 @@ public sealed class PackageCatalog
             _health = new CatalogHealth("degraded", _options.Repository, error, snapshot?.LastSuccessfulRefreshUtc,
                 discovery?.Membership ?? (snapshot is null ? "unknown" : "stale"),
                 discovery?.Runs.Length ?? snapshot?.Runs.Length ?? 0, null,
-                discovery is { SkippedBuilds: > 0 } ? discovery.SkippedBuilds : null, null, null);
+                discovery is { SkippedBuilds: > 0 } ? discovery.SkippedBuilds : null, null, null,
+                discovery?.Provenance ?? ProvenanceFor(snapshot?.Runs));
         }
     }
 
@@ -560,7 +809,7 @@ public sealed class PackageCatalog
             scope.Offline = null;
         }
         var resolution = await RequireOfflinePackagesAsync(discovery, cancellationToken);
-        if (scope is not null) scope.Availability = new FeedAvailability(true, resolution.IsPartial, discovery.Membership);
+        if (scope is not null) scope.Availability = new FeedAvailability(true, resolution.IsPartial, discovery.Membership, discovery.Provenance);
         return resolution;
     }
 
@@ -569,8 +818,7 @@ public sealed class PackageCatalog
         var scope = _requestScope.Value;
         if (scope?.Offline is { } cached) return cached;
 
-        await _gate.WaitAsync(cancellationToken);
-        try
+        var knownBuilds = Volatile.Read(ref _builds);
         {
             var packages = new List<PublishedPackage>();
             var builds = new List<BuildEntry>();
@@ -578,38 +826,16 @@ public sealed class PackageCatalog
             var unavailableBuilds = discovery.SkippedBuilds;
             var unavailablePackages = 0;
             var unavailableMetadata = 0;
-            var unknownInventory = discovery.MetadataIncomplete;
+            var unknownInventory = discovery.MetadataIncomplete || discovery.SkippedBuilds > 0;
             var missingPackageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var run in discovery.Runs)
+            var resolved = await Task.WhenAll(discovery.Runs.Select(run =>
+                ResolveOfflineRunAsync(run, knownBuilds, cancellationToken)));
+            for (var index = 0; index < discovery.Runs.Length; index++)
             {
-                var build = _builds.FirstOrDefault(x => x.RunId == run.RunId && x.Attempt == run.Attempt
-                    && x.PullRequest == run.PullRequest && x.Packages is not null && x.Packages.Id == run.Packages.Id
-                    && x.VersionArtifact is not null && x.VersionArtifact.Id == run.VersionArtifact.Id);
-                if (build is null && _artifacts.Contains(run.VersionArtifact))
-                {
-                    try
-                    {
-                        var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
-                        build = new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
-                            PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
-                            run.Packages, run.VersionArtifact);
-                    }
-                    catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
-                    {
-                    }
-                }
-
+                var run = discovery.Runs[index];
+                var (build, available) = resolved[index];
                 var template = build ?? new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, "", "",
                     run.Packages, run.VersionArtifact);
-                CachedPackageAvailability available;
-                try
-                {
-                    available = await _packages.GetAvailableOfflineAsync(template, cancellationToken);
-                }
-                catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
-                {
-                    available = new CachedPackageAvailability([], [], false);
-                }
                 unavailablePackages += available.MissingPackages;
                 missingPackageIds.UnionWith(available.MissingPackageIds);
                 unknownInventory |= !available.HasInventory;
@@ -636,8 +862,8 @@ public sealed class PackageCatalog
                 unknownInventory, missingPackageIds, discovery.IsPartial || discovery.MembershipUnknown);
             lock (_healthGate)
             {
-                if (result.UnavailableBuilds > discovery.SkippedBuilds || result.UnavailablePackages > 0
-                    || result.UnavailableBuildMetadata > 0 || discovery.MetadataIncomplete)
+                if (!discovery.PersistencePending && (result.UnavailableBuilds > discovery.SkippedBuilds
+                    || result.UnavailablePackages > 0 || result.UnavailableBuildMetadata > 0))
                     _contentError ??= "Cached build content or metadata is incomplete or invalid.";
                 if (_health.Status == "degraded"
                     && _health.LastSuccessfulRefreshUtc == discovery.Snapshot?.LastSuccessfulRefreshUtc
@@ -662,9 +888,61 @@ public sealed class PackageCatalog
             if (scope is not null) scope.Offline = result;
             return result;
         }
-        finally
+    }
+
+    private async Task<OfflineRun> ResolveOfflineRunAsync(
+        RunArtifacts run, List<BuildEntry> knownBuilds, CancellationToken cancellationToken)
+    {
+        var build = knownBuilds.FirstOrDefault(x => x.RunId == run.RunId && x.Attempt == run.Attempt
+            && x.PullRequest == run.PullRequest && x.Packages is not null && x.Packages.Id == run.Packages.Id
+            && x.VersionArtifact is not null && x.VersionArtifact.Id == run.VersionArtifact.Id);
+        if (build is null && _artifacts.Contains(run.VersionArtifact))
         {
-            _gate.Release();
+            try
+            {
+                var work = StartOfflineVersionRead(run.VersionArtifact);
+                if (await CompletesWithinRequestAsync(work, cancellationToken, OfflineWait))
+                {
+                    var original = await work;
+                    build = new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
+                        PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
+                        run.Packages, run.VersionArtifact);
+                }
+            }
+            catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
+            {
+            }
+        }
+
+        var template = build ?? new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, "", "",
+            run.Packages, run.VersionArtifact);
+        try
+        {
+            var work = Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping));
+            ObserveFault(work);
+            if (await CompletesWithinRequestAsync(work, cancellationToken, OfflineWait))
+                return new OfflineRun(build, await work);
+
+            var inspect = Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping, allowRepair: false));
+            ObserveFault(inspect);
+            if (await CompletesWithinRequestAsync(inspect, cancellationToken, OfflineWait))
+                return new OfflineRun(build, await inspect);
+        }
+        catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
+        {
+        }
+        return new OfflineRun(build, new CachedPackageAvailability([], [], false));
+    }
+
+    private Task<string> StartOfflineVersionRead(Artifact artifact)
+    {
+        lock (_offlineVersionGate)
+        {
+            if (_offlineVersionReads.TryGetValue(artifact.Id, out var pending) && !pending.IsCompleted)
+                return pending;
+            var work = Task.Run(() => ReadVersionAsync(artifact, _stopping));
+            ObserveFault(work);
+            return _offlineVersionReads[artifact.Id] = work;
         }
     }
 
@@ -716,7 +994,7 @@ public sealed class PackageCatalog
         {
             saved = JsonSerializer.Deserialize<RunArtifactsFile>(File.ReadAllText(_runsFile), JsonSettings.Options)
                 ?? throw new JsonException("Invalid saved run metadata.");
-            if (saved.Runs is null || saved.Runs.Any(run => run is null || run.RunId <= 0 || run.Attempt <= 0
+            if (saved.SchemaVersion is not (1 or 2) || saved.Runs is null || saved.Runs.Any(run => run is null || run.RunId <= 0 || run.Attempt <= 0
                 || run.PullRequest <= 0 || run.HeadSha is null || run.Packages is null || run.Packages.Id <= 0
                 || run.VersionArtifact is null || run.VersionArtifact.Id <= 0)
                 || saved.Runs.Select(run => (run.RunId, run.Attempt, run.PullRequest)).Distinct().Count() != saved.Runs.Count)
@@ -729,13 +1007,15 @@ public sealed class PackageCatalog
         }
         if (saved.Repository != _options.Repository || saved.Workflow != _options.Workflow)
             throw new InvalidDataException("This run cache belongs to another repository/workflow. Use a different CacheDirectory.");
-        _runs = saved.Runs;
+        _runs = saved.SchemaVersion == 1
+            ? saved.Runs.Select(run => run with { WorkflowVerified = false }).ToList()
+            : saved.Runs;
         _runsUnreadable = false;
     }
 
     private async Task<string> ReadVersionAsync(Artifact artifact, CancellationToken cancellationToken)
     {
-        var path = await _artifacts.GetAsync(artifact, cancellationToken);
+        var path = await _packages.GetVersionArtifactAsync(artifact, cancellationToken);
         using var archive = ZipFile.OpenRead(path);
         var matches = archive.Entries.Where(x => x.FullName == "version.txt").Take(2).ToArray();
         if (matches.Length != 1) throw new InvalidDataException("Version artifact must contain one version.txt.");

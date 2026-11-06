@@ -23,6 +23,9 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
     public long? MissingVersionArtifactForRun { get; set; }
     public bool FailDownloads { get; set; }
     public TaskCompletionSource? DiscoveryBlock { get; set; }
+    public long? BlockDownloadForArtifact { get; set; }
+    public TaskCompletionSource? DownloadBlock { get; set; }
+    public TaskCompletionSource DownloadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public int DiscoveryCalls => Volatile.Read(ref _discoveryCalls);
     public int DownloadCalls => Volatile.Read(ref _downloadCalls);
     public long[] ArtifactQueries => _artifactQueries.ToArray();
@@ -90,12 +93,16 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
         return Task.FromResult<IReadOnlyList<Artifact>>([version with { Expired = expired }, packages with { Expired = expired }]);
     }
 
-    public Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken)
+    public async Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _downloadCalls);
+        if (BlockDownloadForArtifact == artifact.Id && DownloadBlock is { } block)
+        {
+            DownloadStarted.TrySetResult();
+            await block.Task.WaitAsync(cancellationToken);
+        }
         if (FailDownloads) throw new IOException("Synthetic download failure.");
         File.Copy(_files[artifact.Id], destination);
-        return Task.CompletedTask;
     }
 
     private static Artifact ArtifactFor(long id, string name, string path) =>
