@@ -122,6 +122,11 @@ jobs:
         run: |
           & (Join-Path 'scripts' 'Test-CiDiscovery.ps1') -BaselineCoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
 
+      - name: Test solution discovery regressions
+        if: runner.os == 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Test-CiDiscoveryRegression.ps1') -BaselineCoverageDirectory (Join-Path 'TestResults' 'ci-coverage')
+
       - name: ReportGenerator
         if: runner.os == 'Linux'
         uses: danielpalme/ReportGenerator-GitHub-Action@5.5.12
@@ -130,7 +135,12 @@ jobs:
           targetdir: coveragereport
           reporttypes: Html;MarkdownSummaryGithub
           title: 'Code Coverage'
-  
+
+      - name: Include coverage inputs
+        if: runner.os == 'Linux'
+        run: |
+          & (Join-Path 'scripts' 'Publish-CiCoverageInputs.ps1') -CoverageDirectory (Join-Path 'TestResults' 'ci-coverage') -ReportDirectory 'coveragereport'
+
       - name: Write PR Number
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         run: |

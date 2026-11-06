@@ -107,12 +107,19 @@ rechecked on each feed request.
 
 The local record is published before its ZIP. Failed or cancelled downloads
 are not published, and a record left by an interrupted publication must match
-a subsequent download. Concurrent publishers coordinate using a stable
-per-artifact `.zip.lock` file, which may remain after shutdown and must not be
-removed while the cache is in use. A missing, invalid, or mismatched record for an
-already-cached digest-less artifact is not silently replaced: restore the record
-from a trusted backup, or explicitly evict both the ZIP and its record and
-download again if the artifact is still available.
+a subsequent download. Concurrent cache instances download independently, then
+coordinate publication using a stable per-artifact `.zip.lock` file. The lock
+file may remain after a process exits; do not remove it or its parent directory
+while any cache instance is running. On Unix, this coordination uses advisory
+file locks and requires a filesystem that supports them. Publication fails closed
+if exclusive locking is unavailable or disabled; other writers and older
+versions that do not honor the lock must not share the cache. Filesystems shared
+between machines must enforce those locks across all participating machines.
+Interrupted processes may leave unique `.tmp` files, which are ignored and may
+be removed only when the cache is not in use. A missing, invalid, or mismatched
+record for an already-cached digest-less artifact is not silently replaced:
+restore the record from a trusted backup, or explicitly evict both the ZIP and
+its record and download again if the artifact is still available.
 
 The locally recorded hash is **trust on first download**, not proof of the
 provider's original content. Protect the cache directory from untrusted writers:
@@ -230,6 +237,7 @@ also builds a small fake `gh` executable for process-level offline and
 authentication tests.
 The released-main disk-cache fixture can be regenerated from its pinned Git
 revision with `scripts/New-ReleasedCacheFixture.ps1`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
 
 The packed-tool smoke test installs the one package in the output directory using
 an isolated local-only NuGet source and cache. It starts the installed command with
@@ -241,10 +249,12 @@ by its immutable ID and verifies its SHA-256 before and after installation. The
 disabled deployment job also requires the matrix to pass and verifies the same
 artifact and hash before any publishing step.
 
-Linux tests the entire solution with coverage; the coverage extension generates a
-separate report per test module, without a fixed project list. CI also adds a
-failing test project to a copy of the solution to verify discovery, and mutates
-a valid package to verify that the smoke test rejects the wrong artifact.
+Linux tests the entire solution with coverage; each test module gets its own
+`TestResults/coverage.cobertura.xml`, without a fixed project list. The merged
+report, its original inputs, and their paths are included in the `CodeCoverage`
+artifact and pull-request summary. CI also adds failing and passing test
+projects to a copy of the solution to verify discovery, and mutates a valid
+package to verify that the smoke test rejects the wrong artifact.
 
 ## Release safety
 

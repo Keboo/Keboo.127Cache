@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
@@ -309,27 +310,278 @@ public sealed class ArtifactIntegrityTests
     }
 
     [Test]
-    public async Task ArtifactPublicationWaitsForAnExclusiveWriterAndCanBeCancelled()
+    public async Task PublicationWaitsForAnExclusiveLockAndCanBeCancelled()
     {
         using var fixture = new Fixture();
         var path = fixture.PathFor(fixture.GitHub.Packages);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        using var cancellation = new CancellationTokenSource();
+        var hashed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Log.OnHash = () => hashed.TrySetResult();
 
-        await ExpectCancellationAsync(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, cancellation.Token));
+        var pending = fixture.Cache.GetAsync(fixture.GitHub.Packages, cancellation.Token);
+        await hashed.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
+        await Task.Delay(150, Cancellation);
+        await Assert.That(pending.IsCompleted).IsFalse();
         await Assert.That(File.Exists(path)).IsFalse();
         await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+
+        var otherGitHub = new FakeGitHub("same", fixture.GitHub.PackageBytes);
+        var otherHash = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var otherLog = new RecordingLogger { OnHash = () => otherHash.TrySetResult() };
+        var otherCache = new ArtifactCache(fixture.Options, otherGitHub, otherLog);
+        using var otherCancellation = new CancellationTokenSource();
+        var queued = otherCache.GetAsync(otherGitHub.Packages, otherCancellation.Token);
+        await otherHash.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
+        await Assert.That(queued.IsCompleted).IsFalse();
+        otherCancellation.Cancel();
+        await ExpectCancellationAsync(() => queued);
+        await Assert.That(pending.IsCompleted).IsFalse();
+
+        cancellation.Cancel();
+        await ExpectCancellationAsync(() => pending);
         await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
 
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var waiting = fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token);
-        await Task.Delay(50);
-        await Assert.That(waiting.IsCompleted).IsFalse();
         held.Dispose();
-        await Assert.That(await waiting).IsEqualTo(path);
-        var actual = await File.ReadAllBytesAsync(path, Cancellation);
-        await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation)).IsEqualTo(Digest(actual));
+        var published = await fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation);
+        await Assert.That(published).IsEqualTo(path);
+        await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation))
+            .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, Cancellation)));
+    }
+
+    [Test]
+    public async Task ABlockedArtifactDoesNotPreventAnotherArtifactFromPublishing()
+    {
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var blockedPath = fixture.PathFor(fixture.GitHub.Packages);
+        Directory.CreateDirectory(Path.GetDirectoryName(blockedPath)!);
+        using var held = new FileStream(blockedPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var hashed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Log.OnHash = () => hashed.TrySetResult();
+        var blocked = fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token);
+        await hashed.Task.WaitAsync(deadline.Token);
+
+        var otherArtifact = new Artifact(3, "other-packages", false, null);
+        var otherCache = new ArtifactCache(fixture.Options, fixture.GitHub);
+        var otherPath = await otherCache.GetAsync(otherArtifact, deadline.Token);
+        await Assert.That(otherPath).IsEqualTo(fixture.PathFor(otherArtifact));
+        await Assert.That(await File.ReadAllTextAsync(otherPath + ".sha256", deadline.Token))
+            .IsEqualTo(Digest(await File.ReadAllBytesAsync(otherPath, deadline.Token)));
+        await Assert.That(blocked.IsCompleted).IsFalse();
+        held.Dispose();
+        await Assert.That(await blocked).IsEqualTo(blockedPath);
+    }
+
+    [Test]
+    public async Task AZipPublishedWhileWaitingIsVerifiedBeforeCreatingARecord()
+    {
+        foreach (var matches in new[] { true, false })
+        {
+            using var fixture = new Fixture();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var path = fixture.PathFor(fixture.GitHub.Packages);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            var hashed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Log.OnHash = () => hashed.TrySetResult();
+            var supplied = fixture.GitHub.Packages with { Digest = "sha256:" + Digest(fixture.GitHub.PackageBytes) };
+            var pending = fixture.Cache.GetAsync(supplied, deadline.Token);
+            await hashed.Task.WaitAsync(deadline.Token);
+            var publishedBytes = matches ? fixture.GitHub.PackageBytes : new FakeGitHub("different").PackageBytes;
+            await File.WriteAllBytesAsync(path, publishedBytes, deadline.Token);
+            held.Dispose();
+
+            if (matches)
+                await Assert.That(await pending).IsEqualTo(path);
+            else
+                await ExpectFailureAsync<InvalidDataException>(() => pending);
+            await Assert.That((await File.ReadAllBytesAsync(path, deadline.Token)).SequenceEqual(publishedBytes)).IsTrue();
+            await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+        }
+    }
+
+    [Test]
+    public async Task ConflictingWritersInIndependentProcessesPublishOneMatchingPair()
+    {
+        var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
+        if (childDirectory is not null)
+        {
+            await RunWriterChildAsync(childDirectory);
+            return;
+        }
+
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var path = fixture.PathFor(fixture.GitHub.Packages);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var release = Path.Combine(fixture.Directory, "release-writers");
+        var payloads = new[]
+        {
+            fixture.GitHub.PackageBytes,
+            new FakeGitHub("another download").PackageBytes,
+            new FakeGitHub("a third download").PackageBytes
+        };
+        var children = new List<TestChild>();
+        using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        Task? observer = null;
+        try
+        {
+            for (var i = 0; i < payloads.Length; i++)
+            {
+                await File.WriteAllBytesAsync(Path.Combine(fixture.Directory, $"payload-{i}"), payloads[i], deadline.Token);
+                children.Add(StartTestChild(nameof(ConflictingWritersInIndependentProcessesPublishOneMatchingPair),
+                    fixture.Directory, i));
+            }
+
+            await WaitForChildSignalsAsync(fixture.Directory, "ready", children, deadline.Token);
+            await File.WriteAllTextAsync(release, "go", deadline.Token);
+            await WaitForChildSignalsAsync(fixture.Directory, "hashed", children, deadline.Token);
+            await Task.Delay(200, deadline.Token);
+            foreach (var child in children) await child.EnsureRunningAsync();
+            await Assert.That(File.Exists(path)).IsFalse();
+            await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+
+            held.Dispose();
+            observer = ObservePublishedPairAsync(fixture, path, deadline.Token);
+            await Task.WhenAll(children.Select(child => child.RequireExitAsync(0, deadline.Token)));
+            await observer;
+
+            var results = await Task.WhenAll(Enumerable.Range(0, payloads.Length)
+                .Select(i => File.ReadAllTextAsync(Path.Combine(fixture.Directory, $"result-{i}"), deadline.Token)));
+            await Assert.That(results.Count(result => result == "success")).IsEqualTo(1);
+            await Assert.That(results.Count(result => result == typeof(InvalidDataException).FullName)).IsEqualTo(2);
+            var actual = await File.ReadAllBytesAsync(path, deadline.Token);
+            await Assert.That(actual.SequenceEqual(payloads[Array.IndexOf(results, "success")])).IsTrue();
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token)).IsEqualTo(Digest(actual));
+            await Assert.That(File.Exists(path + ".lock")).IsTrue();
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+        }
+        finally
+        {
+            held.Dispose();
+            await File.WriteAllTextAsync(release, "go", Cancellation);
+            deadline.Cancel();
+            try
+            {
+                if (observer is not null)
+                {
+                    try { await observer; }
+                    catch (OperationCanceledException) { }
+                }
+            }
+            finally
+            {
+                await FinishChildrenAsync(children);
+            }
+        }
+    }
+
+    [Test]
+    public async Task AbruptProcessExitReleasesLockAndRecoversMatchingOrphanRecord()
+    {
+        var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
+        if (childDirectory is not null)
+        {
+            await RunLockOwnerChildAsync(childDirectory);
+            return;
+        }
+
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var path = fixture.PathFor(fixture.GitHub.Packages);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "owner-digest"),
+            Digest(fixture.GitHub.PackageBytes), deadline.Token);
+        var child = StartTestChild(nameof(AbruptProcessExitReleasesLockAndRecoversMatchingOrphanRecord),
+            fixture.Directory, 0);
+        try
+        {
+            await WaitForChildSignalsAsync(fixture.Directory, "ready", [child], deadline.Token);
+            var orphan = path + ".crashed-writer.tmp";
+            await Assert.That(File.Exists(path + ".lock")).IsTrue();
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
+                .IsEqualTo(Digest(fixture.GitHub.PackageBytes));
+            await Assert.That(File.Exists(orphan)).IsTrue();
+
+            using var cancellation = new CancellationTokenSource();
+            var firstHash = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Log.OnHash = () => firstHash.TrySetResult();
+            var cancelled = fixture.Cache.GetAsync(fixture.GitHub.Packages, cancellation.Token);
+            await firstHash.Task.WaitAsync(deadline.Token);
+            await Task.Delay(200, deadline.Token);
+            await Assert.That(cancelled.IsCompleted).IsFalse();
+            cancellation.Cancel();
+            await ExpectCancellationAsync(() => cancelled);
+            await Assert.That(File.Exists(path)).IsFalse();
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp")
+                .SequenceEqual([orphan])).IsTrue();
+
+            var secondHash = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Log.OnHash = () => secondHash.TrySetResult();
+            var resumed = fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token);
+            await secondHash.Task.WaitAsync(deadline.Token);
+            await Task.Delay(200, deadline.Token);
+            await Assert.That(resumed.IsCompleted).IsFalse();
+
+            await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "exit-owner"), "exit", deadline.Token);
+            await child.RequireExitAsync(73, deadline.Token);
+            await Assert.That(await resumed).IsEqualTo(path);
+            await Assert.That(File.Exists(path + ".lock")).IsTrue();
+            await Assert.That(File.Exists(orphan)).IsTrue();
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
+                .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, deadline.Token)));
+            await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(2);
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "exit-owner"), "exit", Cancellation);
+            deadline.Cancel();
+            await FinishChildrenAsync([child]);
+        }
+    }
+
+    [Test]
+    public async Task DisabledUnixFileLockingFailsClosed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
+        if (childDirectory is not null)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+            var github = new FakeGitHub("unlocked");
+            var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github);
+            var result = await CaptureAsync(() => cache.GetAsync(github.Packages, timeout.Token));
+            await File.WriteAllTextAsync(Path.Combine(childDirectory, "result-0"),
+                result.Error is IOException error && error.Message.Contains("Exclusive file locking is unavailable",
+                    StringComparison.Ordinal) ? "locking unavailable" : result.Error?.ToString() ?? "success",
+                timeout.Token);
+            return;
+        }
+
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var path = fixture.PathFor(fixture.GitHub.Packages);
+        var child = StartTestChild(nameof(DisabledUnixFileLockingFailsClosed), fixture.Directory, 0,
+            disableFileLocking: true);
+        try
+        {
+            await child.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token))
+                .IsEqualTo("locking unavailable");
+            await Assert.That(File.Exists(path)).IsFalse();
+            await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+
+            await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token)).IsEqualTo(path);
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
+                .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, deadline.Token)));
+        }
+        finally
+        {
+            await FinishChildrenAsync([child]);
+        }
     }
 
     [Test]
@@ -454,6 +706,135 @@ public sealed class ArtifactIntegrityTests
         }
     }
 
+    private static async Task RunWriterChildAsync(string directory)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        var index = int.Parse(Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_INDEX")!);
+        var payload = await File.ReadAllBytesAsync(Path.Combine(directory, $"payload-{index}"), deadline.Token);
+        var github = new FakeGitHub("child", payload)
+        {
+            AfterDownload = async token =>
+            {
+                await File.WriteAllTextAsync(Path.Combine(directory, $"ready-{index}"), "ready", token);
+                await WaitForFileAsync(Path.Combine(directory, "release-writers"), token);
+            }
+        };
+        var log = new RecordingLogger
+        {
+            OnHash = () => File.WriteAllText(Path.Combine(directory, $"hashed-{index}"), "hashed")
+        };
+        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache") }, github, log);
+        var artifact = index == 2
+            ? github.Packages with { Digest = "sha256:" + Digest(payload).ToLowerInvariant() }
+            : github.Packages;
+        var result = await CaptureAsync(() => cache.GetAsync(artifact, deadline.Token));
+        await File.WriteAllTextAsync(Path.Combine(directory, $"result-{index}"),
+            result.Error?.GetType().FullName ?? "success", deadline.Token);
+    }
+
+    private static async Task RunLockOwnerChildAsync(string directory)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        var path = Path.Combine(directory, "cache", "artifacts", "2.zip");
+        using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var digest = await File.ReadAllTextAsync(Path.Combine(directory, "owner-digest"), deadline.Token);
+        await File.WriteAllTextAsync(path + ".sha256", digest, deadline.Token);
+        await File.WriteAllTextAsync(path + ".crashed-writer.tmp", "partial download", deadline.Token);
+        await File.WriteAllTextAsync(Path.Combine(directory, "ready-0"), "ready", deadline.Token);
+        await WaitForFileAsync(Path.Combine(directory, "exit-owner"), deadline.Token);
+        Environment.Exit(73);
+    }
+
+    private static async Task ObservePublishedPairAsync(Fixture fixture, string path, CancellationToken cancellationToken)
+    {
+        await WaitForFileAsync(path, cancellationToken);
+        var github = new FakeGitHub("reader") { FailDownloads = true };
+        var reader = new ArtifactCache(fixture.Options, github);
+        for (var i = 0; i < 32; i++)
+        {
+            await reader.GetAsync(github.Packages, cancellationToken);
+            var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+            var record = await File.ReadAllTextAsync(path + ".sha256", cancellationToken);
+            if (record != Digest(bytes))
+                throw new InvalidDataException($"Published artifact {path} does not match its SHA256 record.");
+            await Task.Yield();
+        }
+    }
+
+    private static async Task WaitForFileAsync(string path, CancellationToken cancellationToken)
+    {
+        while (!File.Exists(path)) await Task.Delay(20, cancellationToken);
+    }
+
+    private static async Task WaitForChildSignalsAsync(
+        string directory, string signal, IReadOnlyList<TestChild> children, CancellationToken cancellationToken)
+    {
+        while (Enumerable.Range(0, children.Count)
+            .Any(index => !File.Exists(Path.Combine(directory, $"{signal}-{index}"))))
+        {
+            foreach (var child in children) await child.EnsureRunningAsync();
+            await Task.Delay(20, cancellationToken);
+        }
+    }
+
+    private static TestChild StartTestChild(string method, string directory, int index, bool disableFileLocking = false)
+    {
+        var start = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = Directory.GetCurrentDirectory(),
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add(typeof(ArtifactIntegrityTests).Assembly.Location);
+        start.ArgumentList.Add("--treenode-filter");
+        start.ArgumentList.Add($"/*/*/ArtifactIntegrityTests/{method}");
+        start.ArgumentList.Add("--results-directory");
+        start.ArgumentList.Add(Path.Combine(directory, $"child-results-{method}-{index}"));
+        start.ArgumentList.Add("--exit-on-process-exit");
+        start.ArgumentList.Add(Environment.ProcessId.ToString());
+        start.ArgumentList.Add("--ansi");
+        start.ArgumentList.Add("off");
+        start.ArgumentList.Add("--progress");
+        start.ArgumentList.Add("off");
+        start.Environment["K127_INTEGRITY_CHILD_DIRECTORY"] = directory;
+        start.Environment["K127_INTEGRITY_CHILD_INDEX"] = index.ToString();
+        if (disableFileLocking) start.Environment["DOTNET_SYSTEM_IO_DISABLEFILELOCKING"] = "1";
+        var process = Process.Start(start) ?? throw new InvalidOperationException("Failed to start integrity test child.");
+        return new TestChild(process, process.StandardOutput.ReadToEndAsync(), process.StandardError.ReadToEndAsync());
+    }
+
+    private static async Task FinishChildrenAsync(IEnumerable<TestChild> children)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        try
+        {
+            await Task.WhenAll(children.Select(child => child.Process.WaitForExitAsync(deadline.Token)));
+        }
+        finally
+        {
+            foreach (var child in children) child.Process.Dispose();
+        }
+    }
+
+    private sealed record TestChild(Process Process, Task<string> Output, Task<string> Error)
+    {
+        public async Task EnsureRunningAsync()
+        {
+            if (Process.HasExited)
+                throw new InvalidOperationException(
+                    $"Integrity test child exited early ({Process.ExitCode}).\n{await Output}\n{await Error}");
+        }
+
+        public async Task RequireExitAsync(int expected, CancellationToken cancellationToken)
+        {
+            await Process.WaitForExitAsync(cancellationToken);
+            if (Process.ExitCode != expected)
+                throw new InvalidOperationException(
+                    $"Integrity test child exited with {Process.ExitCode}, expected {expected}.\n{await Output}\n{await Error}");
+        }
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Directory { get; } = Path.Combine(
@@ -523,6 +904,7 @@ public sealed class ArtifactIntegrityTests
         public byte[] PackageBytes { get; }
         public bool FailDownloads { get; set; }
         public DownloadRendezvous? Rendezvous { get; set; }
+        public Func<CancellationToken, Task>? AfterDownload { get; set; }
         public int VersionDownloads => _downloads.GetValueOrDefault(Version.Id);
         public int PackageDownloads => _downloads.GetValueOrDefault(Packages.Id);
 
@@ -557,6 +939,8 @@ public sealed class ArtifactIntegrityTests
             await File.WriteAllBytesAsync(destination, bytes, cancellationToken);
             if (artifact.Id == Packages.Id && Rendezvous is not null)
                 await Rendezvous.WaitAsync(cancellationToken);
+            if (AfterDownload is not null)
+                await AfterDownload(cancellationToken);
         }
 
         private static byte[] CreateVersionZip()

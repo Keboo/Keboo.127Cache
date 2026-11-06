@@ -1,6 +1,5 @@
 using System.IO.Compression;
 using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -13,7 +12,7 @@ using NuGet.Versioning;
 
 using Keboo._127Cache;
 
-using Xunit;
+using TUnit.Assertions.Enums;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Caching.Memory;
@@ -24,7 +23,7 @@ namespace Keboo._127Cache.Proxy.Tests;
 
 public sealed class ProxyTests : IDisposable
 {
-    private static CancellationToken Cancellation => TestContext.Current.CancellationToken;
+    private static CancellationToken Cancellation => TestContext.Current!.Execution.CancellationToken;
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "pr-nuget-tests-" + Guid.NewGuid().ToString("N"));
     private readonly FakeGitHub _github;
     private readonly ProxyOptions _options;
@@ -45,222 +44,237 @@ public sealed class ProxyTests : IDisposable
         _artifacts = new ArtifactCache(_options, _github);
     }
 
-    [Fact]
-    public void VersionsAreDistinctNormalizedPrereleases()
+    [Test]
+    public async Task VersionsAreDistinctNormalizedPrereleases()
     {
         var first = PackageRewriter.VersionFor("1.3.67-gabcdef0+metadata", 755, 100, 1, 200);
-        Assert.Equal("1.3.67-pr.755.run.100.attempt.1.artifact.200", first);
-        Assert.Equal(first, NuGetVersion.Parse(first).ToNormalizedString());
-        Assert.NotEqual(first, PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 2, 201));
-        Assert.NotEqual(first, PackageRewriter.VersionFor("1.3.67-gabcdef0", 756, 101, 1, 202));
+        await Assert.That(first).IsEqualTo("1.3.67-pr.755.run.100.attempt.1.artifact.200");
+        await Assert.That(NuGetVersion.Parse(first).ToNormalizedString()).IsEqualTo(first);
+        await Assert.That(PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 2, 201)).IsNotEqualTo(first);
+        await Assert.That(PackageRewriter.VersionFor("1.3.67-gabcdef0", 756, 101, 1, 202)).IsNotEqualTo(first);
     }
 
-    [Fact]
-    public void RewriterPreservesPayloadAndDependencies()
+    [Test]
+    public async Task RewriterPreservesPayloadAndDependencies()
     {
         var source = Path.Combine(_directory, "original.nupkg");
         var destination = Path.Combine(_directory, "rewritten.nupkg");
         FakeGitHub.WritePackage(source, "Velopack");
         PackageRewriter.Rewrite(source, destination, "Velopack", FakeGitHub.OriginalVersion, "1.3.67-pr.755");
         using var reader = new PackageArchiveReader(destination);
-        Assert.Equal("Velopack", reader.GetIdentity().Id);
-        Assert.Equal("1.3.67-pr.755", reader.GetIdentity().Version.ToNormalizedString());
-        Assert.Equal("Newtonsoft.Json", Assert.Single(Assert.Single(reader.NuspecReader.GetDependencyGroups()).Packages).Id);
+        await Assert.That(reader.GetIdentity().Id).IsEqualTo("Velopack");
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo("1.3.67-pr.755");
+        var group = await Assert.That(reader.NuspecReader.GetDependencyGroups()).HasSingleItem();
+        var dependency = await Assert.That(group.Packages).HasSingleItem();
+        await Assert.That(dependency.Id).IsEqualTo("Newtonsoft.Json");
         using var original = ZipFile.OpenRead(source);
         using var rewritten = ZipFile.OpenRead(destination);
         foreach (var entry in original.Entries.Where(x => !x.FullName.EndsWith(".nuspec")))
         {
             var result = rewritten.GetEntry(entry.FullName)!;
-            Assert.Equal(entry.ExternalAttributes, result.ExternalAttributes);
-            Assert.Equal(entry.LastWriteTime, result.LastWriteTime);
+            await Assert.That(result.ExternalAttributes).IsEqualTo(entry.ExternalAttributes);
+            await Assert.That(result.LastWriteTime).IsEqualTo(entry.LastWriteTime);
             using var input = entry.Open();
             using var output = result.Open();
-            Assert.Equal(SHA256.HashData(input), SHA256.HashData(output));
+            var originalHash = SHA256.HashData(input);
+            var rewrittenHash = SHA256.HashData(output);
+            await Assert.That(rewrittenHash).IsEquivalentTo(originalHash, CollectionOrdering.Matching);
         }
     }
 
-    [Fact]
-    public void SignedAndMismatchedPackagesAreRejected()
+    [Test]
+    public async Task SignedAndMismatchedPackagesAreRejected()
     {
         var source = Path.Combine(_directory, "signed.nupkg");
         FakeGitHub.WritePackage(source, "Velopack");
-        Assert.Throws<InvalidDataException>(() => PackageRewriter.Rewrite(source, source + ".wrong", "Other",
-            FakeGitHub.OriginalVersion, "1.0.0-test"));
+        await Assert.That(() => PackageRewriter.Rewrite(source, source + ".wrong", "Other",
+            FakeGitHub.OriginalVersion, "1.0.0-test")).ThrowsExactly<InvalidDataException>();
         using (var zip = ZipFile.Open(source, ZipArchiveMode.Update)) zip.CreateEntry(".signature.p7s");
-        Assert.Throws<InvalidDataException>(() => PackageRewriter.Rewrite(source, source + ".out", "Velopack",
-            FakeGitHub.OriginalVersion, "1.0.0-test"));
+        await Assert.That(() => PackageRewriter.Rewrite(source, source + ".out", "Velopack",
+            FakeGitHub.OriginalVersion, "1.0.0-test")).ThrowsExactly<InvalidDataException>();
     }
 
-    [Fact]
+    [Test]
     public async Task MetadataWarmupPersistsArtifactListingsWithoutDownloadingContents()
     {
         var catalog = CreateCatalog();
         _github.FailDownloads = true;
-        var run = Assert.Single(await catalog.GetRunArtifactsAsync(Cancellation));
-        Assert.Equal(100, run.RunId);
-        Assert.Equal(1, _github.OpenPullRequestQueries);
-        Assert.Equal(1, _github.RunQueries);
-        Assert.Equal(1, _github.ArtifactQueries);
-        Assert.Equal(0, _github.VersionDownloads);
-        Assert.Equal(0, _github.PackageDownloads);
-        Assert.False(Directory.Exists(Path.Combine(_options.CacheDirectory, "artifacts")));
-        Assert.False(File.Exists(Path.Combine(_options.CacheDirectory, "catalog.json")));
+        var run = await Assert.That(await catalog.GetRunArtifactsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(run.RunId).IsEqualTo(100);
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
+        await Assert.That(_github.RunQueries).IsEqualTo(1);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(0);
+        await Assert.That(_github.PackageDownloads).IsEqualTo(0);
+        await Assert.That(Directory.Exists(Path.Combine(_options.CacheDirectory, "artifacts"))).IsFalse();
+        await Assert.That(File.Exists(Path.Combine(_options.CacheDirectory, "catalog.json"))).IsFalse();
         var saved = JsonSerializer.Deserialize<RunArtifactsFile>(
             File.ReadAllText(Path.Combine(_options.CacheDirectory, "runs.json")), JsonSettings.Options)!;
-        Assert.Equal(run, Assert.Single(saved.Runs));
+        var savedRun = await Assert.That(saved.Runs).HasSingleItem();
+        await Assert.That(savedRun).IsEqualTo(run);
 
-        Assert.Equal(run, Assert.Single(await CreateCatalog().GetRunArtifactsAsync(Cancellation)));
-        Assert.Equal(2, _github.OpenPullRequestQueries);
-        Assert.Equal(1, _github.ArtifactQueries);
+        var restoredRun = await Assert.That(await CreateCatalog().GetRunArtifactsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(restoredRun).IsEqualTo(run);
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
         _github.FailDownloads = false;
-        Assert.Single(await catalog.GetBuildsAsync(Cancellation));
-        Assert.Equal(2, _github.OpenPullRequestQueries);
-        Assert.Equal(1, _github.VersionDownloads);
-        Assert.Equal(0, _github.PackageDownloads);
+        await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
+        await Assert.That(_github.PackageDownloads).IsEqualTo(0);
     }
 
-    [Fact]
+    [Test]
     public async Task CatalogFiltersRunsAndPersistsImmutableIdentities()
     {
         var catalog = CreateCatalog();
         var builds = await catalog.GetBuildsAsync(Cancellation);
-        var build = Assert.Single(builds);
-        Assert.Equal(100, build.RunId);
-        Assert.Equal(755, build.PullRequest);
-        Assert.Equal(FakeGitHub.OriginalVersion, build.OriginalVersion);
-        Assert.Equal(1, _github.VersionDownloads);
+        var build = await Assert.That(builds).HasSingleItem();
+        await Assert.That(build.RunId).IsEqualTo(100);
+        await Assert.That(build.PullRequest).IsEqualTo(755);
+        await Assert.That(build.OriginalVersion).IsEqualTo(FakeGitHub.OriginalVersion);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
         await catalog.GetBuildsAsync(Cancellation);
-        Assert.Equal(1, _github.VersionDownloads);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
         var restored = await CreateCatalog().GetBuildsAsync(Cancellation);
-        Assert.Equal(builds, restored);
-        Assert.Equal(1, _github.VersionDownloads);
+        await ProxyAssertions.EqualRecords(restored, builds);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
     }
 
-    [Fact]
+    [Test]
     public async Task PackageCacheDownloadsOnceAndReusesLocalFiles()
     {
-        var build = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
+        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         var cache = CreatePackageCache();
         var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => cache.GetAsync("Velopack", build, Cancellation)));
-        Assert.All(results, x => Assert.Equal(results[0], x));
-        Assert.Equal(1, _github.PackageDownloads);
+        foreach (var result in results)
+            await Assert.That(result).IsEqualTo(results[0]);
+        await Assert.That(_github.PackageDownloads).IsEqualTo(1);
         var tool = await cache.GetAsync("vpk", build, Cancellation);
         using var reader = new PackageArchiveReader(tool);
-        Assert.Equal(build.Version, reader.GetIdentity().Version.ToNormalizedString());
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(build.Version);
         _github.FailDownloads = true;
-        Assert.Equal(results[0], await CreatePackageCache().GetAsync("Velopack", build, Cancellation));
+        await Assert.That(await CreatePackageCache().GetAsync("Velopack", build, Cancellation)).IsEqualTo(results[0]);
     }
 
-    [Fact]
+    [Test]
     public async Task CorruptArtifactNeverPublishesPartialPackages()
     {
-        var build = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
+        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         var cache = CreatePackageCache();
         _github.CorruptDownload = true;
-        await Assert.ThrowsAsync<InvalidDataException>(() => cache.GetAsync("vpk", build, Cancellation));
-        Assert.False(Directory.Exists(Path.Combine(_options.CacheDirectory, "packages", "discovered")));
-        Assert.Empty(Directory.GetDirectories(_options.CacheDirectory, "staging-*"));
+        await Assert.That(async () => await cache.GetAsync("vpk", build, Cancellation)).ThrowsExactly<InvalidDataException>();
+        await Assert.That(Directory.Exists(Path.Combine(_options.CacheDirectory, "packages", "discovered"))).IsFalse();
+        await Assert.That(Directory.GetDirectories(_options.CacheDirectory, "staging-*")).IsEmpty();
         _github.CorruptDownload = false;
-        Assert.True(File.Exists(await cache.GetAsync("vpk", build, Cancellation)));
+        await Assert.That(File.Exists(await cache.GetAsync("vpk", build, Cancellation))).IsTrue();
     }
 
-    [Fact]
+    [Test]
     public async Task PackageInventoryIsDiscoveredAndPersistedWithoutConfiguration()
     {
         var catalog = CreateCatalog();
         var packages = await catalog.GetPackagesAsync(Cancellation);
-        Assert.Equal(["Example.Plugin", "Velopack", "Velopack.Build", "vpk"], packages.Select(x => x.Id).Order().ToArray());
-        var plugin = Assert.Single(packages, x => x.Id == "Example.Plugin");
-        Assert.StartsWith("2.0.0-pr.", plugin.Build.Version);
+        await Assert.That(packages.Select(x => x.Id).Order().ToArray())
+            .IsEquivalentTo(new[] { "Example.Plugin", "Velopack", "Velopack.Build", "vpk" }, CollectionOrdering.Matching);
+        var plugin = await Assert.That(packages.Where(x => x.Id == "Example.Plugin")).HasSingleItem();
+        await Assert.That(plugin.Build.Version).StartsWith("2.0.0-pr.", StringComparison.CurrentCulture);
         var cache = CreatePackageCache();
         using var reader = new PackageArchiveReader(await cache.GetAsync(plugin.Id, plugin.Build, Cancellation));
-        Assert.Equal(plugin.Build.Version, reader.GetIdentity().Version.ToNormalizedString());
-        var dependency = Assert.Single(Assert.Single(reader.NuspecReader.GetDependencyGroups()).Packages);
-        Assert.Equal("Velopack", dependency.Id);
-        var library = Assert.Single(packages, x => x.Id == "Velopack");
-        Assert.Equal(VersionRange.Parse($"[{library.Build.Version}]").ToNormalizedString(), dependency.VersionRange.ToNormalizedString());
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(plugin.Build.Version);
+        var group = await Assert.That(reader.NuspecReader.GetDependencyGroups()).HasSingleItem();
+        var dependency = await Assert.That(group.Packages).HasSingleItem();
+        await Assert.That(dependency.Id).IsEqualTo("Velopack");
+        var library = await Assert.That(packages.Where(x => x.Id == "Velopack")).HasSingleItem();
+        await Assert.That(dependency.VersionRange.ToNormalizedString())
+            .IsEqualTo(VersionRange.Parse($"[{library.Build.Version}]").ToNormalizedString());
         _github.FailDownloads = true;
         var restored = await CreateCatalog().GetPackagesAsync(Cancellation);
-        Assert.Equal(packages, restored);
-        await Assert.ThrowsAsync<InvalidDataException>(() => cache.GetAsync("missing", plugin.Build, Cancellation));
-        Assert.Equal(1, _github.PackageDownloads);
+        await ProxyAssertions.EqualRecords(restored, packages);
+        await Assert.That(async () => await cache.GetAsync("missing", plugin.Build, Cancellation)).ThrowsExactly<InvalidDataException>();
+        await Assert.That(_github.PackageDownloads).IsEqualTo(1);
     }
 
-    [Fact]
+    [Test]
     public async Task ExistingAllowlistCatalogAndPartialPackageCacheAreReusable()
     {
-        var build = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
+        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         await JsonSettings.WriteAtomicAsync(Path.Combine(_options.CacheDirectory, "catalog.json"),
             new { _options.Repository, PackageIds = new[] { "Velopack", "vpk" }, Builds = new[] { build } }, Cancellation);
         var oldDirectory = Path.Combine(_options.CacheDirectory, "packages", build.Version);
         Directory.CreateDirectory(oldDirectory);
         File.WriteAllText(Path.Combine(oldDirectory, $"velopack.{build.Version}.nupkg"), "old cached package");
         var packages = await CreateCatalog().GetPackagesAsync(Cancellation);
-        Assert.Contains(packages, x => x.Id == "Velopack.Build");
-        Assert.Contains(packages, x => x.Id == "Example.Plugin");
+        await Assert.That(packages).Contains(x => x.Id == "Velopack.Build");
+        await Assert.That(packages).Contains(x => x.Id == "Example.Plugin");
     }
 
-    [Fact]
+    [Test]
     public async Task PinnedExpiredRunFailsExplicitly()
     {
         _options.RunIds = [100];
         _github.Expired = true;
-        var error = await Assert.ThrowsAsync<DiscoveryUnavailableException>(() => CreateCatalog().GetBuildsAsync(Cancellation));
-        Assert.Contains("expired", error.Message);
+        DiscoveryUnavailableException? error = null;
+        try { await CreateCatalog().GetBuildsAsync(Cancellation); }
+        catch (DiscoveryUnavailableException exception) { error = exception; }
+        await Assert.That(error).IsNotNull();
+        await Assert.That(error!.Message).Contains("expired");
     }
 
-    [Fact]
+    [Test]
     public async Task DiscoveryErrorsDoNotBecomeEmptySuccessfulFeeds()
     {
         _github.FailDiscovery = true;
-        await Assert.ThrowsAsync<DiscoveryUnavailableException>(() => CreateCatalog().GetBuildsAsync(Cancellation));
+        await Assert.That(async () => await CreateCatalog().GetBuildsAsync(Cancellation))
+            .ThrowsExactly<DiscoveryUnavailableException>();
     }
 
-    [Fact]
+    [Test]
     public async Task MemoryCacheGatesGitHubQueriesAndRefreshesAfterEviction()
     {
         var catalog = CreateCatalog();
         await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => catalog.GetBuildsAsync(Cancellation)));
-        Assert.Equal(1, _github.OpenPullRequestQueries);
-        Assert.Equal(1, _github.RunQueries);
-        Assert.Equal(1, _github.ArtifactQueries);
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
+        await Assert.That(_github.RunQueries).IsEqualTo(1);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
         _memoryCache.Compact(1);
         await catalog.GetBuildsAsync(Cancellation);
-        Assert.Equal(2, _github.OpenPullRequestQueries);
-        Assert.Equal(2, _github.RunQueries);
-        Assert.Equal(1, _github.ArtifactQueries);
-        Assert.Equal(1, _github.VersionDownloads);
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
+        await Assert.That(_github.RunQueries).IsEqualTo(2);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
     }
 
-    [Fact]
+    [Test]
     public async Task ClosedPullRequestsDisappearEvenWhenPinnedAndCached()
     {
         _options.RunIds = [100];
         var catalog = CreateCatalog();
-        var build = Assert.Single(await catalog.GetBuildsAsync(Cancellation));
-        Assert.Equal(1, _github.ArtifactQueries);
+        var build = await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
         var cachedPackage = await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         _github.OpenPullRequests = [new(756)];
         _memoryCache.Compact(1);
         await RefreshCatalogAsync(catalog);
-        Assert.Empty(await catalog.GetBuildsAsync(Cancellation));
-        Assert.Empty(await CreateCatalog().GetBuildsAsync(Cancellation));
+        await Assert.That(await catalog.GetBuildsAsync(Cancellation)).IsEmpty();
+        await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).IsEmpty();
         var saved = JsonSerializer.Deserialize<CatalogFile>(File.ReadAllText(Path.Combine(_options.CacheDirectory, "catalog.json")),
             JsonSettings.Options)!;
-        var cachedBuild = Assert.Single(saved.Builds);
-        Assert.Equal(build.VersionArtifact.Id, cachedBuild.VersionArtifact.Id);
-        Assert.Equal(build.Packages.Id, cachedBuild.Packages.Id);
-        Assert.True(File.Exists(cachedPackage));
+        var cachedBuild = await Assert.That(saved.Builds).HasSingleItem();
+        await Assert.That(cachedBuild.VersionArtifact.Id).IsEqualTo(build.VersionArtifact.Id);
+        await Assert.That(cachedBuild.Packages.Id).IsEqualTo(build.Packages.Id);
+        await Assert.That(File.Exists(cachedPackage)).IsTrue();
 
         _github.OpenPullRequests = [new(755), new(756)];
         _memoryCache.Compact(1);
         await RefreshCatalogAsync(catalog);
-        Assert.Equal(build.Version, Assert.Single(await catalog.GetBuildsAsync(Cancellation)).Version);
-        Assert.Equal(1, _github.ArtifactQueries);
-        Assert.Equal(1, _github.VersionDownloads);
+        var reopenedBuild = await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(reopenedBuild.Version).IsEqualTo(build.Version);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
     }
 
-    [Fact]
+    [Test]
     public async Task OnlyCompletedSuccessfulRunsOfOpenPullRequestsAreDiscovered()
     {
         _options.PullRequests = [];
@@ -273,75 +287,73 @@ public sealed class ProxyTests : IDisposable
             new(104, 1, "closed", "completed", "success", "pull_request", [new(756)]),
             new(105, 1, "push", "completed", "success", "push", [new(755)])
         ];
-        var build = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
-        Assert.Equal(100, build.RunId);
-        Assert.Equal(1, _github.ArtifactQueries);
+        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(build.RunId).IsEqualTo(100);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
     }
 
-    [Fact]
+    [Test]
     public async Task NoOpenPullRequestsMeansNoRunOrArtifactQueries()
     {
         _github.OpenPullRequests = [];
-        Assert.Empty(await CreateCatalog().GetBuildsAsync(Cancellation));
-        Assert.Equal(0, _github.RunQueries);
-        Assert.Equal(0, _github.ArtifactQueries);
-        Assert.Equal(0, _github.VersionDownloads);
+        await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).IsEmpty();
+        await Assert.That(_github.RunQueries).IsEqualTo(0);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(0);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(0);
     }
 
-    [Fact]
+    [Test]
     public async Task RawArtifactsAreReusedAfterCatalogOrRewrittenPackagesAreRemoved()
     {
-        var build = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
+        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         var package = await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         Directory.Delete(Path.GetDirectoryName(package)!, recursive: true);
         File.Delete(Path.Combine(_options.CacheDirectory, "catalog.json"));
         _github.FailDownloads = true;
-        var restored = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
-        Assert.Equal(build, restored);
-        Assert.True(File.Exists(await CreatePackageCache().GetAsync("Velopack", restored, Cancellation)));
-        Assert.Equal(1, _github.PackageDownloads);
-        Assert.Equal(1, _github.VersionDownloads);
+        var restored = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(restored).IsEqualTo(build);
+        await Assert.That(File.Exists(await CreatePackageCache().GetAsync("Velopack", restored, Cancellation))).IsTrue();
+        await Assert.That(_github.PackageDownloads).IsEqualTo(1);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
     }
 
-    [Fact]
+    [Test]
     public async Task ExpiredArtifactsCanStillBeUsedFromDisk()
     {
-        var build = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
+        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         File.Delete(Path.Combine(_options.CacheDirectory, "catalog.json"));
         _github.Expired = true;
         _github.FailDownloads = true;
-        var restored = Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation));
-        Assert.Equal(build.Version, restored.Version);
-        Assert.Equal(build.Packages.Id, restored.Packages.Id);
+        var restored = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(restored.Version).IsEqualTo(build.Version);
+        await Assert.That(restored.Packages.Id).IsEqualTo(build.Packages.Id);
     }
 
-    [Fact]
+    [Test]
     public async Task FailedDiscoveryIsNotCached()
     {
         var catalog = CreateCatalog();
         _github.FailDiscovery = true;
-        await Assert.ThrowsAsync<DiscoveryUnavailableException>(() => catalog.GetBuildsAsync(Cancellation));
+        await Assert.That(async () => await catalog.GetBuildsAsync(Cancellation))
+            .ThrowsExactly<DiscoveryUnavailableException>();
         _github.FailDiscovery = false;
-        Assert.Single(await catalog.GetBuildsAsync(Cancellation));
-        Assert.Equal(2, _github.OpenPullRequestQueries);
+        await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
     }
 
-    [Fact]
+    [Test]
     public async Task CacheCannotBeReusedForAnotherRepository()
     {
         await CreateCatalog().GetBuildsAsync(Cancellation);
         _options.Repository = "other/project";
-        Assert.Throws<InvalidDataException>(() => CreateCatalog());
+        await Assert.That(() => CreateCatalog()).ThrowsExactly<InvalidDataException>();
     }
 
-    [Fact]
+    [Test]
     public async Task HttpFeedHasConsistentIdentitiesAndDependencies()
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        _options.BaseUrl = $"http://localhost:{((IPEndPoint)listener.LocalEndpoint).Port}";
-        listener.Stop();
+        _options.BaseUrl = "http://127.0.0.1:0";
         var builder = WebApplication.CreateBuilder();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -357,103 +369,116 @@ public sealed class ProxyTests : IDisposable
         app.MapProxy();
         await app.StartAsync(Cancellation);
         await app.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(Cancellation);
-        Assert.Equal(1, _github.OpenPullRequestQueries);
-        Assert.Equal(1, _github.RunQueries);
-        Assert.Equal(1, _github.ArtifactQueries);
-        Assert.Equal(0, _github.VersionDownloads);
-        Assert.Equal(0, _github.PackageDownloads);
+        _options.BaseUrl = await Assert.That(app.Urls).HasSingleItem();
+        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = _options.BaseUrl;
+        await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
+        await Assert.That(_github.RunQueries).IsEqualTo(1);
+        await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(0);
+        await Assert.That(_github.PackageDownloads).IsEqualTo(0);
         using var client = new HttpClient { BaseAddress = new Uri(_options.BaseUrl) };
         using var index = JsonDocument.Parse(await client.GetStringAsync("/v3/index.json", Cancellation));
-        Assert.Equal("PackageBaseAddress/3.0.0", index.RootElement.GetProperty("resources")[0].GetProperty("@type").GetString());
+        await Assert.That(index.RootElement.GetProperty("resources")[0].GetProperty("@type").GetString())
+            .IsEqualTo("PackageBaseAddress/3.0.0");
         using var versions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
-        var version = Assert.Single(versions.RootElement.GetProperty("versions").EnumerateArray()).GetString();
+        var versionElement = await Assert.That(versions.RootElement.GetProperty("versions").EnumerateArray()).HasSingleItem();
+        var version = versionElement.GetString();
         var package = await client.GetByteArrayAsync($"/flat/velopack/{version}/velopack.{version}.nupkg", Cancellation);
         using var reader = new PackageArchiveReader(new MemoryStream(package));
-        Assert.Equal(version, reader.GetIdentity().Version.ToNormalizedString());
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(version);
         using var buildVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack.build/index.json", Cancellation));
-        Assert.Equal(version, Assert.Single(buildVersions.RootElement.GetProperty("versions").EnumerateArray()).GetString());
+        var buildVersionElement = await Assert.That(buildVersions.RootElement.GetProperty("versions").EnumerateArray()).HasSingleItem();
+        await Assert.That(buildVersionElement.GetString()).IsEqualTo(version);
         var buildPackage = await client.GetByteArrayAsync(
             $"/flat/velopack.build/{version}/velopack.build.{version}.nupkg", Cancellation);
         using var buildReader = new PackageArchiveReader(new MemoryStream(buildPackage));
-        Assert.Equal("Velopack.Build", buildReader.GetIdentity().Id);
-        Assert.Equal(version, buildReader.GetIdentity().Version.ToNormalizedString());
+        await Assert.That(buildReader.GetIdentity().Id).IsEqualTo("Velopack.Build");
+        await Assert.That(buildReader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(version);
         using var pluginVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/example.plugin/index.json", Cancellation));
-        var pluginVersion = Assert.Single(pluginVersions.RootElement.GetProperty("versions").EnumerateArray()).GetString();
-        Assert.StartsWith("2.0.0-pr.", pluginVersion);
+        var pluginVersionElement = await Assert.That(pluginVersions.RootElement.GetProperty("versions").EnumerateArray()).HasSingleItem();
+        var pluginVersion = pluginVersionElement.GetString();
+        await Assert.That(pluginVersion).StartsWith("2.0.0-pr.", StringComparison.CurrentCulture);
         using var pluginRegistration = JsonDocument.Parse(await client.GetStringAsync("/registration/example.plugin/index.json", Cancellation));
         var pluginEntry = pluginRegistration.RootElement.GetProperty("items")[0].GetProperty("items")[0].GetProperty("catalogEntry");
-        Assert.Equal(pluginVersion, pluginEntry.GetProperty("version").GetString());
-        Assert.Equal(VersionRange.Parse($"[{version}]").ToNormalizedString(),
-            pluginEntry.GetProperty("dependencyGroups")[0].GetProperty("dependencies")[0].GetProperty("range").GetString());
+        await Assert.That(pluginEntry.GetProperty("version").GetString()).IsEqualTo(pluginVersion);
+        await Assert.That(pluginEntry.GetProperty("dependencyGroups")[0].GetProperty("dependencies")[0].GetProperty("range").GetString())
+            .IsEqualTo(VersionRange.Parse($"[{version}]").ToNormalizedString());
         using var registration = JsonDocument.Parse(await client.GetStringAsync("/registration/velopack/index.json", Cancellation));
         var entry = registration.RootElement.GetProperty("items")[0].GetProperty("items")[0].GetProperty("catalogEntry");
-        Assert.Equal(version, entry.GetProperty("version").GetString());
-        Assert.Equal("Newtonsoft.Json", entry.GetProperty("dependencyGroups")[0].GetProperty("dependencies")[0].GetProperty("id").GetString());
+        await Assert.That(entry.GetProperty("version").GetString()).IsEqualTo(version);
+        await Assert.That(entry.GetProperty("dependencyGroups")[0].GetProperty("dependencies")[0].GetProperty("id").GetString())
+            .IsEqualTo("Newtonsoft.Json");
         var nuspec = await client.GetByteArrayAsync($"/flat/velopack/{version}/velopack.nuspec", Cancellation);
-        Assert.Equal(PackageRewriter.ReadManifest(await CreatePackageCache().GetAsync("velopack",
-            Assert.Single(await CreateCatalog().GetBuildsAsync(Cancellation)), Cancellation)), nuspec);
+        var manifestBuild = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var cachedManifest = PackageRewriter.ReadManifest(await CreatePackageCache().GetAsync("velopack", manifestBuild, Cancellation));
+        await Assert.That(nuspec).IsEquivalentTo(cachedManifest, CollectionOrdering.Matching);
         using var search = JsonDocument.Parse(await client.GetStringAsync("/query?q=velopack&prerelease=true&semVerLevel=2.0.0", Cancellation));
-        Assert.Equal(2, search.RootElement.GetProperty("totalHits").GetInt32());
-        Assert.Equal(version, search.RootElement.GetProperty("data")[0].GetProperty("version").GetString());
+        await Assert.That(search.RootElement.GetProperty("totalHits").GetInt32()).IsEqualTo(2);
+        await Assert.That(search.RootElement.GetProperty("data")[0].GetProperty("version").GetString()).IsEqualTo(version);
         using var stable = JsonDocument.Parse(await client.GetStringAsync("/query?prerelease=false", Cancellation));
-        Assert.Equal(0, stable.RootElement.GetProperty("totalHits").GetInt32());
+        await Assert.That(stable.RootElement.GetProperty("totalHits").GetInt32()).IsEqualTo(0);
         using var tools = JsonDocument.Parse(await client.GetStringAsync(
             "/query?prerelease=true&semVerLevel=2.0.0&packageType=DotnetTool", Cancellation));
-        Assert.Equal("vpk", Assert.Single(tools.RootElement.GetProperty("data").EnumerateArray()).GetProperty("id").GetString());
+        var toolEntry = await Assert.That(tools.RootElement.GetProperty("data").EnumerateArray()).HasSingleItem();
+        await Assert.That(toolEntry.GetProperty("id").GetString()).IsEqualTo("vpk");
         using var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head,
             $"/flat/vpk/{version}/vpk.{version}.nupkg"), Cancellation);
-        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
-        Assert.Empty(await head.Content.ReadAsByteArrayAsync(Cancellation));
-        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/flat/other/index.json", Cancellation)).StatusCode);
+        await Assert.That(head.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(await head.Content.ReadAsByteArrayAsync(Cancellation)).IsEmpty();
+        await Assert.That((await client.GetAsync("/flat/other/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
         var source = Repository.Factory.GetCoreV3(new PackageSource(_options.BaseUrl + "/v3/index.json")
         {
             AllowInsecureConnections = true
         });
         var metadataResource = await source.GetResourceAsync<PackageMetadataResource>(Cancellation);
-        Assert.NotNull(metadataResource);
+        await Assert.That(metadataResource).IsNotNull();
         using var context = new SourceCacheContext { NoCache = true };
-        var metadata = Assert.Single(await metadataResource.GetMetadataAsync("Velopack", true, false, context,
-            NullLogger.Instance, Cancellation));
-        Assert.Equal(version, metadata.Identity.Version.ToNormalizedString());
-        Assert.Equal("Newtonsoft.Json", Assert.Single(Assert.Single(metadata.DependencySets).Packages).Id);
+        var metadata = await Assert.That(await metadataResource.GetMetadataAsync("Velopack", true, false, context,
+            NullLogger.Instance, Cancellation)).HasSingleItem();
+        await Assert.That(metadata.Identity.Version.ToNormalizedString()).IsEqualTo(version);
+        var metadataGroup = await Assert.That(metadata.DependencySets).HasSingleItem();
+        var metadataDependency = await Assert.That(metadataGroup.Packages).HasSingleItem();
+        await Assert.That(metadataDependency.Id).IsEqualTo("Newtonsoft.Json");
         var searchResource = await source.GetResourceAsync<PackageSearchResource>(Cancellation);
-        Assert.NotNull(searchResource);
+        await Assert.That(searchResource).IsNotNull();
         var foundPackages = (await searchResource.SearchAsync("Velopack", new SearchFilter(includePrerelease: true),
             0, 20, NullLogger.Instance, Cancellation)).ToArray();
-        Assert.Equal(2, foundPackages.Length);
-        var found = Assert.Single(foundPackages, x => x.Identity.Id == "Velopack.Build");
-        Assert.Equal(version, found.Identity.Version.ToNormalizedString());
+        await Assert.That(foundPackages.Length).IsEqualTo(2);
+        var found = await Assert.That(foundPackages.Where(x => x.Identity.Id == "Velopack.Build")).HasSingleItem();
+        await Assert.That(found.Identity.Version.ToNormalizedString()).IsEqualTo(version);
         var autocomplete = await source.GetResourceAsync<AutoCompleteResource>(Cancellation);
-        Assert.NotNull(autocomplete);
-        Assert.Equal(["Velopack", "Velopack.Build"], await autocomplete.IdStartsWith("Velo", true, NullLogger.Instance, Cancellation));
+        await Assert.That(autocomplete).IsNotNull();
+        await Assert.That(await autocomplete.IdStartsWith("Velo", true, NullLogger.Instance, Cancellation))
+            .IsEquivalentTo(new[] { "Velopack", "Velopack.Build" }, CollectionOrdering.Matching);
         app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
-        Assert.IsType<MemoryCache>(app.Services.GetRequiredService<IMemoryCache>()).Compact(1);
+        var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
+        memoryCache.Compact(1);
         await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
         using var allLibraryVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
-        Assert.Equal(2, allLibraryVersions.RootElement.GetProperty("versions").GetArrayLength());
+        await Assert.That(allLibraryVersions.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(2);
         using var allPluginVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/example.plugin/index.json", Cancellation));
-        Assert.Single(allPluginVersions.RootElement.GetProperty("versions").EnumerateArray());
+        await Assert.That(allPluginVersions.RootElement.GetProperty("versions").EnumerateArray()).HasSingleItem();
         using var pluginSearch = JsonDocument.Parse(await client.GetStringAsync(
             "/query?q=Example.Plugin&prerelease=true&semVerLevel=2.0.0", Cancellation));
-        Assert.Single(pluginSearch.RootElement.GetProperty("data")[0].GetProperty("versions").EnumerateArray());
+        await Assert.That(pluginSearch.RootElement.GetProperty("data")[0].GetProperty("versions").EnumerateArray()).HasSingleItem();
         using var pluginAutocomplete = JsonDocument.Parse(await client.GetStringAsync(
             "/autocomplete?id=Example.Plugin&prerelease=true&semVerLevel=2.0.0", Cancellation));
-        Assert.Single(pluginAutocomplete.RootElement.GetProperty("data").EnumerateArray());
+        await Assert.That(pluginAutocomplete.RootElement.GetProperty("data").EnumerateArray()).HasSingleItem();
         _github.OpenPullRequests = [];
-        Assert.IsType<MemoryCache>(app.Services.GetRequiredService<IMemoryCache>()).Compact(1);
+        memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
+        memoryCache.Compact(1);
         await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
-        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/flat/velopack/index.json", Cancellation)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound,
-            (await client.GetAsync($"/flat/velopack/{version}/velopack.{version}.nupkg", Cancellation)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound,
-            (await client.GetAsync("/registration/velopack/index.json", Cancellation)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound,
-            (await client.GetAsync($"/registration/velopack/{version}.json", Cancellation)).StatusCode);
+        await Assert.That((await client.GetAsync("/flat/velopack/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
+        await Assert.That((await client.GetAsync($"/flat/velopack/{version}/velopack.{version}.nupkg", Cancellation)).StatusCode)
+            .IsEqualTo(HttpStatusCode.NotFound);
+        await Assert.That((await client.GetAsync("/registration/velopack/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
+        await Assert.That((await client.GetAsync($"/registration/velopack/{version}.json", Cancellation)).StatusCode)
+            .IsEqualTo(HttpStatusCode.NotFound);
         using var closedSearch = JsonDocument.Parse(await client.GetStringAsync("/query?prerelease=true&semVerLevel=2.0.0", Cancellation));
-        Assert.Empty(closedSearch.RootElement.GetProperty("data").EnumerateArray());
+        await Assert.That(closedSearch.RootElement.GetProperty("data").EnumerateArray()).IsEmpty();
         using var closedAutocomplete = JsonDocument.Parse(await client.GetStringAsync(
             "/autocomplete?id=Velopack&prerelease=true&semVerLevel=2.0.0", Cancellation));
-        Assert.Empty(closedAutocomplete.RootElement.GetProperty("data").EnumerateArray());
+        await Assert.That(closedAutocomplete.RootElement.GetProperty("data").EnumerateArray()).IsEmpty();
         await app.StopAsync(Cancellation);
     }
 

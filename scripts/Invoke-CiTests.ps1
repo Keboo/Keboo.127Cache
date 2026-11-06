@@ -20,20 +20,24 @@ if ($CoverageDirectory) {
         $null = New-Item -ItemType Directory -Path $coveragePath -Force
     }
 
-    # The coverage extension generates a distinct filename for each test module.
-    $arguments += @('--results-directory', $coveragePath, '--coverage', '--coverage-output-format', 'cobertura')
+    # Per-process TRX records let the coverage guard detect missing or shared reports.
+    $arguments += @(
+        '--results-directory', $coveragePath,
+        '--results-directory-layout', 'per-module',
+        '--coverage', '--coverage-output-format', 'cobertura',
+        '--coverage-output', (Join-Path 'TestResults' 'coverage.cobertura.xml'),
+        '--report-trx', '--report-trx-filename', 'ci-module-{pid}.trx'
+    )
 }
 
 & dotnet @arguments
 if ($LASTEXITCODE -ne 0) { throw "Solution test run failed with exit code $LASTEXITCODE." }
 
 if ($CoverageDirectory) {
-    $reports = @(Get-ChildItem -LiteralPath $coveragePath -Filter '*.cobertura.xml' -File -Recurse |
-        Sort-Object -Property FullName)
-    if ($reports.Count -eq 0 -or @($reports | Where-Object Length -eq 0).Count -ne 0) {
-        throw "The solution test run did not produce nonempty Cobertura reports in $coveragePath."
-    }
+    . (Join-Path $PSScriptRoot 'Get-CiCoverageReports.ps1')
+    $reports = @(Get-CiCoverageReports -CoverageDirectory $coveragePath)
     Write-Host "Collected $($reports.Count) Cobertura reports from the solution."
+    $reports | ForEach-Object { Write-Host "COVERAGE_REPORT=$($_.FullName)" }
     if ($env:GITHUB_OUTPUT) {
         $paths = ($reports | ForEach-Object FullName) -join ';'
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "reports=$paths" -Encoding utf8
