@@ -53,7 +53,12 @@ static void signal_fault(const char *signal_path)
 
 int k127_fault_flock(int fd, int operation)
 {
+#if defined(__APPLE__)
+    /* Calls from the interposing image itself bind to the original symbol. */
+    flock_function actual = flock;
+#else
     flock_function actual = (flock_function)dlsym(RTLD_NEXT, "flock");
+#endif
     if (actual == NULL)
     {
         errno = ENOSYS;
