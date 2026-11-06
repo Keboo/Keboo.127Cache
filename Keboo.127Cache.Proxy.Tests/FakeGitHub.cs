@@ -25,19 +25,19 @@ public sealed class FakeGitHub : IGitHubClient
     public PullRequestInfo[] OpenPullRequests { get; set; } = [new(755), new(756)];
     public WorkflowRun[]? Runs { get; set; }
 
-    public FakeGitHub(string directory)
+    public FakeGitHub(string directory, string originalVersion = OriginalVersion)
     {
         _versionFile = Path.Combine(directory, "version.zip");
         using (var zip = ZipFile.Open(_versionFile, ZipArchiveMode.Create))
         using (var writer = new StreamWriter(zip.CreateEntry("version.txt").Open()))
-            writer.Write(OriginalVersion);
+            writer.Write(originalVersion);
         _packagesFile = Path.Combine(directory, "packages.zip");
         using (var zip = ZipFile.Open(_packagesFile, ZipArchiveMode.Create))
         {
             foreach (var id in new[] { "Velopack", "Velopack.Build", "vpk" })
             {
                 var package = Path.Combine(directory, id + ".nupkg");
-                WritePackage(package, id);
+                WritePackage(package, id, originalVersion);
                 zip.CreateEntryFromFile(package, "../../untrusted/" + id + ".nupkg");
             }
             var plugin = Path.Combine(directory, "Example.Plugin.nupkg");
@@ -56,7 +56,7 @@ public sealed class FakeGitHub : IGitHubClient
     private static Artifact ArtifactFor(long id, string name, string file) =>
         new(id, name, false, "sha256:" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))).ToLowerInvariant());
 
-    public static void WritePackage(string path, string id, string version = OriginalVersion, string dependency = "Newtonsoft.Json")
+    public static void WritePackage(string path, string id, string version = OriginalVersion, string? dependency = "Newtonsoft.Json")
     {
         using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
         using (var writer = new StreamWriter(zip.CreateEntry(id + ".nuspec").Open()))
@@ -67,7 +67,7 @@ public sealed class FakeGitHub : IGitHubClient
                       <metadata><id>{id}</id><version>{version}</version><authors>test</authors>
                         <description>Test package</description>
                         {(id == "vpk" ? "<packageTypes><packageType name=\"DotnetTool\" /></packageTypes>" : "")}
-                        <dependencies><group targetFramework="net8.0"><dependency id="{dependency}" version="[13.0.4,)" /></group></dependencies>
+                        {(dependency is null ? "" : $"""<dependencies><group targetFramework="net8.0"><dependency id="{dependency}" version="[13.0.4,)" /></group></dependencies>""")}
                       </metadata>
                     </package>
                     """);
