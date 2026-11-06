@@ -46,6 +46,7 @@ public sealed class PackageCatalog
     private string? _snapshotError;
     private CatalogHealth _health;
     private string? _contentError;
+    private string? _pinnedWorkflowError;
     private bool _catalogUnreadable;
     private bool _runsUnreadable;
     private volatile bool _incompleteUnreadable;
@@ -410,7 +411,8 @@ public sealed class PackageCatalog
             }
             if (!await CompletesWithinRequestAsync(refresh, cancellationToken))
             {
-                const string error = "GitHub discovery is still in progress. Retry when it completes.";
+                var error = Volatile.Read(ref _pinnedWorkflowError)
+                    ?? "GitHub discovery is still in progress. Retry when it completes.";
                 SetFailureHealth(error, fallback);
                 throw new DiscoveryUnavailableException(error);
             }
@@ -446,9 +448,19 @@ public sealed class PackageCatalog
             var error = DiscoveryFailure.Describe(exception);
             if (exception is PinnedRunWorkflowException)
             {
+                Volatile.Write(ref _pinnedWorkflowError, error);
                 _memoryCache.Remove(_cacheKey);
-                Volatile.Write(ref _partialDiscovery, null);
-                SetFailureHealth(error, null);
+                var blocked = new Discovery([], true, error, MatchingSnapshot(),
+                    MetadataIncomplete: true, UnverifiedPinnedRuns: true);
+                try
+                {
+                    await PersistIncompleteAsync(blocked, cancellationToken);
+                }
+                catch (SnapshotPersistenceException)
+                {
+                    error += " Could not save the incomplete discovery state.";
+                }
+                SetFailureHealth(error, blocked);
                 _logger.LogWarning("Catalog discovery failed: {Error}", error);
                 throw new DiscoveryUnavailableException(error);
             }
@@ -605,6 +617,7 @@ public sealed class PackageCatalog
         }
         _snapshot = snapshot;
         _snapshotError = null;
+        Volatile.Write(ref _pinnedWorkflowError, null);
         _incompleteUnreadable = false;
         Volatile.Write(ref _partialDiscovery, null);
         lock (_healthGate)
@@ -719,8 +732,11 @@ public sealed class PackageCatalog
                     _options.PullRequests.Length == 0 || _options.PullRequests.Contains(run.PullRequest)
                     || _options.RunIds.Contains(run.RunId))
                 .ToArray();
-            var discovery = new Discovery(runs, true,
-                "A previous discovery was incomplete; a complete live refresh is required.", MatchingSnapshot(),
+            var error = saved.UnverifiedPinnedRuns
+                ? "A pinned run could not be verified against the configured workflow. A complete live refresh is required."
+                : "A previous discovery was incomplete; a complete live refresh is required.";
+            if (saved.UnverifiedPinnedRuns) Volatile.Write(ref _pinnedWorkflowError, error);
+            var discovery = new Discovery(runs, true, error, MatchingSnapshot(),
                 MembershipUnknown: !matchingSelection, SkippedBuilds: saved.SkippedBuilds,
                 MetadataIncomplete: saved.MetadataIncomplete || !matchingSelection,
                 UnverifiedPinnedRuns: saved.UnverifiedPinnedRuns);

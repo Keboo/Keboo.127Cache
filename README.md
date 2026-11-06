@@ -201,11 +201,12 @@ provider statement. Someone able to change both its contents and checksum can
 forge it, so protect the entire cache from untrusted writers. Invalid or
 disagreeing inventories cannot prove index completeness.
 
-When discovery has observed an unavailable build or inconsistent metadata, an
-`incomplete-discovery.json` marker preserves that uncertainty across restarts
-without replacing the last successful snapshot. A complete live refresh removes
-the marker. An unreadable marker fails closed until a complete refresh; it is
-not silently treated as a successful empty discovery.
+When discovery has observed an unavailable build, inconsistent metadata, or a
+pinned workflow mismatch, an `incomplete-discovery.json` marker preserves that
+uncertainty across restarts without replacing the last successful snapshot. A
+complete live refresh removes the marker. An unreadable marker fails closed
+until a complete refresh; it is not silently treated as a successful empty
+discovery.
 
 `GET /health` returns HTTP 200 with `status` (`ok` or `degraded`), a safe
 `error` message, and `lastSuccessfulRefreshUtc` (or `null` if there has been no
@@ -221,9 +222,9 @@ metadata refresh until a complete content check succeeds. `provenance` is
 `verified`, `legacy-unverified`, `incomplete`, or `unknown`; verification
 describes the run/workflow and artifact association, not a package signature.
 
-Degraded feed responses carry `X-127Cache-Status`, `X-127Cache-Membership`,
-`X-127Cache-Provenance`, and a stale `Warning` header. The status is
-`degraded-partial` when content or discovery is incomplete. Search,
+Degraded responses based on an available cached view carry `X-127Cache-Status`,
+`X-127Cache-Membership`, `X-127Cache-Provenance`, and a stale `Warning` header.
+The status is `degraded-partial` when content or discovery is incomplete. Search,
 autocomplete, and `/builds` then return 503 instead of claiming complete
 results. Flat and registration version indexes return 503 with problem details
 if a known version of that package is unavailable, or an unavailable build's

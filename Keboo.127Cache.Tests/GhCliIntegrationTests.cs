@@ -83,6 +83,7 @@ public sealed class GhCliIntegrationTests : IDisposable
         start.Environment["PATH"] = fakeGh;
         start.Environment["DOTNET_ROOT"] = dotnetRoot;
         start.Environment["K127_FAKE_GH_PIN"] = scenario;
+        if (!matches) start.Environment["K127_FAKE_GH_RETRY_GATE"] = fixture;
         using var process = Process.Start(start) ?? throw new InvalidOperationException("The server process did not start.");
         var output = process.StandardOutput.ReadToEndAsync();
         var error = process.StandardError.ReadToEndAsync();
@@ -114,10 +115,40 @@ public sealed class GhCliIntegrationTests : IDisposable
                 using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
                 await Assert.That(problem.RootElement.GetProperty("detail").GetString()!).Contains("workflow");
                 await Assert.That(File.Exists(Path.Combine(cache, "visible-runs.json"))).IsFalse();
+                var retryStarted = Path.Combine(fixture, "retry-started");
+                var retryDeadline = DateTime.UtcNow.AddSeconds(15);
+                while (!File.Exists(retryStarted) && DateTime.UtcNow < retryDeadline)
+                {
+                    using var retry = await client.GetAsync("/v3/index.json");
+                    await Assert.That(retry.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+                    using var retryProblem = JsonDocument.Parse(await retry.Content.ReadAsStringAsync());
+                    await Assert.That(retryProblem.RootElement.GetProperty("detail").GetString()!).Contains("workflow");
+                    await Task.Delay(20);
+                }
+                await Assert.That(File.Exists(retryStarted)).IsTrue();
+                await File.WriteAllTextAsync(Path.Combine(fixture, "fixed-workflow"), "");
+                await File.WriteAllTextAsync(Path.Combine(fixture, "release-retry"), "");
+                var recovered = false;
+                var recoveryDeadline = DateTime.UtcNow.AddSeconds(15);
+                while (DateTime.UtcNow < recoveryDeadline)
+                {
+                    using var health = JsonDocument.Parse(await client.GetStringAsync("/health"));
+                    if (health.RootElement.GetProperty("status").GetString() == "ok")
+                    {
+                        await Assert.That(health.RootElement.GetProperty("provenance").GetString()).IsEqualTo("verified");
+                        recovered = true;
+                        break;
+                    }
+                    await Task.Delay(50);
+                }
+                await Assert.That(recovered).IsTrue();
+                using var restored = await client.GetAsync("/v3/index.json");
+                await Assert.That(restored.StatusCode).IsEqualTo(HttpStatusCode.OK);
             }
         }
         finally
         {
+            if (!matches) await File.WriteAllTextAsync(Path.Combine(fixture, "release-retry"), "");
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
             await output;

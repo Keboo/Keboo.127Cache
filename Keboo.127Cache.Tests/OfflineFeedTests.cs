@@ -358,6 +358,40 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
+    public async Task ObservedPinnedWorkflowMismatchRemainsBlockedAfterOfflineRestart()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        string version;
+        byte[] snapshot;
+        await using (var online = await StartAsync(runIds: [100]))
+        {
+            version = await SingleVersionAsync(online.Client, "alpha");
+            snapshot = await File.ReadAllBytesAsync(SnapshotPath);
+            var failureType = typeof(PackageCatalog).Assembly.GetType("Keboo._127Cache.PinnedRunWorkflowException")!;
+            _github.DiscoveryError = (Exception)Activator.CreateInstance(failureType, nonPublic: true)!;
+            ExpireDiscovery(online);
+            await WaitForHealthErrorAsync(online.Client, "workflow");
+            using var index = await online.Client.GetAsync("/flat/alpha/index.json");
+            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        }
+
+        _github.DiscoveryError = new IOException("Synthetic offline failure.");
+        await using var offline = await StartAsync(runIds: [100]);
+        foreach (var route in new[] { "/flat/alpha/index.json", PackageUrl("alpha", version) })
+        {
+            using var response = await offline.Client.GetAsync(route);
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
+        }
+        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
+        _github.DiscoveryError = null;
+        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
+        await Assert.That(await SingleVersionAsync(offline.Client, "alpha")).IsEqualTo(version);
+    }
+
+    [Test]
     public async Task AmbiguousLegacyPinIsExcludedWithoutClaimingOtherIndexesComplete()
     {
         _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
@@ -977,7 +1011,11 @@ public sealed class OfflineFeedTests : IDisposable
             await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
         }
         using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion)))
+        {
+            if (cached.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException("Cached Alpha was unavailable: " + await cached.Content.ReadAsStringAsync());
             await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        }
         await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
 
         _github.DiscoveryError = null;
