@@ -107,11 +107,14 @@ are not published, and a record left by an interrupted publication must match
 a subsequent download. Concurrent cache instances download independently, then
 coordinate publication using a stable per-artifact `.zip.lock` file. The lock
 file may remain after a process exits; do not remove it or its parent directory
-while any cache instance is running. On Unix, this coordination uses advisory
-file locks and requires a filesystem that supports them. Publication fails closed
-if exclusive locking is unavailable or disabled; other writers and older
-versions that do not honor the lock must not share the cache. Filesystems shared
-between machines must enforce those locks across all participating machines.
+while any cache instance is running. On Unix, this coordination checks an
+exclusive advisory `flock` on the held file handle, independently of .NET's
+file-sharing lock setting. A non-contention lock error prevents publication.
+All cache processes must use this corrected locking protocol; other writers and
+older versions must not share the cache. The filesystem must actually enforce
+these locks; the application cannot detect a filesystem that silently grants
+ineffective locks. Filesystems shared between machines must enforce those locks
+across all participating machines.
 Interrupted processes may leave unique `.tmp` files, which are ignored and may
 be removed only when the cache is not in use. A missing, invalid, or mismatched
 record for an already-cached digest-less artifact is not silently replaced:
@@ -156,8 +159,11 @@ $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
-and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`.
+and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`, with additional
+artifact-integrity regression tests in `Keboo.127Cache.Tests`.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
+On Linux and macOS, the artifact-integrity tests require a C compiler available
+as `cc` to build their native `flock` fault injector.
 
 The packed-tool smoke test installs the one package in the output directory using
 an isolated local-only NuGet source and cache. It starts the installed command with
