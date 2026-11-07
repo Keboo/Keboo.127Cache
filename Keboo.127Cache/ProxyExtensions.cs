@@ -6,11 +6,11 @@ public static class ProxyExtensions
 {
     public static IServiceCollection AddProxy(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddOptions<ProxyOptions>()
-            .Bind(configuration.GetSection("Proxy"))
-            .Validate(options => options.IsValid(), "Invalid proxy configuration.")
-            .ValidateOnStart();
-        services.AddSingleton(provider => provider.GetRequiredService<IOptions<ProxyOptions>>().Value);
+        services.AddLogging();
+        services.AddSingleton(provider =>
+            CacheConfigurationLoader.Load(configuration, provider.GetRequiredService<ILogger<CacheConfiguration>>()));
+        services.AddSingleton(provider => ProxyOptions.FromConfiguration(provider.GetRequiredService<CacheConfiguration>()));
+        services.AddSingleton<IOptions<ProxyOptions>>(provider => Options.Create(provider.GetRequiredService<ProxyOptions>()));
         services.AddMemoryCache();
         services.AddSingleton<IGitHubClient, GitHubClient>();
         services.AddSingleton<ArtifactCache>();
@@ -25,7 +25,7 @@ public static class ProxyExtensions
     {
         var options = app.Services.GetRequiredService<ProxyOptions>();
         app.MapGet("/health", () => Results.Ok(new { status = "ok", repository = options.Repository }));
-        app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) => Results.Ok(await catalog.GetBuildsAsync(ct)));
+        app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) => Results.Ok(await catalog.GetScriptBuildsAsync(ct)));
         app.MapMethods("/v3/index.json", ["GET", "HEAD"], () => Results.Json(new
         {
             version = "3.0.0",

@@ -5,6 +5,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -12,6 +13,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+
 using NuGet.Packaging;
 
 namespace Keboo._127Cache.Tests;
@@ -637,6 +639,7 @@ public sealed class ArtifactIntegrityTests
         builder.Logging.ClearProviders();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
+            ["Proxy:Repository"] = "fixture/project",
             ["Proxy:CacheDirectory"] = fixture.Options.CacheDirectory,
             ["Proxy:PullRequests:0"] = "755"
         });

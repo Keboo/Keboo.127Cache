@@ -15,7 +15,7 @@ public sealed class ProxyAssertionSemanticsTests
         var equal = expected with
         {
             Packages = expected.Packages with { },
-            VersionArtifact = expected.VersionArtifact with { }
+            VersionArtifact = expected.VersionArtifact! with { }
         };
         await ProxyAssertions.EqualRecords(new[] { equal }, new[] { expected });
 
@@ -39,7 +39,7 @@ public sealed class ProxyAssertionSemanticsTests
             Build = expected.Build with
             {
                 Packages = expected.Build.Packages with { },
-                VersionArtifact = expected.Build.VersionArtifact with { }
+                VersionArtifact = expected.Build.VersionArtifact! with { }
             }
         };
         await ProxyAssertions.EqualRecords(new[] { equal }, new[] { expected });
