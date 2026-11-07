@@ -23,8 +23,8 @@ public sealed class NuGetClientTests
     {
         await using var fixture = new NuGetClientFixture();
         await fixture.StartAsync(includeOlderRun: false, Cancellation);
-        const string pluginVersion = "2.0.0-pr.755.run.100.attempt.1.artifact.2";
-        const string libraryVersion = "1.3.67-pr.755.run.100.attempt.1.artifact.2";
+        const string pluginVersion = "2.0.0-pr.755.run.r0000000000000000100.attempt.1.artifact.2";
+        const string libraryVersion = "1.3.67-pr.755.run.r0000000000000000100.attempt.1.artifact.2";
 
         using var assets = await fixture.RestoreAsync("Example.Plugin", pluginVersion, Cancellation);
         var target = assets.RootElement.GetProperty("targets").GetProperty("net10.0");
@@ -52,8 +52,8 @@ public sealed class NuGetClientTests
     {
         await using var fixture = new NuGetClientFixture();
         await fixture.StartAsync(includeOlderRun: true, Cancellation);
-        const string newest = "1.3.67-pr.755.run.100.attempt.1.artifact.2";
-        const string older = "1.3.67-pr.755.run.99.attempt.1.artifact.3";
+        const string newest = "1.3.67-pr.755.run.r0000000000000000100.attempt.1.artifact.2";
+        const string older = "1.3.67-pr.755.run.r0000000000000000099.attempt.1.artifact.3";
 
         var available = await fixture.GetVersionsAsync("Velopack", Cancellation);
         await Assert.That(available).Contains(older);
