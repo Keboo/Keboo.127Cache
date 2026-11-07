@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -135,7 +136,8 @@ public class NuGetLongVersionRestoreTests
         var id = new string('界', 90);
         var original = "1.2.0";
         var version = PackageRewriter.VersionFor(original, 755, 100, 1, 300);
-        var package = fixture.CreatePackage(id, original);
+        var package = Path.Combine(fixture.DirectoryPath, "unicode.nupkg");
+        CreateMinimalPackage(package, id, original);
         var artifactPath = Path.Combine(cache, "artifacts", "300.zip");
         using (var archive = ZipFile.Open(artifactPath, ZipArchiveMode.Create))
             archive.CreateEntryFromFile(package, $"{id}.nupkg");
@@ -253,7 +255,7 @@ public class NuGetLongVersionRestoreTests
     internal static async Task<(int ExitCode, string Output, string ProjectDirectory)> RestoreAsync(
         string directory, string feed, string id, string version, bool exact = true)
     {
-        var root = Path.Combine(Path.GetPathRoot(directory) ?? directory, "127cache-restore");
+        var root = Path.Combine(Directory.GetCurrentDirectory(), "restore-work");
         Directory.CreateDirectory(root);
         var project = Path.Combine(root, "r-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(project);
@@ -321,5 +323,28 @@ public class NuGetLongVersionRestoreTests
                 await process.WaitForExitAsync();
             }
         }
+    }
+
+    private static void CreateMinimalPackage(string path, string id, string version)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        var nuspec = archive.CreateEntry($"{id}.nuspec");
+        using (var stream = new StreamWriter(nuspec.Open(), Encoding.UTF8))
+        {
+            stream.Write($"""
+                <?xml version="1.0" encoding="utf-8"?>
+                <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+                  <metadata>
+                    <id>{id}</id>
+                    <version>{version}</version>
+                    <authors>Example Author</authors>
+                    <description>Unicode fixture</description>
+                  </metadata>
+                </package>
+                """);
+        }
+        var payload = archive.CreateEntry("content/readme.txt");
+        using var payloadWriter = new StreamWriter(payload.Open(), Encoding.UTF8);
+        payloadWriter.Write("unicode payload");
     }
 }
