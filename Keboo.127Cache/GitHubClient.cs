@@ -4,7 +4,13 @@ using System.Text.Json.Serialization;
 
 namespace Keboo._127Cache;
 
-public sealed record PullRequestInfo(int Number);
+public sealed record GitHubRepository([property: JsonPropertyName("full_name")] string? FullName);
+public sealed record PullRequestHead(
+    string? Sha,
+    [property: JsonPropertyName("ref")] string? Branch,
+    [property: JsonPropertyName("repo")] GitHubRepository? Repository);
+public sealed record PullRequestInfo(int Number, PullRequestHead? Head = null);
+public sealed record PullRequestCommit(string? Sha);
 public sealed record WorkflowRun(
     long Id,
     [property: JsonPropertyName("run_attempt")] int Attempt,
@@ -12,7 +18,9 @@ public sealed record WorkflowRun(
     string Status,
     string? Conclusion,
     string Event,
-    [property: JsonPropertyName("pull_requests")] PullRequestInfo[] PullRequests);
+    [property: JsonPropertyName("pull_requests")] PullRequestInfo[] PullRequests,
+    [property: JsonPropertyName("head_branch")] string? HeadBranch = null,
+    [property: JsonPropertyName("head_repository")] GitHubRepository? HeadRepository = null);
 public sealed record Artifact(long Id, string Name, bool Expired, string? Digest);
 public sealed record RunsResponse([property: JsonPropertyName("workflow_runs")] WorkflowRun[] Runs);
 public sealed record ArtifactsResponse(Artifact[] Artifacts);
@@ -20,6 +28,10 @@ public sealed record ArtifactsResponse(Artifact[] Artifacts);
 public interface IGitHubClient
 {
     Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> GetPullRequestCommitShasAsync(int pullRequest, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This GitHub client cannot verify historical pull-request commits.");
+    Task<IReadOnlyList<PullRequestInfo>> GetPullRequestsForHeadAsync(string repository, string branch, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This GitHub client cannot verify historical pull-request heads.");
     Task<IReadOnlyList<WorkflowRun>> GetRunsAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<Artifact>> GetArtifactsAsync(long runId, CancellationToken cancellationToken);
     Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken);
@@ -34,6 +46,40 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
         {
             var response = await GetAsync<PullRequestInfo[]>(
                 $"repos/{options.Repository}/pulls?state=open&per_page=100&page={page}", cancellationToken);
+            pullRequests.AddRange(response);
+            if (response.Length < 100) return pullRequests;
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> GetPullRequestCommitShasAsync(int pullRequest, CancellationToken cancellationToken)
+    {
+        var commits = new List<string>();
+        for (var page = 1; ; page++)
+        {
+            var response = await GetAsync<PullRequestCommit[]>(
+                $"repos/{options.Repository}/pulls/{pullRequest}/commits?per_page=100&page={page}", cancellationToken);
+            foreach (var commit in response)
+            {
+                if (string.IsNullOrWhiteSpace(commit.Sha))
+                    throw new InvalidDataException($"GitHub returned a commit without a SHA for pull request {pullRequest}.");
+                commits.Add(commit.Sha);
+            }
+            if (response.Length < 100) return commits;
+        }
+    }
+
+    public async Task<IReadOnlyList<PullRequestInfo>> GetPullRequestsForHeadAsync(
+        string repository, string branch, CancellationToken cancellationToken)
+    {
+        var slash = repository.IndexOf('/');
+        if (slash <= 0 || slash == repository.Length - 1 || repository.IndexOf('/', slash + 1) >= 0)
+            throw new InvalidDataException($"Invalid head repository '{repository}' returned by GitHub.");
+        var head = Uri.EscapeDataString($"{repository[..slash]}:{branch}");
+        var pullRequests = new List<PullRequestInfo>();
+        for (var page = 1; ; page++)
+        {
+            var response = await GetAsync<PullRequestInfo[]>(
+                $"repos/{options.Repository}/pulls?state=all&head={head}&per_page=100&page={page}", cancellationToken);
             pullRequests.AddRange(response);
             if (response.Length < 100) return pullRequests;
         }

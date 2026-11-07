@@ -17,32 +17,41 @@ public sealed class FakeGitHub : IGitHubClient
     public int PackageDownloads { get; private set; }
     public bool CorruptDownload { get; set; }
     public bool Expired { get; set; }
+    public bool MissingVersionArtifact { get; set; }
     public bool FailDiscovery { get; set; }
+    public bool FailCommitHistory { get; set; }
+    public bool FailPullRequestHistory { get; set; }
     public bool FailDownloads { get; set; }
     public int OpenPullRequestQueries { get; private set; }
+    public int PullRequestCommitQueries { get; private set; }
+    public int PullRequestHistoryQueries { get; private set; }
     public int RunQueries { get; private set; }
     public int ArtifactQueries { get; private set; }
     public PullRequestInfo[] OpenPullRequests { get; set; } = [new(755), new(756)];
+    public PullRequestInfo[]? PullRequestsForHead { get; set; }
+    public Dictionary<int, string[]> PullRequestCommits { get; } = [];
     public WorkflowRun[]? Runs { get; set; }
 
-    public FakeGitHub(string directory)
+    public FakeGitHub(string directory, string originalVersion = OriginalVersion, string? additionalPackagePath = null)
     {
         _versionFile = Path.Combine(directory, "version.zip");
         using (var zip = ZipFile.Open(_versionFile, ZipArchiveMode.Create))
         using (var writer = new StreamWriter(zip.CreateEntry("version.txt").Open()))
-            writer.Write(OriginalVersion);
+            writer.Write(originalVersion);
         _packagesFile = Path.Combine(directory, "packages.zip");
         using (var zip = ZipFile.Open(_packagesFile, ZipArchiveMode.Create))
         {
             foreach (var id in new[] { "Velopack", "Velopack.Build", "vpk" })
             {
                 var package = Path.Combine(directory, id + ".nupkg");
-                WritePackage(package, id);
+                WritePackage(package, id, originalVersion);
                 zip.CreateEntryFromFile(package, "../../untrusted/" + id + ".nupkg");
             }
             var plugin = Path.Combine(directory, "Example.Plugin.nupkg");
             WritePackage(plugin, "Example.Plugin", "2.0.0", "Velopack");
             zip.CreateEntryFromFile(plugin, "Example.Plugin.nupkg");
+            if (additionalPackagePath is not null)
+                zip.CreateEntryFromFile(additionalPackagePath, Path.GetFileName(additionalPackagePath));
         }
         _version = ArtifactFor(1, "build-version", _versionFile);
         _packages = ArtifactFor(2, "packages", _packagesFile);
@@ -56,7 +65,7 @@ public sealed class FakeGitHub : IGitHubClient
     private static Artifact ArtifactFor(long id, string name, string file) =>
         new(id, name, false, "sha256:" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))).ToLowerInvariant());
 
-    public static void WritePackage(string path, string id, string version = OriginalVersion, string dependency = "Newtonsoft.Json")
+    public static void WritePackage(string path, string id, string version = OriginalVersion, string? dependency = "Newtonsoft.Json")
     {
         using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
         using (var writer = new StreamWriter(zip.CreateEntry(id + ".nuspec").Open()))
@@ -67,7 +76,7 @@ public sealed class FakeGitHub : IGitHubClient
                       <metadata><id>{id}</id><version>{version}</version><authors>test</authors>
                         <description>Test package</description>
                         {(id == "vpk" ? "<packageTypes><packageType name=\"DotnetTool\" /></packageTypes>" : "")}
-                        <dependencies><group targetFramework="net8.0"><dependency id="{dependency}" version="[13.0.4,)" /></group></dependencies>
+                        {(dependency is null ? "" : $"""<dependencies><group targetFramework="net8.0"><dependency id="{dependency}" version="[13.0.4,)" /></group></dependencies>""")}
                       </metadata>
                     </package>
                     """);
@@ -83,6 +92,24 @@ public sealed class FakeGitHub : IGitHubClient
         OpenPullRequestQueries++;
         if (FailDiscovery) throw new IOException("GitHub unavailable");
         return Task.FromResult<IReadOnlyList<PullRequestInfo>>(OpenPullRequests);
+    }
+
+    public Task<IReadOnlyList<string>> GetPullRequestCommitShasAsync(int pullRequest, CancellationToken cancellationToken)
+    {
+        PullRequestCommitQueries++;
+        if (FailCommitHistory) throw new IOException("Pull request commit history unavailable");
+        if (!PullRequestCommits.TryGetValue(pullRequest, out var commits))
+            throw new InvalidOperationException($"No commit history was configured for pull request {pullRequest}.");
+        return Task.FromResult<IReadOnlyList<string>>(commits);
+    }
+
+    public Task<IReadOnlyList<PullRequestInfo>> GetPullRequestsForHeadAsync(string repository, string branch, CancellationToken cancellationToken)
+    {
+        PullRequestHistoryQueries++;
+        if (FailPullRequestHistory) throw new IOException("Pull request history unavailable");
+        return Task.FromResult<IReadOnlyList<PullRequestInfo>>(PullRequestsForHead ?? OpenPullRequests
+            .Where(pr => string.Equals(pr.Head?.Repository?.FullName, repository, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(pr.Head?.Branch, branch, StringComparison.Ordinal)).ToArray());
     }
 
     public Task<IReadOnlyList<WorkflowRun>> GetRunsAsync(CancellationToken cancellationToken)
@@ -101,7 +128,10 @@ public sealed class FakeGitHub : IGitHubClient
     {
         ArtifactQueries++;
         var packages = runId == 99 ? _olderPackages : _packages;
-        return Task.FromResult<IReadOnlyList<Artifact>>([_version with { Expired = Expired }, packages with { Expired = Expired }]);
+        var currentPackages = packages with { Expired = Expired };
+        return Task.FromResult<IReadOnlyList<Artifact>>(MissingVersionArtifact
+            ? [currentPackages]
+            : [_version with { Expired = Expired }, currentPackages]);
     }
 
     public Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken)
