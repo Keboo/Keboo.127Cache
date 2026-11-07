@@ -25,6 +25,13 @@ Run the complete solution:
 dotnet test --solution Keboo.127Cache.slnx
 ```
 
+The real NuGet-client tests are tagged `EndToEnd` and run as part of the full
+suite. To run only those tests:
+
+```powershell
+dotnet test --project (Join-Path 'Keboo.127Cache.Proxy.Tests' 'Keboo.127Cache.Proxy.Tests.csproj') -- --treenode-filter '/*/*/*/*[Category=EndToEnd]'
+```
+
 For the solution-wide Cobertura collection used by CI, use .NET SDK 10.0.403
 or a later 10.0 feature version and supply a new, empty coverage directory:
 

@@ -24,6 +24,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="FlockFaultInjection.c" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="TUnit.Assertions" />
     <Using Include="TUnit.Assertions.Extensions" />
     <Using Include="TUnit.Core" />
