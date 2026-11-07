@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -478,6 +480,81 @@ public sealed class ArtifactIntegrityTests
     }
 
     [Test]
+    public async Task FailedUnixLockCannotBeMistakenForAnotherProcessLock()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+
+        var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
+        if (childDirectory is not null)
+        {
+            if (Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_INDEX") == "0")
+                await RunFaultedWriterChildAsync(childDirectory);
+            else
+                await RunFaultLockOwnerChildAsync(childDirectory);
+            return;
+        }
+
+        using var fixture = new Fixture();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var path = fixture.PathFor(fixture.GitHub.Packages);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var faultSignal = Path.Combine(fixture.Directory, "fault-0");
+        var continueFault = Path.Combine(fixture.Directory, "continue-fault");
+        var releaseOwner = Path.Combine(fixture.Directory, "release-owner");
+        var children = new List<TestChild>();
+        try
+        {
+            var (interposer, direct) = await BuildFlockFaultInjectorAsync(fixture.Directory, deadline.Token);
+            var writer = StartTestChild(nameof(FailedUnixLockCannotBeMistakenForAnotherProcessLock),
+                fixture.Directory, 0, interposer: interposer, directShim: direct);
+            children.Add(writer);
+            await WaitForChildSignalAsync(faultSignal, writer, deadline.Token);
+            var injectedError = await File.ReadAllTextAsync(faultSignal, deadline.Token);
+
+            var owner = StartTestChild(nameof(FailedUnixLockCannotBeMistakenForAnotherProcessLock),
+                fixture.Directory, 1);
+            children.Add(owner);
+            await WaitForChildSignalAsync(Path.Combine(fixture.Directory, "owner-held"), owner, deadline.Token);
+
+            var probeWasBlocked = false;
+            try
+            {
+                using var probe = new FileStream(path + ".lock", FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException)
+            {
+                probeWasBlocked = true;
+            }
+            await Assert.That(probeWasBlocked).IsTrue();
+            await writer.EnsureRunningAsync();
+            await owner.EnsureRunningAsync();
+
+            await File.WriteAllTextAsync(continueFault, "continue", deadline.Token);
+            await writer.RequireExitAsync(0, deadline.Token);
+            await owner.EnsureRunningAsync();
+            var result = await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token);
+            var observation = $"result={result}; zip={File.Exists(path)}; record={File.Exists(path + ".sha256")}";
+            await Assert.That(observation)
+                .IsEqualTo($"result=IOException:{injectedError}; zip=False; record=False");
+            await Assert.That(File.Exists(path + ".lock")).IsTrue();
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
+
+            await File.WriteAllTextAsync(releaseOwner, "release", deadline.Token);
+            await owner.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token)).IsEqualTo(path);
+            await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
+                .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, deadline.Token)));
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(continueFault, "continue", Cancellation);
+            await File.WriteAllTextAsync(releaseOwner, "release", Cancellation);
+            deadline.Cancel();
+            await FinishChildrenAsync(children);
+        }
+    }
+
+    [Test]
     public async Task AbruptProcessExitReleasesLockAndRecoversMatchingOrphanRecord()
     {
         var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
@@ -542,19 +619,31 @@ public sealed class ArtifactIntegrityTests
     }
 
     [Test]
-    public async Task DisabledUnixFileLockingFailsClosed()
+    public async Task UnixPublicationRemainsLockedWhenDotnetFileLockingIsDisabled()
     {
         if (OperatingSystem.IsWindows()) return;
         var childDirectory = Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_DIRECTORY");
         if (childDirectory is not null)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            var index = int.Parse(Environment.GetEnvironmentVariable("K127_INTEGRITY_CHILD_INDEX")!);
             var github = new FakeGitHub("unlocked");
-            var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github);
-            var result = await CaptureAsync(() => cache.GetAsync(github.Packages, timeout.Token));
-            await File.WriteAllTextAsync(Path.Combine(childDirectory, "result-0"),
-                result.Error is IOException error && error.Message.Contains("Exclusive file locking is unavailable",
-                    StringComparison.Ordinal) ? "locking unavailable" : result.Error?.ToString() ?? "success",
+            var log = new RecordingLogger
+            {
+                OnHash = () => File.WriteAllText(Path.Combine(childDirectory, $"hashed-{index}"), "hashed")
+            };
+            var cache = new ArtifactCache(
+                new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github, log);
+            var pending = CaptureAsync(() => cache.GetAsync(github.Packages, cancellation.Token));
+            if (index == 0)
+            {
+                await WaitForFileAsync(Path.Combine(childDirectory, "cancel-disabled-writer"), timeout.Token);
+                cancellation.Cancel();
+            }
+            var result = await pending;
+            await File.WriteAllTextAsync(Path.Combine(childDirectory, $"result-{index}"),
+                result.Error is OperationCanceledException ? "cancelled" : result.Error?.ToString() ?? "success",
                 timeout.Token);
             return;
         }
@@ -562,24 +651,48 @@ public sealed class ArtifactIntegrityTests
         using var fixture = new Fixture();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         var path = fixture.PathFor(fixture.GitHub.Packages);
-        var child = StartTestChild(nameof(DisabledUnixFileLockingFailsClosed), fixture.Directory, 0,
-            disableFileLocking: true);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var cancelWriter = Path.Combine(fixture.Directory, "cancel-disabled-writer");
+        var children = new List<TestChild>();
         try
         {
-            await child.RequireExitAsync(0, deadline.Token);
-            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token))
-                .IsEqualTo("locking unavailable");
+            var cancelled = StartTestChild(nameof(UnixPublicationRemainsLockedWhenDotnetFileLockingIsDisabled),
+                fixture.Directory, 0, disableFileLocking: true);
+            children.Add(cancelled);
+            await WaitForChildSignalAsync(Path.Combine(fixture.Directory, "hashed-0"), cancelled, deadline.Token);
+            await Task.Delay(150, deadline.Token);
+            await cancelled.EnsureRunningAsync();
             await Assert.That(File.Exists(path)).IsFalse();
             await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+            await File.WriteAllTextAsync(cancelWriter, "cancel", deadline.Token);
+            await cancelled.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-0"), deadline.Token))
+                .IsEqualTo("cancelled");
             await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
 
+            var resumed = StartTestChild(nameof(UnixPublicationRemainsLockedWhenDotnetFileLockingIsDisabled),
+                fixture.Directory, 1, disableFileLocking: true);
+            children.Add(resumed);
+            await WaitForChildSignalAsync(Path.Combine(fixture.Directory, "hashed-1"), resumed, deadline.Token);
+            await Task.Delay(150, deadline.Token);
+            await resumed.EnsureRunningAsync();
+            await Assert.That(File.Exists(path)).IsFalse();
+            await Assert.That(File.Exists(path + ".sha256")).IsFalse();
+            held.Dispose();
+            await resumed.RequireExitAsync(0, deadline.Token);
+            await Assert.That(await File.ReadAllTextAsync(Path.Combine(fixture.Directory, "result-1"), deadline.Token))
+                .IsEqualTo("success");
             await Assert.That(await fixture.Cache.GetAsync(fixture.GitHub.Packages, deadline.Token)).IsEqualTo(path);
             await Assert.That(await File.ReadAllTextAsync(path + ".sha256", deadline.Token))
                 .IsEqualTo(Digest(await File.ReadAllBytesAsync(path, deadline.Token)));
+            await Assert.That(Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Length).IsEqualTo(0);
         }
         finally
         {
-            await FinishChildrenAsync([child]);
+            held.Dispose();
+            await File.WriteAllTextAsync(cancelWriter, "cancel", Cancellation);
+            await FinishChildrenAsync(children);
         }
     }
 
@@ -731,6 +844,75 @@ public sealed class ArtifactIntegrityTests
             result.Error?.GetType().FullName ?? "success", deadline.Token);
     }
 
+    private static async Task RunFaultedWriterChildAsync(string directory)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        var shim = NativeLibrary.Load(Environment.GetEnvironmentVariable("K127_FAULT_DIRECT_SHIM")!);
+        NativeLibrary.SetDllImportResolver(typeof(ArtifactCache).Assembly,
+            (name, _, _) => name == "libc" ? shim : IntPtr.Zero);
+
+        var github = new FakeGitHub("faulted writer");
+        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache") }, github);
+        var result = await CaptureAsync(() => cache.GetAsync(github.Packages, deadline.Token));
+        var status = result.Error switch
+        {
+            IOException { InnerException: Win32Exception native } => $"IOException:{native.NativeErrorCode}",
+            null => "success",
+            _ => result.Error.ToString()
+        };
+        await File.WriteAllTextAsync(Path.Combine(directory, "result-0"), status, deadline.Token);
+    }
+
+    private static async Task RunFaultLockOwnerChildAsync(string directory)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        var path = Path.Combine(directory, "cache", "artifacts", "2.zip.lock");
+        using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        await File.WriteAllTextAsync(Path.Combine(directory, "owner-held"), "held", deadline.Token);
+        await WaitForFileAsync(Path.Combine(directory, "release-owner"), deadline.Token);
+    }
+
+    private static async Task<(string Interposer, string Direct)> BuildFlockFaultInjectorAsync(
+        string directory, CancellationToken cancellationToken)
+    {
+        var source = Path.Combine(AppContext.BaseDirectory, "FlockFaultInjection.c");
+        var interposer = Path.Combine(directory, OperatingSystem.IsMacOS() ? "flock-fault.dylib" : "flock-fault.so");
+        await CompileFlockFaultInjectorAsync(source, interposer, direct: false, cancellationToken);
+        if (!OperatingSystem.IsMacOS()) return (interposer, interposer);
+
+        var direct = Path.Combine(directory, "flock-direct.dylib");
+        await CompileFlockFaultInjectorAsync(source, direct, direct: true, cancellationToken);
+        return (interposer, direct);
+    }
+
+    private static async Task CompileFlockFaultInjectorAsync(
+        string source, string destination, bool direct, CancellationToken cancellationToken)
+    {
+        var start = new ProcessStartInfo("cc")
+        {
+            WorkingDirectory = Path.GetDirectoryName(destination)!,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add(OperatingSystem.IsMacOS() ? "-dynamiclib" : "-shared");
+        start.ArgumentList.Add("-fPIC");
+        start.ArgumentList.Add("-std=c11");
+        start.ArgumentList.Add("-Wall");
+        start.ArgumentList.Add("-Wextra");
+        if (direct) start.ArgumentList.Add("-DK127_DIRECT_SHIM");
+        start.ArgumentList.Add("-o");
+        start.ArgumentList.Add(destination);
+        start.ArgumentList.Add(source);
+        if (!OperatingSystem.IsMacOS()) start.ArgumentList.Add("-ldl");
+        using var compiler = Process.Start(start) ?? throw new InvalidOperationException("Failed to start C compiler.");
+        var output = compiler.StandardOutput.ReadToEndAsync(cancellationToken);
+        var error = compiler.StandardError.ReadToEndAsync(cancellationToken);
+        await compiler.WaitForExitAsync(cancellationToken);
+        if (compiler.ExitCode != 0)
+            throw new InvalidOperationException($"Fault injector compilation failed.\n{await output}\n{await error}");
+    }
+
     private static async Task RunLockOwnerChildAsync(string directory)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
@@ -776,7 +958,18 @@ public sealed class ArtifactIntegrityTests
         }
     }
 
-    private static TestChild StartTestChild(string method, string directory, int index, bool disableFileLocking = false)
+    private static async Task WaitForChildSignalAsync(string path, TestChild child, CancellationToken cancellationToken)
+    {
+        while (!File.Exists(path))
+        {
+            await child.EnsureRunningAsync();
+            await Task.Delay(20, cancellationToken);
+        }
+    }
+
+    private static TestChild StartTestChild(
+        string method, string directory, int index, bool disableFileLocking = false,
+        string? interposer = null, string? directShim = null)
     {
         var start = new ProcessStartInfo("dotnet")
         {
@@ -799,6 +992,16 @@ public sealed class ArtifactIntegrityTests
         start.Environment["K127_INTEGRITY_CHILD_DIRECTORY"] = directory;
         start.Environment["K127_INTEGRITY_CHILD_INDEX"] = index.ToString();
         if (disableFileLocking) start.Environment["DOTNET_SYSTEM_IO_DISABLEFILELOCKING"] = "1";
+        if (interposer is not null)
+        {
+            var preload = OperatingSystem.IsMacOS() ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
+            start.Environment.TryGetValue(preload, out var existing);
+            start.Environment[preload] = string.IsNullOrEmpty(existing) ? interposer : $"{interposer}:{existing}";
+            start.Environment["K127_FAULT_LOCK_PATH"] = Path.Combine(directory, "cache", "artifacts", "2.zip.lock");
+            start.Environment["K127_FAULT_SIGNAL"] = Path.Combine(directory, "fault-0");
+            start.Environment["K127_FAULT_CONTINUE"] = Path.Combine(directory, "continue-fault");
+            start.Environment["K127_FAULT_DIRECT_SHIM"] = directShim!;
+        }
         var process = Process.Start(start) ?? throw new InvalidOperationException("Failed to start integrity test child.");
         return new TestChild(process, process.StandardOutput.ReadToEndAsync(), process.StandardError.ReadToEndAsync());
     }

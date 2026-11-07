@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Keboo._127Cache;
@@ -167,13 +169,18 @@ public sealed class ArtifactCache
     {
         // The lock file must stay in place: deleting it can split cooperating writers across different files.
         var lockPath = path + ".lock";
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() &&
+            !OperatingSystem.IsMacOS() && !OperatingSystem.IsFreeBSD())
+            throw new PlatformNotSupportedException("Artifact publication requires Windows file sharing or Unix flock.");
+
         for (;;)
         {
             cancellationToken.ThrowIfCancellationRequested();
             FileStream held;
             try
             {
-                held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                var share = OperatingSystem.IsWindows() ? FileShare.None : FileShare.ReadWrite;
+                held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, share);
             }
             catch (IOException exception) when (IsLockContention(exception))
             {
@@ -181,39 +188,43 @@ public sealed class ArtifactCache
                 continue;
             }
 
+            if (OperatingSystem.IsWindows()) return held;
+
             try
             {
-                EnsureExclusiveLock(lockPath);
-                return held;
+                // FileStream's Unix FileShare lock is best-effort; check flock on this handle itself.
+                if (Flock(held.SafeFileHandle.DangerousGetHandle().ToInt32(), LockExclusive | LockNonBlocking) == 0)
+                    return held;
+
+                var error = Marshal.GetLastPInvokeError();
+                if (!IsUnixLockContention(error))
+                    throw new IOException(
+                        $"Exclusive file locking is unavailable for '{lockPath}' (errno {error}); artifact publication is disabled.",
+                        new Win32Exception(error));
             }
             catch
             {
                 held.Dispose();
                 throw;
             }
+
+            held.Dispose();
+            await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken);
         }
     }
 
-    private static void EnsureExclusiveLock(string lockPath)
-    {
-        // On Unix FileStream can silently ignore unsupported or disabled advisory locks.
-        try
-        {
-            using var probe = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        }
-        catch (IOException exception) when (IsLockContention(exception))
-        {
-            return;
-        }
+    private const int LockExclusive = 2;
+    private const int LockNonBlocking = 4;
 
-        throw new IOException($"Exclusive file locking is unavailable for '{lockPath}'; artifact publication is disabled.");
-    }
+    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
+    private static extern int Flock(int descriptor, int operation);
+
+    private static bool IsUnixLockContention(int error) =>
+        OperatingSystem.IsLinux() ? error == 11 : error == 35;
 
     private static bool IsLockContention(IOException exception)
     {
         var code = exception.HResult & 0xffff;
-        return code is 32 or 33
-            || (OperatingSystem.IsLinux() && code == 11)
-            || ((OperatingSystem.IsMacOS() || OperatingSystem.IsFreeBSD()) && code is 11 or 35);
+        return OperatingSystem.IsWindows() ? code is 32 or 33 : IsUnixLockContention(code);
     }
 }
