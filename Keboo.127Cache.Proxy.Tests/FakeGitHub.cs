@@ -32,7 +32,7 @@ public sealed class FakeGitHub : IGitHubClient
     public Dictionary<int, string[]> PullRequestCommits { get; } = [];
     public WorkflowRun[]? Runs { get; set; }
 
-    public FakeGitHub(string directory, string originalVersion = OriginalVersion)
+    public FakeGitHub(string directory, string originalVersion = OriginalVersion, string? additionalPackagePath = null)
     {
         _versionFile = Path.Combine(directory, "version.zip");
         using (var zip = ZipFile.Open(_versionFile, ZipArchiveMode.Create))
@@ -50,6 +50,8 @@ public sealed class FakeGitHub : IGitHubClient
             var plugin = Path.Combine(directory, "Example.Plugin.nupkg");
             WritePackage(plugin, "Example.Plugin", "2.0.0", "Velopack");
             zip.CreateEntryFromFile(plugin, "Example.Plugin.nupkg");
+            if (additionalPackagePath is not null)
+                zip.CreateEntryFromFile(additionalPackagePath, Path.GetFileName(additionalPackagePath));
         }
         _version = ArtifactFor(1, "build-version", _versionFile);
         _packages = ArtifactFor(2, "packages", _packagesFile);
