@@ -97,7 +97,8 @@ public sealed class ArtifactIntegrityTests
         await using var app = await StartFeedAsync(fixture);
         using var client = CreateClient(app);
         using var rejected = await client.GetAsync("/flat/example.package/index.json", Cancellation);
-        await Assert.That(rejected.StatusCode).IsEqualTo(HttpStatusCode.InternalServerError);
+        await Assert.That(rejected.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+        await Assert.That(rejected.Content.Headers.ContentType?.MediaType).IsEqualTo("application/problem+json");
         await Assert.That((await File.ReadAllBytesAsync(path, Cancellation)).SequenceEqual(tampered)).IsTrue();
         await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation)).IsEqualTo(record);
         await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(1);
@@ -280,7 +281,7 @@ public sealed class ArtifactIntegrityTests
     [Test]
     public async Task ConcurrentReadersAndWritersNeverPublishMismatchedPairs()
     {
-        for (var iteration = 0; iteration < 32; iteration++)
+        for (var iteration = 0; iteration < 96; iteration++)
         {
             using var fixture = new Fixture();
             var rendezvous = new DownloadRendezvous();

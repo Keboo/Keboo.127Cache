@@ -137,9 +137,10 @@ try {
         try {
             $health = Invoke-RestMethod -Uri "$baseUrl/health" -TimeoutSec 2 -NoProxy
         } catch {
-            Start-Sleep -Milliseconds 500
+            $health = $null
         }
-    } until ($null -ne $health -or [DateTime]::UtcNow -ge $deadline)
+        if ($null -eq $health -or $health.status -ne 'ok') { Start-Sleep -Milliseconds 500 }
+    } until (($null -ne $health -and $health.status -eq 'ok') -or [DateTime]::UtcNow -ge $deadline)
     if ($null -eq $health) { throw "The installed tool did not become ready at $baseUrl within 60 seconds." }
     if ($health.status -ne 'ok' -or $health.repository -ne 'ci-fixture/empty') {
         throw "Unexpected health response: $($health | ConvertTo-Json -Compress)"
