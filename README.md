@@ -172,31 +172,31 @@ one artifact is unavailable or invalid, that build is logged and excluded while
 healthy builds remain available; the older catalog, packages, and raw artifacts
 are retained. The next request retries migration. Restore an expired artifact's
 matching raw ZIP to the artifact cache to resume migration. After migration, an
-intact v3 cache remains usable without the raw artifact.
-For a corrupt v3 cache, restore the matching inventory, integrity record, and
+intact v4 cache remains usable without the raw artifact.
+For a corrupt v4 cache, restore the matching inventory, integrity record, and
 package bytes from a trusted backup. Alternatively, first preserve the affected
 build directory elsewhere, then remove that directory only if its verified raw
 artifact is available; the next request can regenerate it.
 
 NuGet clients commonly write `<id>.<version>.nupkg.sha512` in their global
-package cache. If this filename would exceed 255 UTF-8 bytes, the entire build
-is logged and excluded rather than advertising a package that cannot be
-installed on common filesystems. The approved public version is not shortened.
-Producing a new build with a shorter original prerelease label or package ID
-can avoid this limit. A shorter component does not guarantee success on clients
-or filesystems with stricter component or total-path limits.
+package cache. On Windows, if this filename would exceed the 255-character
+(UTF-16 code unit) component limit, the entire build is logged and excluded.
+On Unix-like systems, the guard uses the 255-byte UTF-8 component limit. The
+approved public version is not shortened. Producing a new build with a shorter
+original prerelease label or package ID can avoid this limit, but this does not
+guarantee compatibility with stricter client or filesystem component/total-path
+limits.
 
 The feed enumerates run IDs numerically, including IDs larger than
 `Int32.MaxValue`. Registration page bounds instead follow NuGet's version
 comparer so exact-version dependency resolution works. When that order differs
 from numeric order, the feed uses one-version registration pages so each page's
 bounds are valid under either ordering. Some clients, including
-NuGet.Versioning 7.9, compare numeric prerelease identifiers that exceed
-`Int32.MaxValue` lexically: a floating version can therefore choose run
-`3000000000` over the newer run `10000000000`. Server-side ordering cannot
-change that client comparison; use an exact version as a workaround. Guaranteeing
-numeric floating selection in those clients would require changing the approved
-version format or the clients themselves.
+NuGet.Versioning 7.9, compare oversized numeric prerelease identifiers lexically.
+The rewritten `run` token avoids that path by using an `r` prefix plus a
+fixed-width 19-digit decimal value (for example `r0000000003000000000`), so
+floating version selection and real SDK restores choose newer run IDs correctly
+under the approved format.
 
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet

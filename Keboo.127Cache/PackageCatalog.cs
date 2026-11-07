@@ -146,7 +146,6 @@ public sealed class PackageCatalog
             var candidates = _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)) && !unavailable.Contains(x))
                 .OrderBy(x => NuGetVersion.Parse(x.Version), PackageRewriter.VersionOrder).ToArray();
             var available = new List<BuildEntry>(candidates.Length);
-            var unavailablePullRequests = new HashSet<int>();
             foreach (var build in candidates)
             {
                 try
@@ -156,28 +155,7 @@ public sealed class PackageCatalog
                 }
                 catch (Exception exception) when (IsBuildFailure(exception))
                 {
-                    unavailablePullRequests.Add(build.PullRequest);
                     ReportUnavailableBuild(build, exception);
-                }
-            }
-            foreach (var pullRequest in unavailablePullRequests)
-            {
-                var fallbacks = _builds
-                    .Where(x => x.PullRequest == pullRequest
-                        && !visible.Contains((x.RunId, x.Attempt, x.PullRequest)))
-                    .OrderByDescending(x => x.RunId).ThenByDescending(x => x.Attempt);
-                foreach (var fallback in fallbacks)
-                {
-                    try
-                    {
-                        await _packages.GetPackagesAsync(fallback, cancellationToken);
-                        available.Add(fallback);
-                        break;
-                    }
-                    catch (Exception exception) when (IsBuildFailure(exception))
-                    {
-                        ReportUnavailableBuild(fallback, exception);
-                    }
                 }
             }
             available.Sort((left, right) =>

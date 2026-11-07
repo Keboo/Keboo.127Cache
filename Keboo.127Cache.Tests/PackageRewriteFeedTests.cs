@@ -760,16 +760,62 @@ public class PackageRewriteFeedTests
         await Assert.That(string.Join(",", actual)).IsEqualTo("1.2.0-alpha.2,1.2.0-alpha.10,1.2.0-beta.3,1.2.0-rc.1");
     }
 
+    [Test]
+    public async Task BuildsEndpointDoesNotServeOutOfScopeFallbackWhenPinnedRunIsUnavailable()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache");
+        var options = new ProxyOptions { CacheDirectory = cacheDirectory, PullRequests = [756], RunIds = [101] };
+        Directory.CreateDirectory(cacheDirectory);
+        var outOfScope = new BuildEntry(100, 1, 755, "old", "1.2.0-beta.3",
+            PackageRewriter.VersionFor("1.2.0-beta.3", 755, 100, 1, github.Packages.Id), github.Packages, github.Version);
+        var unavailablePackages = github.Packages with { Id = 300, Expired = true };
+        var pinnedUnavailable = new BuildEntry(101, 1, 755, "new", "1.2.0-beta.3",
+            PackageRewriter.VersionFor("1.2.0-beta.3", 755, 101, 1, unavailablePackages.Id), unavailablePackages, github.Version);
+        await JsonSettings.WriteAtomicAsync(Path.Combine(cacheDirectory, "runs.json"),
+            new RunArtifactsFile(options.Repository, options.Workflow, [
+                new(outOfScope.RunId, outOfScope.Attempt, outOfScope.PullRequest, outOfScope.HeadSha, outOfScope.Packages, outOfScope.VersionArtifact),
+                new(pinnedUnavailable.RunId, pinnedUnavailable.Attempt, pinnedUnavailable.PullRequest, pinnedUnavailable.HeadSha, pinnedUnavailable.Packages, pinnedUnavailable.VersionArtifact)
+            ]), CancellationToken.None);
+        await JsonSettings.WriteAtomicAsync(Path.Combine(cacheDirectory, "catalog.json"),
+            new CatalogFile(options.Repository, [outOfScope, pinnedUnavailable], CacheSchema.Version), CancellationToken.None);
+
+        await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), runIds: [101], pullRequests: [756]);
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
+        var path = await app.Services.GetRequiredService<PackageCache>().GetAsync("Acme.Core", outOfScope, CancellationToken.None);
+        await Assert.That(File.Exists(path)).IsTrue();
+
+        using (var builds = JsonDocument.Parse(await client.GetStringAsync("builds")))
+            await Assert.That(builds.RootElement.GetArrayLength()).IsEqualTo(0);
+        using (var packages = await client.GetAsync("flat/acme.core/index.json"))
+            await Assert.That(packages.StatusCode).IsEqualTo(System.Net.HttpStatusCode.NotFound);
+
+        File.Copy(Path.Combine(cacheDirectory, "artifacts", "200.zip"), Path.Combine(cacheDirectory, "artifacts", "300.zip"));
+
+        using (var builds = JsonDocument.Parse(await client.GetStringAsync("builds")))
+        {
+            var buildIds = builds.RootElement.EnumerateArray().Select(x => x.GetProperty("runId").GetInt64()).ToArray();
+            await Assert.That(string.Join(",", buildIds)).IsEqualTo("101");
+        }
+        using (var packages = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
+            await Assert.That(packages.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(pinnedUnavailable.Version);
+    }
+
     internal static async Task<WebApplication> StartFeedAsync(PackageRewriteFixture fixture, FixtureGitHub github,
-        CollectingLogger<PackageCache> logger, long[]? runIds = null, CollectingLogger<PackageCatalog>? catalogLogger = null)
+        CollectingLogger<PackageCache> logger, long[]? runIds = null, CollectingLogger<PackageCatalog>? catalogLogger = null,
+        int[]? pullRequests = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = fixture.DirectoryPath });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        var configuration = new Dictionary<string, string?>
         {
-            ["Proxy:CacheDirectory"] = Path.Combine(fixture.DirectoryPath, "cache"),
-            ["Proxy:PullRequests:0"] = "755"
-        });
+            ["Proxy:CacheDirectory"] = Path.Combine(fixture.DirectoryPath, "cache")
+        };
+        var configuredPullRequests = pullRequests ?? [755];
+        for (var i = 0; i < configuredPullRequests.Length; i++)
+            configuration[$"Proxy:PullRequests:{i}"] = configuredPullRequests[i].ToString();
+        builder.Configuration.AddInMemoryCollection(configuration);
         builder.Logging.ClearProviders();
         builder.Services.AddProxy(builder.Configuration);
         builder.Services.AddSingleton<IGitHubClient>(github);
