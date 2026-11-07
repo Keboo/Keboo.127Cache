@@ -18,5 +18,25 @@
     "status": "active",
     "createdAt": "2026-11-05T19:16:38.680Z",
     "updatedAt": "2026-11-05T19:16:38.680Z"
+  },
+  {
+    "id": "40e4aa7f-767e-48bb-825c-2e27492fd97b",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Backlog execution safety and commit attribution",
+    "path": ".squad\\decisions\\inbox\\kevin-bost-via-copilot-backlog-execution-safety-and-commit-attribution-40e4aa7f.md",
+    "status": "active",
+    "createdAt": "2026-11-05T19:42:10.045Z",
+    "updatedAt": "2026-11-05T19:42:10.045Z"
+  },
+  {
+    "id": "4356ee0e-bfad-4f78-8a31-7dae0eee9e08",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Backlog merge authorization and release safety",
+    "path": ".squad\\decisions\\inbox\\kevin-bost-via-copilot-backlog-merge-authorization-and-release-safety-4356ee0e.md",
+    "status": "active",
+    "createdAt": "2026-11-05T21:32:07.643Z",
+    "updatedAt": "2026-11-05T21:32:07.643Z"
   }
 ]

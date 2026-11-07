@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
@@ -12,8 +13,8 @@ namespace Keboo._127Cache.Tests;
 
 public class PackageIntegrityFeedTests
 {
-    private const string HealthyVersion = "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200";
-    private const string OtherVersion = "1.2.0-beta.3.pr.755.run.99.attempt.1.artifact.300";
+    private const string HealthyVersion = "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
+    private const string OtherVersion = "1.2.0-beta.3.pr.755.run.r0000000000000000099.attempt.1.artifact.300";
 
     [Test]
     [Arguments("id")]
@@ -62,6 +63,43 @@ public class PackageIntegrityFeedTests
     }
 
     [Test]
+    public async Task MalformedInnerZipEntryIsDiagnosedWithoutBreakingHealthyFeedEndpoints()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+        github.SeedRawCache(cache);
+        github.FailDownloads = true;
+
+        var malformedPackage = Path.Combine(fixture.DirectoryPath, "Broken.Malformed.nupkg");
+        WritePackageWithEmptyEntry(malformedPackage, "Broken.Package", "1.0.0");
+        var malformedZip = Path.Combine(cache, "artifacts", "300.zip");
+        using (var archive = ZipFile.Open(malformedZip, ZipArchiveMode.Create))
+            archive.CreateEntryFromFile(malformedPackage, "Broken.Package.nupkg");
+        var malformedArtifact = new Artifact(300, "packages", true,
+            "sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(malformedZip))).ToLowerInvariant());
+        await SeedBuildsAsync(cache, github, malformedArtifact, CacheSchema.Version);
+
+        var logger = new CollectingLogger<PackageCatalog>();
+        await using var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github,
+            new CollectingLogger<PackageCache>(), catalogLogger: logger);
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
+
+        using (var flat = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
+            await Assert.That(flat.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(HealthyVersion);
+        using (var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json")))
+            await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
+                .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(HealthyVersion);
+        using (var search = JsonDocument.Parse(await client.GetStringAsync("query?q=Acme.Core&prerelease=true&semVerLevel=2.0.0")))
+            await Assert.That(search.RootElement.GetProperty("data")[0].GetProperty("version").GetString()).IsEqualTo(HealthyVersion);
+        await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
+            && x.Message.Contains("99", StringComparison.Ordinal)
+            && x.Message.Contains("300", StringComparison.Ordinal)
+            && x.Exception is InvalidDataException
+            && x.Exception.Message.Contains("invalid ZIP entry name", StringComparison.OrdinalIgnoreCase))).IsTrue();
+    }
+
+    [Test]
     [Arguments(1)]
     [Arguments(2)]
     public async Task PartialLegacyInventoryIsIsolatedUntilTheCompleteRawArtifactIsRestored(int schema)
@@ -96,7 +134,7 @@ public class PackageIntegrityFeedTests
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
             await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core"))).IsEqualTo(HealthyVersion);
             await Assert.That(string.Join(",", await VersionsAsync(client, "acme.widget")))
-                .IsEqualTo("2.0.0-rc.1.pr.755.run.100.attempt.1.artifact.200");
+                .IsEqualTo("2.0.0-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
             await Assert.That(await File.ReadAllTextAsync(catalogPath)).IsEqualTo(originalCatalog);
             await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
                 && x.Message.Contains("99", StringComparison.Ordinal)
@@ -110,7 +148,7 @@ public class PackageIntegrityFeedTests
             await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
             await Assert.That(string.Join(",", await VersionsAsync(client, "acme.widget")))
-                .IsEqualTo("2.0.0-rc.1.pr.755.run.99.attempt.1.artifact.300,2.0.0-rc.1.pr.755.run.100.attempt.1.artifact.200");
+                .IsEqualTo("2.0.0-rc.1.pr.755.run.r0000000000000000099.attempt.1.artifact.300,2.0.0-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
             await Assert.That((await VersionsAsync(client, "acme.empty")).Length).IsEqualTo(2);
             var bytes = await client.GetByteArrayAsync($"flat/acme.core/{OtherVersion}/acme.core.{OtherVersion}.nupkg");
             using var reader = new PackageArchiveReader(new MemoryStream(bytes));
@@ -118,7 +156,7 @@ public class PackageIntegrityFeedTests
             using var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.widget/index.json"));
             var leaves = registration.RootElement.GetProperty("items")[0].GetProperty("items").EnumerateArray().ToArray();
             var recovered = leaves.Single(x => x.GetProperty("catalogEntry").GetProperty("version").GetString()!
-                .Contains(".run.99.", StringComparison.Ordinal));
+                .Contains(".artifact.300", StringComparison.Ordinal));
             var dependency = recovered.GetProperty("catalogEntry").GetProperty("dependencyGroups")[0]
                 .GetProperty("dependencies")[0];
             await Assert.That(dependency.GetProperty("range").GetString())
@@ -304,8 +342,8 @@ public class PackageIntegrityFeedTests
         var healthy = new BuildEntry(100, 1, 755, "healthy", "1.2.0-beta.3", HealthyVersion, github.Packages, github.Version);
         if (schema == 1)
         {
-            other = other with { Version = "1.2.0-pr.755.run.99.attempt.1.artifact.300" };
-            healthy = healthy with { Version = "1.2.0-pr.755.run.100.attempt.1.artifact.200" };
+            other = other with { Version = "1.2.0-pr.755.run.r0000000000000000099.attempt.1.artifact.300" };
+            healthy = healthy with { Version = "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200" };
         }
         var builds = new[] { other, healthy };
         var runs = builds.Select(x => new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList();
@@ -320,6 +358,94 @@ public class PackageIntegrityFeedTests
     {
         using var document = JsonDocument.Parse(await client.GetStringAsync($"flat/{id}/index.json"));
         return document.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
+    }
+
+    private static void WritePackageWithEmptyEntry(string path, string id, string version)
+    {
+        var manifest = Encoding.UTF8.GetBytes($"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+              <metadata>
+                <id>{id}</id>
+                <version>{version}</version>
+                <authors>Example Author</authors>
+                <description>Malformed ZIP fixture</description>
+              </metadata>
+            </package>
+            """);
+        var payload = Encoding.UTF8.GetBytes("payload");
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        var records = new List<(byte[] Name, byte[] Data, uint Crc, uint Size, uint Offset)>();
+        WriteStoredEntry(writer, Encoding.UTF8.GetBytes($"{id}.nuspec"), manifest, records);
+        WriteStoredEntry(writer, [], payload, records);
+        var centralStart = (uint)stream.Position;
+        foreach (var record in records)
+        {
+            writer.Write(0x02014b50u);
+            writer.Write((ushort)20);
+            writer.Write((ushort)20);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write(record.Crc);
+            writer.Write(record.Size);
+            writer.Write(record.Size);
+            writer.Write((ushort)record.Name.Length);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write(0u);
+            writer.Write(record.Offset);
+            writer.Write(record.Name);
+        }
+        var centralSize = (uint)stream.Position - centralStart;
+        writer.Write(0x06054b50u);
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write((ushort)records.Count);
+        writer.Write((ushort)records.Count);
+        writer.Write(centralSize);
+        writer.Write(centralStart);
+        writer.Write((ushort)0);
+    }
+
+    private static void WriteStoredEntry(
+        BinaryWriter writer, byte[] name, byte[] data, List<(byte[] Name, byte[] Data, uint Crc, uint Size, uint Offset)> records)
+    {
+        var offset = (uint)writer.BaseStream.Position;
+        var crc = ComputeCrc32(data);
+        var size = (uint)data.Length;
+        writer.Write(0x04034b50u);
+        writer.Write((ushort)20);
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write(crc);
+        writer.Write(size);
+        writer.Write(size);
+        writer.Write((ushort)name.Length);
+        writer.Write((ushort)0);
+        writer.Write(name);
+        writer.Write(data);
+        records.Add((name, data, crc, size, offset));
+    }
+
+    private static uint ComputeCrc32(byte[] data)
+    {
+        const uint polynomial = 0xEDB88320u;
+        var crc = 0xFFFFFFFFu;
+        foreach (var value in data)
+        {
+            var current = (crc ^ value) & 0xFFu;
+            for (var i = 0; i < 8; i++)
+                current = (current & 1) != 0 ? (current >> 1) ^ polynomial : current >> 1;
+            crc = (crc >> 8) ^ current;
+        }
+        return crc ^ 0xFFFFFFFFu;
     }
 
     private static void DuplicateManifestElement(string path, string element)

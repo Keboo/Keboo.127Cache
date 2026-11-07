@@ -1,7 +1,9 @@
 using System.IO.Compression;
 using System.Text.Json;
-using Microsoft.Extensions.Logging.Abstractions;
+
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Abstractions;
+
 using NuGet.Versioning;
 
 namespace Keboo._127Cache;
@@ -141,8 +143,46 @@ public sealed class PackageCatalog
                 await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
             _builds = next;
             var visible = runs.Select(x => (x.RunId, x.Attempt, x.PullRequest)).ToHashSet();
-            return _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)) && !unavailable.Contains(x))
+            var candidates = _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)) && !unavailable.Contains(x))
                 .OrderBy(x => NuGetVersion.Parse(x.Version), PackageRewriter.VersionOrder).ToArray();
+            var available = new List<BuildEntry>(candidates.Length);
+            var unavailablePullRequests = new HashSet<int>();
+            foreach (var build in candidates)
+            {
+                try
+                {
+                    await _packages.GetPackagesAsync(build, cancellationToken);
+                    available.Add(build);
+                }
+                catch (Exception exception) when (IsBuildFailure(exception))
+                {
+                    unavailablePullRequests.Add(build.PullRequest);
+                    ReportUnavailableBuild(build, exception);
+                }
+            }
+            foreach (var pullRequest in unavailablePullRequests)
+            {
+                var fallbacks = _builds
+                    .Where(x => x.PullRequest == pullRequest
+                        && !visible.Contains((x.RunId, x.Attempt, x.PullRequest)))
+                    .OrderByDescending(x => x.RunId).ThenByDescending(x => x.Attempt);
+                foreach (var fallback in fallbacks)
+                {
+                    try
+                    {
+                        await _packages.GetPackagesAsync(fallback, cancellationToken);
+                        available.Add(fallback);
+                        break;
+                    }
+                    catch (Exception exception) when (IsBuildFailure(exception))
+                    {
+                        ReportUnavailableBuild(fallback, exception);
+                    }
+                }
+            }
+            available.Sort((left, right) =>
+                PackageRewriter.VersionOrder.Compare(NuGetVersion.Parse(left.Version), NuGetVersion.Parse(right.Version)));
+            return available.ToArray();
         }
         finally
         {
@@ -157,13 +197,30 @@ public sealed class PackageCatalog
         try
         {
             if (_memoryCache.TryGetValue(_cacheKey, out cached) && cached is not null) return cached;
-            var openPullRequests = (await _github.GetOpenPullRequestsAsync(cancellationToken)).Select(x => x.Number).ToHashSet();
+            var pullRequests = await _github.GetOpenPullRequestsAsync(cancellationToken);
+            var openPullRequests = pullRequests.Select(x => x.Number).ToHashSet();
+            var openByHeadSha = pullRequests
+                .Where(x => !string.IsNullOrWhiteSpace(x.Head?.Sha))
+                .GroupBy(x => x.Head!.Sha!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
             var discovered = openPullRequests.Count == 0 ? [] : await _github.GetRunsAsync(cancellationToken);
-            var eligibleRuns = discovered
-                .Where(x => x.Status == "completed" && x.Conclusion == "success" && x.Event == "pull_request")
-                .SelectMany(run => run.PullRequests.Where(pr => openPullRequests.Contains(pr.Number))
-                    .Where(pr => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(pr.Number) || _options.RunIds.Contains(run.Id))
-                    .Select(pr => (Run: run, PullRequest: pr.Number)))
+            var associatedRuns = new List<(WorkflowRun Run, int PullRequest)>();
+            var commitHistory = new Dictionary<int, HashSet<string>>();
+            var pullRequestHistory = new Dictionary<(string Repository, string Branch), int[]>();
+            foreach (var run in discovered.Where(run => IsSuccessfulPullRequestRun(run) || _options.RunIds.Contains(run.Id)))
+            {
+                var associated = GetRunPullRequests(run, openByHeadSha, out var ambiguous);
+                if (ambiguous && _options.RunIds.Contains(run.Id))
+                    throw new InvalidDataException($"Pinned run {run.Id} matches multiple open pull requests.");
+                if (associated.Length == 0 && !ambiguous && _options.RunIds.Contains(run.Id)
+                    && run.PullRequests is not { Length: > 0 })
+                    associated = await GetPinnedRunPullRequestsAsync(run, pullRequests, commitHistory, pullRequestHistory, cancellationToken);
+                associatedRuns.AddRange(associated.Where(openPullRequests.Contains).Select(pr => (run, pr)));
+            }
+            var eligibleRuns = associatedRuns
+                .Where(x => IsSuccessfulPullRequestRun(x.Run))
+                .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
+                    || _options.RunIds.Contains(x.Run.Id))
                 .ToArray();
             var runs = eligibleRuns.GroupBy(x => x.PullRequest)
                 .SelectMany(g => g.OrderByDescending(x => x.Run.Id).Take(1).Concat(g.Where(x => _options.RunIds.Contains(x.Run.Id))))
@@ -196,7 +253,7 @@ public sealed class PackageCatalog
             }
             foreach (var id in _options.RunIds)
             {
-                if (discovered.Any(x => x.Id == id && x.PullRequests.Any(pr => openPullRequests.Contains(pr.Number)))
+                if (associatedRuns.Any(x => x.Run.Id == id)
                     && !next.Any(x => x.RunId == id))
                     throw new InvalidDataException($"Run {id} is not an available successful build of an open pull request.");
             }
@@ -215,13 +272,97 @@ public sealed class PackageCatalog
     }
 
     private static bool IsBuildFailure(Exception exception) =>
-        exception is IOException or InvalidDataException or UnauthorizedAccessException or FormatException
+        exception is IOException or InvalidDataException or UnauthorizedAccessException or FormatException or ArgumentException
             or System.Xml.XmlException or NuGet.Packaging.Core.PackagingException;
 
     private void ReportUnavailableBuild(BuildEntry build, Exception exception) =>
         _logger.LogWarning(exception, "Skipping build {RunId} attempt {Attempt} of PR {PullRequest}: " +
             "package artifact {ArtifactId} is unavailable or invalid; existing cache files were retained.",
             build.RunId, build.Attempt, build.PullRequest, build.Packages.Id);
+
+    private static bool IsSuccessfulPullRequestRun(WorkflowRun run) =>
+        run.Status == "completed" && run.Conclusion == "success" && run.Event == "pull_request";
+
+    private int[] GetRunPullRequests(
+        WorkflowRun run, IReadOnlyDictionary<string, PullRequestInfo[]> openByHeadSha, out bool ambiguous)
+    {
+        ambiguous = false;
+        if (run.PullRequests is { Length: > 0 })
+            return run.PullRequests.Select(x => x.Number).ToArray();
+        if (string.IsNullOrWhiteSpace(run.HeadSha) || !openByHeadSha.TryGetValue(run.HeadSha, out var candidates))
+            return [];
+
+        var matches = candidates
+            .Where(pr => MatchesWhenKnown(run.HeadRepository?.FullName, pr.Head?.Repository?.FullName,
+                StringComparison.OrdinalIgnoreCase))
+            .Where(pr => MatchesWhenKnown(run.HeadBranch, pr.Head?.Branch, StringComparison.Ordinal))
+            .Select(pr => pr.Number).Distinct().Take(2).ToArray();
+        if (matches.Length > 1)
+        {
+            ambiguous = true;
+            _logger.LogWarning("Skipping run {RunId}: its head matches multiple open pull requests.", run.Id);
+        }
+        return matches.Length == 1 ? matches : [];
+    }
+
+    private async Task<int[]> GetPinnedRunPullRequestsAsync(
+        WorkflowRun run, IReadOnlyList<PullRequestInfo> pullRequests,
+        Dictionary<int, HashSet<string>> commitHistory,
+        Dictionary<(string Repository, string Branch), int[]> pullRequestHistory,
+        CancellationToken cancellationToken)
+    {
+        var repository = run.HeadRepository?.FullName;
+        var branch = run.HeadBranch;
+        if (string.IsNullOrWhiteSpace(run.HeadSha) || string.IsNullOrWhiteSpace(repository)
+            || string.IsNullOrWhiteSpace(branch))
+        {
+            _logger.LogWarning("Skipping pinned run {RunId}: GitHub did not supply its head SHA, repository, and branch.", run.Id);
+            return [];
+        }
+
+        var candidates = pullRequests
+            .Where(pr => string.Equals(repository, pr.Head?.Repository?.FullName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(branch, pr.Head?.Branch, StringComparison.Ordinal))
+            .DistinctBy(pr => pr.Number).Take(2).ToArray();
+        if (candidates.Length == 0)
+        {
+            _logger.LogWarning("Skipping pinned run {RunId}: no open pull request has the same head repository and branch.", run.Id);
+            return [];
+        }
+        if (candidates.Length > 1)
+            throw new InvalidDataException($"Pinned run {run.Id} matches multiple open pull requests with the same head repository and branch.");
+
+        var pullRequest = candidates[0].Number;
+        if (_runs.Any(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pullRequest
+            && string.Equals(x.HeadSha, run.HeadSha, StringComparison.OrdinalIgnoreCase)))
+            return [pullRequest];
+
+        var head = (repository, branch);
+        if (!pullRequestHistory.TryGetValue(head, out var historicalPullRequests))
+        {
+            historicalPullRequests = (await _github.GetPullRequestsForHeadAsync(repository, branch, cancellationToken))
+                .Select(pr => pr.Number).Distinct().Take(2).ToArray();
+            pullRequestHistory.Add(head, historicalPullRequests);
+        }
+        if (historicalPullRequests.Length != 1 || historicalPullRequests[0] != pullRequest)
+            throw new InvalidDataException(
+                $"Pinned run {run.Id} cannot be associated with pull request {pullRequest}: the head repository and branch have an ambiguous pull-request history.");
+
+        if (!commitHistory.TryGetValue(pullRequest, out var commits))
+        {
+            commits = (await _github.GetPullRequestCommitShasAsync(pullRequest, cancellationToken))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            commitHistory.Add(pullRequest, commits);
+        }
+        if (!commits.Contains(run.HeadSha))
+            throw new InvalidDataException(
+                $"Pinned run {run.Id} cannot be associated with pull request {pullRequest}: its head SHA is absent from the current PR commit history. The branch may have been rewritten or reused.");
+        return [pullRequest];
+    }
+
+    private static bool MatchesWhenKnown(string? first, string? second, StringComparison comparison) =>
+        string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second)
+            || string.Equals(first, second, comparison);
 
     private async Task<string> ReadVersionAsync(Artifact artifact, CancellationToken cancellationToken)
     {

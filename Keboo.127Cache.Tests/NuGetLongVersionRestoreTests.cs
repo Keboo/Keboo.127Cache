@@ -17,7 +17,7 @@ public class NuGetLongVersionRestoreTests
     public async Task RealNuGetRestoreSucceedsAtTheSafeLongFilenameBoundary()
     {
         using var fixture = new PackageRewriteFixture();
-        var original = "1.2.0-preview." + new string('a', 180);
+        var original = "1.2.0-preview." + new string('a', 163);
         var github = await fixture.CreateGitHubAsync(coreVersion: original);
         var version = PackageRewriter.VersionFor(original, 755, 100, 1, 200);
         await Assert.That(NuGetVersion.TryParse(version, out _)).IsTrue();
@@ -39,7 +39,7 @@ public class NuGetLongVersionRestoreTests
     public async Task RealNuGetRestoreExposesAnOverlongClientCacheComponent()
     {
         using var fixture = new PackageRewriteFixture();
-        var original = "1.2.0-preview." + new string('a', 181);
+        var original = "1.2.0-preview." + new string('a', 164);
         var version = PackageRewriter.VersionFor(original, 755, 100, 1, 200);
         await Assert.That(NuGetVersion.TryParse(version, out _)).IsTrue();
         await Assert.That($"acme.core.{version}.nupkg.sha512".Length).IsEqualTo(256);
@@ -70,7 +70,7 @@ public class NuGetLongVersionRestoreTests
     public async Task OverlongBuildIsIsolatedAndAHealthyBuildStillRestores()
     {
         using var fixture = new PackageRewriteFixture();
-        var original = "1.2.0-preview." + new string('a', 181);
+        var original = "1.2.0-preview." + new string('a', 164);
         var github = await fixture.CreateGitHubAsync(coreVersion: original);
         var cache = Path.Combine(fixture.DirectoryPath, "cache");
         github.SeedRawCache(cache);
@@ -106,7 +106,8 @@ public class NuGetLongVersionRestoreTests
             && x.Message.Contains("100", StringComparison.Ordinal)
             && x.Message.Contains("200", StringComparison.Ordinal)
             && x.Exception?.Message.Contains("NuGet client cache filename", StringComparison.Ordinal) == true
-            && x.Exception.Message.Contains("256-byte", StringComparison.Ordinal))).IsTrue();
+            && (x.Exception.Message.Contains("Windows component limit", StringComparison.Ordinal)
+                || x.Exception.Message.Contains("Unix component limit", StringComparison.Ordinal)))).IsTrue();
 
         var healthyRestore = await RestoreAsync(fixture.DirectoryPath, app.Urls.Single() + "/v3/index.json", "Safe.Package", safeVersion);
         if (healthyRestore.ExitCode != 0) throw new InvalidOperationException($"Healthy dotnet restore failed:\n{healthyRestore.Output}");
@@ -122,7 +123,58 @@ public class NuGetLongVersionRestoreTests
     }
 
     [Test]
-    public async Task RealNuGetFloatingRestoreCurrentlySelectsTheOlderLargeRun()
+    public async Task UnicodePackageIdRestoreIsWindowsSafeAndUnixGuarded()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+        var options = new ProxyOptions { CacheDirectory = cache, PullRequests = [755] };
+        github.SeedRawCache(cache);
+        github.FailDownloads = true;
+
+        var id = new string('界', 90);
+        var original = "1.2.0";
+        var version = PackageRewriter.VersionFor(original, 755, 100, 1, 300);
+        var package = fixture.CreatePackage(id, original);
+        var artifactPath = Path.Combine(cache, "artifacts", "300.zip");
+        using (var archive = ZipFile.Open(artifactPath, ZipArchiveMode.Create))
+            archive.CreateEntryFromFile(package, $"{id}.nupkg");
+        var artifact = new Artifact(300, "packages", true,
+            "sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(artifactPath))).ToLowerInvariant());
+        var build = new BuildEntry(100, 1, 755, "unicode", original, version, artifact, github.Version);
+        await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
+            new RunArtifactsFile(options.Repository, options.Workflow,
+                [new RunArtifacts(build.RunId, build.Attempt, build.PullRequest, build.HeadSha, build.Packages, build.VersionArtifact)]),
+            CancellationToken.None);
+        await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
+            new CatalogFile(options.Repository, [build], CacheSchema.Version), CancellationToken.None);
+
+        var logger = new CollectingLogger<PackageCatalog>();
+        await using var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github,
+            new CollectingLogger<PackageCache>(), catalogLogger: logger);
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
+        var idPath = Uri.EscapeDataString(id.ToLowerInvariant());
+
+        if (OperatingSystem.IsWindows())
+        {
+            using var index = JsonDocument.Parse(await client.GetStringAsync($"flat/{idPath}/index.json"));
+            await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
+            var restore = await RestoreAsync(fixture.DirectoryPath, app.Urls.Single() + "/v3/index.json", id, version);
+            if (restore.ExitCode != 0) throw new InvalidOperationException($"Unicode restore failed:\n{restore.Output}");
+            using var assets = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(restore.ProjectDirectory, "obj", "project.assets.json")));
+            await Assert.That(assets.RootElement.GetProperty("libraries").TryGetProperty($"{id}/{version}", out _)).IsTrue();
+        }
+        else
+        {
+            using var response = await client.GetAsync($"flat/{idPath}/index.json");
+            await Assert.That((int)response.StatusCode).IsEqualTo(404);
+            await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
+                && x.Exception?.Message.Contains("255-byte Unix component limit", StringComparison.Ordinal) == true)).IsTrue();
+        }
+    }
+
+    [Test]
+    public async Task RealNuGetFloatingRestoreSelectsTheNewestLargeRunWithRunTokens()
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
@@ -137,14 +189,13 @@ public class NuGetLongVersionRestoreTests
         var later = PackageRewriter.VersionFor("1.2.0-beta.3", 755, 10_000_000_000, 1, 200);
 
         var result = await RestoreAsync(fixture.DirectoryPath, app.Urls.Single() + "/v3/index.json",
-            "Acme.Core", "1.2.0-beta.3.pr.755.run.*", exact: false);
+            "Acme.Core", "1.2.0-beta.3.pr.755.run.r*", exact: false);
 
         if (result.ExitCode != 0) throw new InvalidOperationException($"Floating dotnet restore failed:\n{result.Output}");
         using var assets = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result.ProjectDirectory, "obj", "project.assets.json")));
         var libraries = assets.RootElement.GetProperty("libraries");
-        // This characterizes the unmet numeric-floating criterion; it is not an acceptance waiver.
-        await Assert.That(libraries.TryGetProperty($"Acme.Core/{earlier}", out _)).IsTrue();
-        await Assert.That(libraries.TryGetProperty($"Acme.Core/{later}", out _)).IsFalse();
+        await Assert.That(libraries.TryGetProperty($"Acme.Core/{earlier}", out _)).IsFalse();
+        await Assert.That(libraries.TryGetProperty($"Acme.Core/{later}", out _)).IsTrue();
     }
 
     private sealed class DownloadCounter
@@ -202,7 +253,9 @@ public class NuGetLongVersionRestoreTests
     internal static async Task<(int ExitCode, string Output, string ProjectDirectory)> RestoreAsync(
         string directory, string feed, string id, string version, bool exact = true)
     {
-        var project = Path.Combine(directory, "restore-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetPathRoot(directory) ?? directory, "127cache-restore");
+        Directory.CreateDirectory(root);
+        var project = Path.Combine(root, "r-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(project);
         var scratch = Path.Combine(project, "scratch");
         Directory.CreateDirectory(scratch);

@@ -38,9 +38,9 @@ public class PackageRewriteFeedTests
         var logger = new CollectingLogger<PackageCache>();
         await using var app = await StartFeedAsync(fixture, github, logger);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-        const string coreVersion = "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200";
-        const string widgetVersion = "2.0.0-rc.1.pr.755.run.100.attempt.1.artifact.200";
-        const string emptyVersion = "1.2.3.4-pr.755.run.100.attempt.1.artifact.200";
+        const string coreVersion = "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
+        const string widgetVersion = "2.0.0-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
+        const string emptyVersion = "1.2.3.4-pr.755.run.r0000000000000000100.attempt.1.artifact.200";
 
         using (var index = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
             await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(coreVersion);
@@ -150,7 +150,7 @@ public class PackageRewriteFeedTests
         var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
-        var legacyVersion = "1.2.0-pr.755.run.100.attempt.1.artifact.200";
+        var legacyVersion = "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200";
         var expiredPackages = github.Packages with { Expired = true };
         var expiredVersion = github.Version with { Expired = true };
         var legacyBuild = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3", legacyVersion, expiredPackages, expiredVersion);
@@ -173,7 +173,7 @@ public class PackageRewriteFeedTests
         var packages = new PackageCache(options, artifacts);
         var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
         var build = (await catalog.GetBuildsAsync(CancellationToken.None)).Single();
-        const string expected = "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200";
+        const string expected = "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
         await Assert.That(build.Version).IsEqualTo(expected);
         var inventory = await packages.GetPackagesAsync(build, CancellationToken.None);
         await Assert.That(inventory.Length).IsEqualTo(3);
@@ -208,7 +208,7 @@ public class PackageRewriteFeedTests
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
         var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache") };
-        var legacyVersion = "1.2.0-pr.755.run.100.attempt.1.artifact.200";
+        var legacyVersion = "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200";
         var build = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3", legacyVersion,
             github.Packages with { Expired = true }, github.Version);
         var oldDirectory = Path.Combine(options.CacheDirectory, "packages", "discovered", "755.100.1.200");
@@ -238,9 +238,9 @@ public class PackageRewriteFeedTests
         github.FailDownloads = true;
         var unavailableArtifact = github.Packages with { Id = 300, Expired = true };
         var unavailable = new BuildEntry(99, 1, 755, "old", "1.2.0-beta.3",
-            "1.2.0-pr.755.run.99.attempt.1.artifact.300", unavailableArtifact, github.Version);
+            "1.2.0-pr.755.run.r0000000000000000099.attempt.1.artifact.300", unavailableArtifact, github.Version);
         var healthy = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3",
-            "1.2.0-pr.755.run.100.attempt.1.artifact.200", github.Packages, github.Version);
+            "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200", github.Packages, github.Version);
         var runs = new[] { unavailable, healthy }.Select(x =>
             new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList();
         await JsonSettings.WriteAtomicAsync(Path.Combine(cacheDirectory, "runs.json"),
@@ -267,7 +267,7 @@ public class PackageRewriteFeedTests
             using var index = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json"));
             var versions = index.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
             await Assert.That(versions.Length).IsEqualTo(1);
-            await Assert.That(versions[0]).IsEqualTo("1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200");
+            await Assert.That(versions[0]).IsEqualTo("1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
             var bytes = await client.GetByteArrayAsync($"flat/acme.core/{versions[0]}/acme.core.{versions[0]}.nupkg");
             using var reader = new PackageArchiveReader(new MemoryStream(bytes));
             await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(versions[0]);
@@ -294,7 +294,7 @@ public class PackageRewriteFeedTests
             using var recovered = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json"));
             var versions = recovered.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
             await Assert.That(string.Join(",", versions)).IsEqualTo(
-                "1.2.0-beta.3.pr.755.run.99.attempt.1.artifact.300,1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200");
+                "1.2.0-beta.3.pr.755.run.r0000000000000000099.attempt.1.artifact.300,1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
             var bytes = await client.GetByteArrayAsync($"flat/acme.core/{versions[0]}/acme.core.{versions[0]}.nupkg");
             using var reader = new PackageArchiveReader(new MemoryStream(bytes));
             await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(versions[0]);
@@ -317,9 +317,9 @@ public class PackageRewriteFeedTests
         github.FailDownloads = true;
         var closedArtifact = github.Packages with { Id = 300, Expired = true };
         var open = new BuildEntry(100, 1, 755, "open", "1.2.0-beta.3",
-            "1.2.0-pr.755.run.100.attempt.1.artifact.200", github.Packages, github.Version);
+            "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200", github.Packages, github.Version);
         var closed = new BuildEntry(99, 1, 756, "closed", "1.2.0-beta.3",
-            "1.2.0-pr.756.run.99.attempt.1.artifact.300", closedArtifact, github.Version);
+            "1.2.0-pr.756.run.r0000000000000000099.attempt.1.artifact.300", closedArtifact, github.Version);
         var runs = new[] { open, closed }.Select(x =>
             new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList();
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "runs.json"),
@@ -348,7 +348,7 @@ public class PackageRewriteFeedTests
         var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
         await Assert.That(saved.SchemaVersion).IsEqualTo(CacheSchema.Version);
         await Assert.That(saved.Builds.Single(x => x.PullRequest == 756).Version)
-            .IsEqualTo("1.2.0-beta.3.pr.756.run.99.attempt.1.artifact.300");
+            .IsEqualTo("1.2.0-beta.3.pr.756.run.r0000000000000000099.attempt.1.artifact.300");
         await Assert.That(File.Exists(Path.Combine(options.CacheDirectory, "packages", "discovered",
             $"v{CacheSchema.Version}", "756.99.1.300", "packages.json"))).IsTrue();
         await Assert.That(github.Downloads).IsEqualTo(0);
@@ -358,7 +358,7 @@ public class PackageRewriteFeedTests
     public async Task LongPrereleaseUsesAFileSystemSafeCacheNameWithoutChangingThePublicVersion()
     {
         using var fixture = new PackageRewriteFixture();
-        var original = "1.2.0-preview." + new string('a', 180);
+        var original = "1.2.0-preview." + new string('a', 163);
         var github = await fixture.CreateGitHubAsync(coreVersion: original);
         await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>());
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
@@ -399,7 +399,7 @@ public class PackageRewriteFeedTests
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var build = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3",
-            "1.2.0-pr.755.run.100.attempt.1.artifact.200", github.Packages, github.Version);
+            "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200", github.Packages, github.Version);
         var catalogPath = Path.Combine(options.CacheDirectory, "catalog.json");
         await JsonSettings.WriteAtomicAsync(catalogPath, new { options.Repository, Builds = new[] { build } }, CancellationToken.None);
         var originalCatalog = await File.ReadAllTextAsync(catalogPath);
@@ -408,7 +408,7 @@ public class PackageRewriteFeedTests
         var inventoryPath = Path.Combine(incompleteDirectory, "packages.json");
         await JsonSettings.WriteAtomicAsync(inventoryPath,
             new[] { new CachedPackage("Acme.Core", "1.2.0-beta.3",
-                "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200") }, CancellationToken.None);
+                "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200") }, CancellationToken.None);
         var inventory = await File.ReadAllTextAsync(inventoryPath);
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
@@ -439,7 +439,7 @@ public class PackageRewriteFeedTests
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var build = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3",
-            "1.2.0-pr.755.run.100.attempt.1.artifact.200", github.Packages, github.Version);
+            "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200", github.Packages, github.Version);
         var catalogPath = Path.Combine(options.CacheDirectory, "catalog.json");
         await JsonSettings.WriteAtomicAsync(catalogPath, new { options.Repository, Builds = new[] { build } }, CancellationToken.None);
         var originalCatalog = await File.ReadAllTextAsync(catalogPath);
@@ -554,6 +554,62 @@ public class PackageRewriteFeedTests
     }
 
     [Test]
+    public async Task BuildsEndpointAndInstallerSelectionExcludeNewestInvalidBuild()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+        var options = new ProxyOptions { CacheDirectory = cache, PullRequests = [755] };
+        github.SeedRawCache(cache);
+        github.FailDownloads = true;
+
+        var duplicateOne = Path.Combine(fixture.DirectoryPath, "Acme.Core.nupkg");
+        var duplicateTwo = Path.Combine(fixture.DirectoryPath, "Acme.Core.Copy.nupkg");
+        File.Copy(duplicateOne, duplicateTwo);
+        var badArtifactPath = Path.Combine(cache, "artifacts", "300.zip");
+        using (var archive = ZipFile.Open(badArtifactPath, ZipArchiveMode.Create))
+        {
+            archive.CreateEntryFromFile(duplicateOne, "Acme.Core.First.nupkg");
+            archive.CreateEntryFromFile(duplicateTwo, "Acme.Core.Second.nupkg");
+        }
+        var badArtifact = new Artifact(300, "packages", true,
+            "sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(badArtifactPath))).ToLowerInvariant());
+        var healthyVersion = PackageRewriter.VersionFor("1.2.0-beta.3", 755, 100, 1, github.Packages.Id);
+        var invalidVersion = PackageRewriter.VersionFor("1.2.0-beta.3", 755, 101, 1, badArtifact.Id);
+        var healthy = new BuildEntry(100, 1, 755, "healthy", "1.2.0-beta.3", healthyVersion, github.Packages, github.Version);
+        var invalid = new BuildEntry(101, 1, 755, "invalid", "1.2.0-beta.3", invalidVersion, badArtifact, github.Version);
+        var builds = new[] { healthy, invalid };
+        await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
+            new RunArtifactsFile(options.Repository, options.Workflow, builds.Select(x =>
+                new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList()),
+            CancellationToken.None);
+        await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
+            new CatalogFile(options.Repository, builds.ToList(), CacheSchema.Version), CancellationToken.None);
+
+        var logger = new CollectingLogger<PackageCatalog>();
+        await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), catalogLogger: logger);
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
+        using var response = JsonDocument.Parse(await client.GetStringAsync("builds"));
+        var advertised = response.RootElement.EnumerateArray().ToArray();
+        await Assert.That(advertised.Length).IsEqualTo(1);
+        await Assert.That(advertised[0].GetProperty("runId").GetInt64()).IsEqualTo(100);
+        await Assert.That(advertised[0].GetProperty("version").GetString()).IsEqualTo(healthyVersion);
+
+        var selected = advertised.Where(x => x.GetProperty("pullRequest").GetInt32() == 755)
+            .OrderByDescending(x => x.GetProperty("runId").GetInt64())
+            .ThenByDescending(x => x.GetProperty("attempt").GetInt32())
+            .ThenByDescending(x => x.GetProperty("packages").GetProperty("id").GetInt64())
+            .First();
+        var selectedVersion = selected.GetProperty("version").GetString();
+        using var package = await client.GetAsync($"flat/acme.core/{selectedVersion}/acme.core.{selectedVersion}.nupkg");
+        await Assert.That((int)package.StatusCode).IsEqualTo(200);
+        await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
+            && x.Message.Contains("101", StringComparison.Ordinal)
+            && x.Message.Contains("300", StringComparison.Ordinal)
+            && x.Exception?.Message.Contains("Duplicate", StringComparison.OrdinalIgnoreCase) == true)).IsTrue();
+    }
+
+    [Test]
     public async Task NewerCacheSchemaIsRejectedWithoutChangingTheCatalog()
     {
         using var fixture = new PackageRewriteFixture();
@@ -572,7 +628,7 @@ public class PackageRewriteFeedTests
     }
 
     [Test]
-    public async Task FeedOrdersLargeRunIdsNumericallyWithinTheSamePrerelease()
+    public async Task FeedOrdersLargeRunIdsWithASingleRegistrationPageUsingRunTokens()
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
@@ -583,8 +639,8 @@ public class PackageRewriteFeedTests
         var logger = new CollectingLogger<PackageCache>();
         await using var app = await StartFeedAsync(fixture, github, logger, [3_000_000_000]);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-        const string earlier = "1.2.0-beta.3.pr.755.run.3000000000.attempt.1.artifact.200";
-        const string later = "1.2.0-beta.3.pr.755.run.10000000000.attempt.1.artifact.200";
+        const string earlier = "1.2.0-beta.3.pr.755.run.r0000000003000000000.attempt.1.artifact.200";
+        const string later = "1.2.0-beta.3.pr.755.run.r0000000010000000000.attempt.1.artifact.200";
 
         using (var versions = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
         {
@@ -593,21 +649,14 @@ public class PackageRewriteFeedTests
         }
         using (var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json")))
         {
-            var pages = registration.RootElement.GetProperty("items").EnumerateArray().ToArray();
-            await Assert.That(registration.RootElement.GetProperty("count").GetInt32()).IsEqualTo(2);
-            await Assert.That(pages.Length).IsEqualTo(2);
-            for (var i = 0; i < pages.Length; i++)
-            {
-                var version = i == 0 ? later : earlier;
-                await Assert.That(pages[i].GetProperty("lower").GetString()).IsEqualTo(version);
-                await Assert.That(pages[i].GetProperty("upper").GetString()).IsEqualTo(version);
-                await Assert.That(pages[i].GetProperty("items")[0].GetProperty("catalogEntry")
-                    .GetProperty("version").GetString()).IsEqualTo(version);
-                using var page = JsonDocument.Parse(await client.GetStringAsync(pages[i].GetProperty("@id").GetString()));
-                await Assert.That(page.RootElement.GetProperty("lower").GetString()).IsEqualTo(version);
-                await Assert.That(page.RootElement.GetProperty("items")[0].GetProperty("catalogEntry")
-                    .GetProperty("version").GetString()).IsEqualTo(version);
-            }
+            await Assert.That(registration.RootElement.GetProperty("count").GetInt32()).IsEqualTo(1);
+            var page = registration.RootElement.GetProperty("items")[0];
+            await Assert.That(page.GetProperty("lower").GetString()).IsEqualTo(earlier);
+            await Assert.That(page.GetProperty("upper").GetString()).IsEqualTo(later);
+            await Assert.That(page.GetProperty("items")[0].GetProperty("catalogEntry").GetProperty("version").GetString())
+                .IsEqualTo(earlier);
+            await Assert.That(page.GetProperty("items")[1].GetProperty("catalogEntry").GetProperty("version").GetString())
+                .IsEqualTo(later);
         }
         using (var search = JsonDocument.Parse(await client.GetStringAsync("query?q=Acme.Core&prerelease=true&semVerLevel=2.0.0")))
             await Assert.That(search.RootElement.GetProperty("data")[0].GetProperty("version").GetString()).IsEqualTo(later);
@@ -623,8 +672,8 @@ public class PackageRewriteFeedTests
             new(10_000_000_000, 1, "new", "completed", "success", "pull_request", [new(755)])
         ];
         await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), [3_000_000_000]);
-        const string earlier = "1.2.0-beta.3.pr.755.run.3000000000.attempt.1.artifact.200";
-        const string later = "1.2.0-beta.3.pr.755.run.10000000000.attempt.1.artifact.200";
+        const string earlier = "1.2.0-beta.3.pr.755.run.r0000000003000000000.attempt.1.artifact.200";
+        const string later = "1.2.0-beta.3.pr.755.run.r0000000010000000000.attempt.1.artifact.200";
 
         var source = Repository.Factory.GetCoreV3(new PackageSource(app.Urls.Single() + "/v3/index.json")
         {
@@ -652,8 +701,8 @@ public class PackageRewriteFeedTests
         var available = (await resource.ResolvePackages("Acme.Core", NuGetFramework.ParseFolder("net8.0"),
             context, NuGet.Common.NullLogger.Instance, CancellationToken.None)).Select(x => x.Version).ToArray();
         await Assert.That(available.Length).IsEqualTo(2);
-        var floating = VersionRange.Parse("1.2.0-beta.3.pr.755.run.*").FindBestMatch(available);
-        await Assert.That(floating!.ToNormalizedString()).IsEqualTo(earlier);
+        var floating = VersionRange.Parse("1.2.0-beta.3.pr.755.run.r*").FindBestMatch(available);
+        await Assert.That(floating!.ToNormalizedString()).IsEqualTo(later);
     }
 
     [Test]
@@ -670,8 +719,8 @@ public class PackageRewriteFeedTests
         using var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json"));
         await Assert.That(registration.RootElement.GetProperty("count").GetInt32()).IsEqualTo(1);
         var page = registration.RootElement.GetProperty("items")[0];
-        await Assert.That(page.GetProperty("lower").GetString()).IsEqualTo("1.2.0-beta.3.pr.755.run.9.attempt.1.artifact.200");
-        await Assert.That(page.GetProperty("upper").GetString()).IsEqualTo("1.2.0-beta.3.pr.755.run.10.attempt.1.artifact.200");
+        await Assert.That(page.GetProperty("lower").GetString()).IsEqualTo("1.2.0-beta.3.pr.755.run.r0000000000000000009.attempt.1.artifact.200");
+        await Assert.That(page.GetProperty("upper").GetString()).IsEqualTo("1.2.0-beta.3.pr.755.run.r0000000000000000010.attempt.1.artifact.200");
         await Assert.That(page.GetProperty("items").GetArrayLength()).IsEqualTo(2);
     }
 

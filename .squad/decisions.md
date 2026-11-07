@@ -160,6 +160,24 @@ All test projects use **TUnit** (central version 1.64.13). Keboo.127Cache.Proxy.
 - #19 retitled "Migrate Keboo.127Cache.Proxy.Tests from xUnit to TUnit", body rewritten with acceptance criteria + migration map.
 - #18 context notes TUnit for new tests; #18/#25/#32 links to #19 retitled. (#28 had no xUnit references.)
 
+### 2026-11-05: Owner directive — Backlog execution safety and commit attribution
+
+**Source:** kevin-bost-via-copilot-backlog-execution-safety-and-commit-attribution-40e4aa7f (id 40e4aa7f-767e-48bb-825c-2e27492fd97b) · loadGuidance: ALWAYS
+
+#### 2026-11-05T11:38:14.932-08:00: User directive for this backlog run
+**By:** Kevin Bost (via Copilot)
+**What:** Never overwrite unrelated modifications or rewrite history. Do not deploy, publish a package, merge to main, or close an issue without completion and necessary authorization; configuring release automation is in scope. Any commits created for this work must end with `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.
+**Why:** User request — capture the execution and attribution constraints for the team.
+
+### 2026-11-05: Owner directive — Backlog merge authorization and release safety
+
+**Source:** kevin-bost-via-copilot-backlog-merge-authorization-and-release-safety-4356ee0e (id 4356ee0e-bfad-4f78-8a31-7dae0eee9e08) · loadGuidance: ALWAYS
+
+#### 2026-11-05T11:38:14.932-08:00: Updated user directive for this backlog run
+**By:** Kevin Bost (via Copilot)
+**What:** The earlier no-merge instruction is superseded: autonomously merge independently verified, completed backlog PRs to main in dependency order, resolving conflicts and continuing to other items. Do not bypass branch protections or leave main broken. Do not publish packages or deploy unless separately authorized. Every commit created must end with `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.
+**Why:** User explicitly authorized merging, while maintaining a separate publication/deployment authorization boundary.
+
 ## Governance
 
 - All meaningful changes require team consensus

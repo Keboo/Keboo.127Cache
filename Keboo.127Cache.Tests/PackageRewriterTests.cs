@@ -10,16 +10,16 @@ namespace Keboo._127Cache.Tests;
 public class PackageRewriterTests
 {
     [Test]
-    [Arguments("1.2.0", "1.2.0-pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.0+sha", "1.2.0-pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.0-beta.3", "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.0-beta.3+sha", "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.0-RC.1+sha", "1.2.0-RC.1.pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.0-alpha-beta", "1.2.0-alpha-beta.pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.3.67-gabcdef0+metadata", "1.3.67-gabcdef0.pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.3.4", "1.2.3.4-pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.3.4-rc.1+sha", "1.2.3.4-rc.1.pr.755.run.100.attempt.1.artifact.200")]
-    [Arguments("1.2.3.0-rc.1", "1.2.3-rc.1.pr.755.run.100.attempt.1.artifact.200")]
+    [Arguments("1.2.0", "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.0+sha", "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.0-beta.3", "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.0-beta.3+sha", "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.0-RC.1+sha", "1.2.0-RC.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.0-alpha-beta", "1.2.0-alpha-beta.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.3.67-gabcdef0+metadata", "1.3.67-gabcdef0.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.3.4", "1.2.3.4-pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.3.4-rc.1+sha", "1.2.3.4-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
+    [Arguments("1.2.3.0-rc.1", "1.2.3-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200")]
     public async Task VersionGoldenCasesAreNormalizedAndParsable(string original, string expected)
     {
         var actual = PackageRewriter.VersionFor(original, 755, 100, 1, 200);
@@ -179,7 +179,7 @@ public class PackageRewriterTests
         var destination = Path.Combine(fixture.DirectoryPath, "wrong-output.nupkg");
 
         await Assert.That(async () => await PackageRewriter.RewriteAsync(source, destination, "Other", "1.2.0-beta.3",
-            "1.2.0-beta.3.pr.755.run.100.attempt.1.artifact.200")).ThrowsExactly<InvalidDataException>();
+            "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200")).ThrowsExactly<InvalidDataException>();
         await Assert.That(File.Exists(destination)).IsFalse();
     }
 }

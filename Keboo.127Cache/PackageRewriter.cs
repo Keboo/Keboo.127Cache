@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Globalization;
 using System.Xml.Linq;
 using NuGet.Packaging;
 using NuGet.Versioning;
@@ -17,7 +18,7 @@ public static class PackageRewriter
         var version = NuGetVersion.Parse(original);
         var numeric = version.Version.Revision > 0 ? version.Version.ToString(4) : version.Version.ToString(3);
         var prefix = version.IsPrerelease ? $"-{version.Release}.pr" : "-pr";
-        return FormattableString.Invariant($"{numeric}{prefix}.{pr}.run.{run}.attempt.{attempt}.artifact.{artifact}");
+        return FormattableString.Invariant($"{numeric}{prefix}.{pr}.run.{RunTokenFor(run)}.attempt.{attempt}.artifact.{artifact}");
     }
 
     public static void Rewrite(string source, string destination, string id, string originalVersion, string version,
@@ -64,7 +65,16 @@ public static class PackageRewriter
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (IsSignature(entry)) continue;
-                var rewritten = target.CreateEntry(entry.FullName, CompressionLevel.Fastest);
+                ZipArchiveEntry rewritten;
+                try
+                {
+                    rewritten = target.CreateEntry(entry.FullName, CompressionLevel.Fastest);
+                }
+                catch (ArgumentException exception)
+                {
+                    var name = string.IsNullOrEmpty(entry.FullName) ? "<empty>" : entry.FullName;
+                    throw new InvalidDataException($"Package contains an invalid ZIP entry name '{name}'.", exception);
+                }
                 rewritten.LastWriteTime = entry.LastWriteTime;
                 rewritten.ExternalAttributes = entry.ExternalAttributes;
                 using var output = rewritten.Open();
@@ -118,6 +128,12 @@ public static class PackageRewriter
     private static bool IsCoreProperties(ZipArchiveEntry entry) =>
         entry.FullName.StartsWith("package/services/metadata/core-properties/", StringComparison.OrdinalIgnoreCase)
         && entry.FullName.EndsWith(".psmdcp", StringComparison.OrdinalIgnoreCase);
+
+    private static string RunTokenFor(long run)
+    {
+        if (run < 0) throw new InvalidDataException("Run IDs must be non-negative.");
+        return "r" + run.ToString("D19", CultureInfo.InvariantCulture);
+    }
 
     private static int CompareVersions(NuGetVersion? left, NuGetVersion? right)
     {

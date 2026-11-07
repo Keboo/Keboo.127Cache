@@ -45,10 +45,20 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts, 
     private static void EnsureClientCacheSafe(CachedPackage package, BuildEntry build)
     {
         var clientFile = $"{package.Id.ToLowerInvariant()}.{package.Version.ToLowerInvariant()}.nupkg.sha512";
-        var length = Encoding.UTF8.GetByteCount(clientFile);
-        if (length > 255)
-            throw new InvalidDataException($"Package {package.Id} {package.Version} in artifact {build.Packages.Id} requires a {length}-byte " +
-                "NuGet client cache filename, exceeding the 255-byte component limit on common filesystems. " +
+        if (OperatingSystem.IsWindows())
+        {
+            var length = clientFile.Length;
+            if (length > 255)
+                throw new InvalidDataException($"Package {package.Id} {package.Version} in artifact {build.Packages.Id} requires a {length}-character " +
+                    "NuGet client cache filename, exceeding the 255-character Windows component limit. " +
+                    "The approved public version cannot be restored safely and was not changed.");
+            return;
+        }
+
+        var bytes = Encoding.UTF8.GetByteCount(clientFile);
+        if (bytes > 255)
+            throw new InvalidDataException($"Package {package.Id} {package.Version} in artifact {build.Packages.Id} requires a {bytes}-byte " +
+                "NuGet client cache filename, exceeding the 255-byte Unix component limit. " +
                 "The approved public version cannot be restored safely and was not changed.");
     }
 
@@ -132,7 +142,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts, 
         if (File.Exists(path)) return path;
         // A verified current-schema inventory may use the earlier public-identity filename.
         var legacyName = $"{package.Id.ToLowerInvariant()}.{package.Version}.nupkg";
-        if (legacyName.Length > 255) return null;
+        if (OperatingSystem.IsWindows() ? legacyName.Length > 255 : Encoding.UTF8.GetByteCount(legacyName) > 255) return null;
         path = Path.Combine(directory, legacyName);
         return File.Exists(path) ? path : null;
     }
