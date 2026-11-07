@@ -138,11 +138,11 @@ public sealed class RuntimeConfigurationTests : IDisposable
         using var versions = JsonDocument.Parse(await client.GetStringAsync(
             "/flat/example.package/index.json", CancellationToken.None));
         var version = versions.RootElement.GetProperty("versions")[0].GetString()!;
-        await Assert.That(version).IsEqualTo("1.2.3-pr.42.run.100.attempt.1.artifact.7");
+        await Assert.That(version).IsEqualTo("1.2.3-pr.42.run.r0000000000000000100.attempt.1.artifact.7");
         using var otherVersions = JsonDocument.Parse(await client.GetStringAsync(
             "/flat/z.other/index.json", CancellationToken.None));
         await Assert.That(otherVersions.RootElement.GetProperty("versions")[0].GetString())
-            .IsEqualTo("2.0.0-pr.42.run.100.attempt.1.artifact.7");
+            .IsEqualTo("2.0.0-pr.42.run.r0000000000000000100.attempt.1.artifact.7");
         var (exitCode, output, commands) = await RunVpkInstallerAsync(baseUrl);
         await Assert.That(exitCode).IsNotEqualTo(0);
         await Assert.That(output).Contains("No matching build");
@@ -358,7 +358,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
             await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
                 new CatalogFile("owner/repo",
                     [new BuildEntry(100, 1, 42, "current", "1.2.3",
-                        "1.2.3-pr.42.run.100.attempt.1.artifact.7", github.Packages, null)]), CancellationToken.None);
+                        "1.2.3-pr.42.run.r0000000000000000100.attempt.1.artifact.7", github.Packages, null)]), CancellationToken.None);
         }
         var baseUrl = FreeUrl();
         var builder = CreateBuilder(cache, new Dictionary<string, string?>
@@ -382,7 +382,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         var build = builds.RootElement[0];
         var version = build.GetProperty("version").GetString();
         await Assert.That(build.GetProperty("originalVersion").GetString()).IsEqualTo("3.4.5");
-        await Assert.That(version).IsEqualTo("3.4.5-pr.42.run.100.attempt.1.artifact.7");
+        await Assert.That(version).IsEqualTo("3.4.5-pr.42.run.r0000000000000000100.attempt.1.artifact.7");
         await Assert.That(commands).Contains($"tool install vpk --version {version}");
         using var vpkVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/vpk/index.json", CancellationToken.None));
         await Assert.That(vpkVersions.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
@@ -420,10 +420,10 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await Assert.That(builds.RootElement.GetArrayLength()).IsEqualTo(1);
         await Assert.That(builds.RootElement[0].GetProperty("originalVersion").GetString()).IsEqualTo("9.0.0");
         await Assert.That(builds.RootElement[0].GetProperty("version").GetString())
-            .IsEqualTo("9.0.0-pr.42.run.100.attempt.1.artifact.7");
+            .IsEqualTo("9.0.0-pr.42.run.r0000000000000000100.attempt.1.artifact.7");
         await Assert.That(builds.RootElement[0].GetProperty("versionArtifact").GetProperty("id").GetInt64()).IsEqualTo(8L);
         await Assert.That(github.VersionDownloads).IsEqualTo(1);
-        await Assert.That(github.Downloads).IsEqualTo(0);
+        await Assert.That(github.Downloads).IsEqualTo(1);
         await app.StopAsync(CancellationToken.None);
     }
 
@@ -440,7 +440,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
             new CatalogFile("owner/repo",
                 [new BuildEntry(100, 1, 42, "current", "9.0.0",
-                    "9.0.0-pr.42.run.100.attempt.1.artifact.7", github.Packages, versionArtifact)]), CancellationToken.None);
+                    "9.0.0-pr.42.run.r0000000000000000100.attempt.1.artifact.7", github.Packages, versionArtifact)],
+                CacheSchema.Version), CancellationToken.None);
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Server:CacheDirectory"] = cache,
@@ -461,7 +462,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await Assert.That(builds[0].Version).IsEqualTo("");
         await Assert.That(builds[0].VersionArtifact).IsNull();
         await Assert.That(github.ArtifactQueries).IsEqualTo(0);
-        await Assert.That(github.Downloads).IsEqualTo(0);
+        await Assert.That(github.Downloads).IsEqualTo(1);
         var packages = await catalog.GetPackagesAsync(CancellationToken.None);
         await Assert.That(packages.Single(x => x.Id == "Example.Package").Build.OriginalVersion).IsEqualTo("1.2.3");
         await Assert.That(github.Downloads).IsEqualTo(1);

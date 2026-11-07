@@ -101,7 +101,7 @@ public sealed class ArtifactIntegrityTests
         await using var app = await StartFeedAsync(fixture);
         using var client = CreateClient(app);
         using var rejected = await client.GetAsync("/flat/example.package/index.json", Cancellation);
-        await Assert.That(rejected.StatusCode).IsEqualTo(HttpStatusCode.InternalServerError);
+        await Assert.That(rejected.StatusCode).IsEqualTo(HttpStatusCode.NotFound);
         await Assert.That((await File.ReadAllBytesAsync(path, Cancellation)).SequenceEqual(tampered)).IsTrue();
         await Assert.That(await File.ReadAllTextAsync(path + ".sha256", Cancellation)).IsEqualTo(record);
         await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(1);
