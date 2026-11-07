@@ -91,6 +91,19 @@ IDs still have to belong to an open PR. The app refreshes GitHub discovery on
 startup and after the in-memory cache expires. Startup lists run artifacts but
 does not download their contents.
 
+When GitHub omits a run's PR association, as it often does for forks, the app
+matches the current open PR head SHA and, when available, its head repository
+and branch. Ambiguous unpinned matches are skipped with a warning; ambiguous
+explicitly pinned runs report an error rather than being attributed to the wrong
+PR. Previously discovered cached runs remain available while the PR stays open.
+
+For an explicitly pinned fork run whose SHA is no longer the PR head, the app
+reuses an exact cached association when available. Otherwise, it checks that the
+head repository and branch have belonged to only that PR and that the run SHA
+appears in its current commit history. GitHub returns at most 250 PR commits;
+force pushes or branch reuse can also prevent verification. In those cases the
+app reports an error instead of guessing the association.
+
 Run metadata and raw artifact ZIPs are cached by artifact ID. A supplied
 `sha256:` digest is verified before a ZIP is cached; mismatched, malformed, or
 unsupported supplied digests fail closed. When no digest is supplied, the app
