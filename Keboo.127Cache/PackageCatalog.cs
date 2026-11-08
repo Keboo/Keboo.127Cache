@@ -11,7 +11,7 @@ namespace Keboo._127Cache;
 public sealed record BuildEntry(
     long RunId, int Attempt, int PullRequest, string HeadSha, string OriginalVersion, string Version,
     Artifact Packages, Artifact VersionArtifact);
-public sealed record CatalogFile(string Repository, List<BuildEntry> Builds);
+public sealed record CatalogFile(string Repository, List<BuildEntry> Builds, int SchemaVersion = 1);
 public sealed record PublishedPackage(string Id, BuildEntry Build);
 public sealed record RunArtifacts(
     long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact VersionArtifact);
@@ -31,6 +31,7 @@ public sealed class PackageCatalog
     private readonly string _runsFile;
     private List<RunArtifacts> _runs;
     private List<BuildEntry> _builds;
+    private bool _catalogNeedsUpgrade;
 
     public PackageCatalog(ProxyOptions options, IGitHubClient github, IMemoryCache memoryCache, ArtifactCache artifacts, PackageCache packages,
         ILogger<PackageCatalog>? logger = null)
@@ -49,7 +50,14 @@ public sealed class PackageCatalog
             : null;
         if (saved is not null && saved.Repository != options.Repository)
             throw new InvalidDataException("This cache belongs to another repository. Use a different CacheDirectory.");
-        _builds = saved?.Builds ?? [];
+        if (saved is not null && saved.SchemaVersion > CacheSchema.Version)
+            throw new InvalidDataException("This cache was created by a newer version. Use a different CacheDirectory or upgrade 127Cache.");
+        _builds = saved?.Builds.Select(build => build with
+        {
+            Version = PackageRewriter.VersionFor(build.OriginalVersion, build.PullRequest, build.RunId, build.Attempt, build.Packages.Id)
+        }).ToList() ?? [];
+        _catalogNeedsUpgrade = saved is not null
+            && (saved.SchemaVersion != CacheSchema.Version || !saved.Builds.SequenceEqual(_builds));
         _runsFile = Path.Combine(options.CacheDirectory, "runs.json");
         var savedRuns = File.Exists(_runsFile)
             ? JsonSerializer.Deserialize<RunArtifactsFile>(File.ReadAllText(_runsFile), JsonSettings.Options)
@@ -68,14 +76,21 @@ public sealed class PackageCatalog
         var result = new List<PublishedPackage>();
         foreach (var build in await GetBuildsAsync(cancellationToken))
         {
-            foreach (var package in await _packages.GetPackagesAsync(build, cancellationToken))
-                result.Add(new PublishedPackage(package.Id, build with
-                {
-                    OriginalVersion = package.OriginalVersion,
-                    Version = package.Version
-                }));
+            try
+            {
+                foreach (var package in await _packages.GetPackagesAsync(build, cancellationToken))
+                    result.Add(new PublishedPackage(package.Id, build with
+                    {
+                        OriginalVersion = package.OriginalVersion,
+                        Version = package.Version
+                    }));
+            }
+            catch (Exception exception) when (IsBuildFailure(exception))
+            {
+                ReportUnavailableBuild(build, exception);
+            }
         }
-        return result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), VersionComparer.VersionRelease).ToArray();
+        return result.OrderBy(x => NuGetVersion.Parse(x.Build.Version), PackageRewriter.VersionOrder).ToArray();
     }
 
     public async Task<BuildEntry[]> GetBuildsAsync(CancellationToken cancellationToken)
@@ -85,22 +100,67 @@ public sealed class PackageCatalog
         try
         {
             var next = new List<BuildEntry>(_builds);
+            var unavailable = new HashSet<BuildEntry>();
             foreach (var run in runs)
             {
                 if (next.Any(x => x.RunId == run.RunId && x.Attempt == run.Attempt && x.PullRequest == run.PullRequest)) continue;
-                var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
-                next.Add(new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
-                    PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
-                    run.Packages, run.VersionArtifact));
+                try
+                {
+                    var original = await ReadVersionAsync(run.VersionArtifact, cancellationToken);
+                    next.Add(new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, original,
+                        PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
+                        run.Packages, run.VersionArtifact));
+                }
+                catch (Exception exception) when (IsBuildFailure(exception))
+                {
+                    _logger.LogWarning(exception, "Skipping run {RunId} attempt {Attempt} of PR {PullRequest}: " +
+                        "version artifact {ArtifactId} is unavailable.", run.RunId, run.Attempt, run.PullRequest, run.VersionArtifact.Id);
+                }
             }
-            if (next.Count != _builds.Count)
+            if (_catalogNeedsUpgrade)
             {
-                await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next), cancellationToken);
-                _builds = next;
+                var ready = true;
+                foreach (var build in next)
+                {
+                    try
+                    {
+                        await _packages.VerifyForMigrationAsync(build, cancellationToken);
+                    }
+                    catch (Exception exception) when (IsBuildFailure(exception))
+                    {
+                        ready = false;
+                        unavailable.Add(build);
+                        ReportUnavailableBuild(build, exception);
+                    }
+                }
+                if (ready)
+                {
+                    await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
+                    _catalogNeedsUpgrade = false;
+                }
             }
+            else if (next.Count != _builds.Count)
+                await JsonSettings.WriteAtomicAsync(_file, new CatalogFile(_options.Repository, next, CacheSchema.Version), cancellationToken);
+            _builds = next;
             var visible = runs.Select(x => (x.RunId, x.Attempt, x.PullRequest)).ToHashSet();
-            return _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)))
-                .OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
+            var candidates = _builds.Where(x => visible.Contains((x.RunId, x.Attempt, x.PullRequest)) && !unavailable.Contains(x))
+                .OrderBy(x => NuGetVersion.Parse(x.Version), PackageRewriter.VersionOrder).ToArray();
+            var available = new List<BuildEntry>(candidates.Length);
+            foreach (var build in candidates)
+            {
+                try
+                {
+                    await _packages.GetPackagesAsync(build, cancellationToken);
+                    available.Add(build);
+                }
+                catch (Exception exception) when (IsBuildFailure(exception))
+                {
+                    ReportUnavailableBuild(build, exception);
+                }
+            }
+            available.Sort((left, right) =>
+                PackageRewriter.VersionOrder.Compare(NuGetVersion.Parse(left.Version), NuGetVersion.Parse(right.Version)));
+            return available.ToArray();
         }
         finally
         {
@@ -188,6 +248,15 @@ public sealed class PackageCatalog
             _gate.Release();
         }
     }
+
+    private static bool IsBuildFailure(Exception exception) =>
+        exception is IOException or InvalidDataException or UnauthorizedAccessException or FormatException or ArgumentException
+            or System.Xml.XmlException or NuGet.Packaging.Core.PackagingException;
+
+    private void ReportUnavailableBuild(BuildEntry build, Exception exception) =>
+        _logger.LogWarning(exception, "Skipping build {RunId} attempt {Attempt} of PR {PullRequest}: " +
+            "package artifact {ArtifactId} is unavailable or invalid; existing cache files were retained.",
+            build.RunId, build.Attempt, build.PullRequest, build.Packages.Id);
 
     private static bool IsSuccessfulPullRequestRun(WorkflowRun run) =>
         run.Status == "completed" && run.Conclusion == "success" && run.Event == "pull_request";
@@ -277,10 +346,13 @@ public sealed class PackageCatalog
     {
         var path = await _artifacts.GetAsync(artifact, cancellationToken);
         using var archive = ZipFile.OpenRead(path);
-        var entry = archive.Entries.Single(x => x.FullName == "version.txt");
+        var entries = archive.Entries.Where(x => x.FullName == "version.txt").ToArray();
+        if (entries.Length != 1) throw new InvalidDataException($"Artifact {artifact.Id} must contain exactly one version.txt.");
+        var entry = entries[0];
         if (entry.Length > 4096) throw new InvalidDataException("Version file is unexpectedly large.");
         using var reader = new StreamReader(entry.Open());
         var value = (await reader.ReadToEndAsync(cancellationToken)).Trim();
-        return NuGetVersion.Parse(value).ToNormalizedString();
+        return NuGetVersion.TryParse(value, out var version) ? version.ToNormalizedString()
+            : throw new InvalidDataException($"Artifact {artifact.Id} contains an invalid NuGet version.");
     }
 }

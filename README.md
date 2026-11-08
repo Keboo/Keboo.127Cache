@@ -148,6 +148,56 @@ version, and cached. The feed exposes only the packages actually present in each
 build. Dependencies on packages in the same artifact are pinned to their
 corresponding rewritten versions.
 
+For example, `1.2.0` becomes
+`1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200`, while `1.2.0-beta.3+sha`
+becomes `1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200`. Original
+prerelease labels are retained and build metadata is dropped. NuGet's
+four-part versions are also supported. The rewritten version is used in the
+nuspec, core properties, feed metadata, and exact in-artifact dependency pins;
+external dependency ranges are unchanged.
+
+Rewriting invalidates a package signature, so the signature is removed and
+logged; the served package is unsigned. Schema v4 regenerates the complete
+inventory from each SHA256-verified raw artifact rather than trusting a
+potentially incomplete v1 or v2 inventory. Rewritten packages use short
+internal filenames without changing their public versions. An integrity record
+binds the inventory to the artifact digest and records the SHA256 of each
+rewritten package; package identities and hashes are checked before a build is
+advertised or served. These checks detect accidental corruption, not malicious
+changes by someone who can also edit the integrity record.
+
+Before upgrading a saved catalog, the tool compares each inventory with the
+complete verified raw artifact for every known build, including closed PRs. If
+one artifact is unavailable or invalid, that build is logged and excluded while
+healthy builds remain available; the older catalog, packages, and raw artifacts
+are retained. The next request retries migration. Restore an expired artifact's
+matching raw ZIP to the artifact cache to resume migration. After migration, an
+intact v4 cache remains usable without the raw artifact.
+For a corrupt v4 cache, restore the matching inventory, integrity record, and
+package bytes from a trusted backup. Alternatively, first preserve the affected
+build directory elsewhere, then remove that directory only if its verified raw
+artifact is available; the next request can regenerate it.
+
+NuGet clients commonly write `<id>.<version>.nupkg.sha512` in their global
+package cache. On Windows, if this filename would exceed the 255-character
+(UTF-16 code unit) component limit, the entire build is logged and excluded.
+On Unix-like systems, the guard uses the 255-byte UTF-8 component limit. The
+approved public version is not shortened. Producing a new build with a shorter
+original prerelease label or package ID can avoid this limit, but this does not
+guarantee compatibility with stricter client or filesystem component/total-path
+limits.
+
+The feed enumerates run IDs numerically, including IDs larger than
+`Int32.MaxValue`. Registration page bounds instead follow NuGet's version
+comparer so exact-version dependency resolution works. When that order differs
+from numeric order, the feed uses one-version registration pages so each page's
+bounds are valid under either ordering. Some clients, including
+NuGet.Versioning 7.9, compare oversized numeric prerelease identifiers lexically.
+The rewritten `run` token avoids that path by using an `r` prefix plus a
+fixed-width 19-digit decimal value (for example `r0000000003000000000`), so
+floating version selection and real SDK restores choose newer run IDs correctly
+under the approved format.
+
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet
 Package Source Mapping, allow the desired package IDs from this local source.

@@ -48,8 +48,9 @@ public sealed class ProxyTests : IDisposable
     public async Task VersionsAreDistinctNormalizedPrereleases()
     {
         var first = PackageRewriter.VersionFor("1.3.67-gabcdef0+metadata", 755, 100, 1, 200);
-        await Assert.That(first).IsEqualTo("1.3.67-pr.755.run.100.attempt.1.artifact.200");
+        await Assert.That(first).IsEqualTo("1.3.67-gabcdef0.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
         await Assert.That(NuGetVersion.Parse(first).ToNormalizedString()).IsEqualTo(first);
+        await Assert.That(PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 1, 200)).IsEqualTo(first);
         await Assert.That(PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 2, 201)).IsNotEqualTo(first);
         await Assert.That(PackageRewriter.VersionFor("1.3.67-gabcdef0", 756, 101, 1, 202)).IsNotEqualTo(first);
     }
@@ -83,15 +84,22 @@ public sealed class ProxyTests : IDisposable
     }
 
     [Test]
-    public async Task SignedAndMismatchedPackagesAreRejected()
+    public async Task SignatureIsStrippedAndMismatchedPackagesAreRejected()
     {
         var source = Path.Combine(_directory, "signed.nupkg");
         FakeGitHub.WritePackage(source, "Velopack");
         await Assert.That(() => PackageRewriter.Rewrite(source, source + ".wrong", "Other",
             FakeGitHub.OriginalVersion, "1.0.0-test")).ThrowsExactly<InvalidDataException>();
+        await Assert.That(() => PackageRewriter.Rewrite(source, source + ".wrong-version", "Velopack",
+            "9.9.9", "1.0.0-test")).ThrowsExactly<InvalidDataException>();
         using (var zip = ZipFile.Open(source, ZipArchiveMode.Update)) zip.CreateEntry(".signature.p7s");
-        await Assert.That(() => PackageRewriter.Rewrite(source, source + ".out", "Velopack",
-            FakeGitHub.OriginalVersion, "1.0.0-test")).ThrowsExactly<InvalidDataException>();
+        var rewrittenPath = source + ".out";
+        PackageRewriter.Rewrite(source, rewrittenPath, "Velopack", FakeGitHub.OriginalVersion, "1.0.0-test");
+        using var rewritten = ZipFile.OpenRead(rewrittenPath);
+        await Assert.That(rewritten.GetEntry(".signature.p7s") is null).IsTrue();
+        using var reader = new PackageArchiveReader(rewrittenPath);
+        await Assert.That(reader.GetIdentity().Id).IsEqualTo("Velopack");
+        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo("1.0.0-test");
     }
 
     [Test]
@@ -121,7 +129,7 @@ public sealed class ProxyTests : IDisposable
         await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
         await Assert.That(_github.VersionDownloads).IsEqualTo(1);
-        await Assert.That(_github.PackageDownloads).IsEqualTo(0);
+        await Assert.That(_github.PackageDownloads).IsEqualTo(1);
     }
 
     [Test]
@@ -162,9 +170,14 @@ public sealed class ProxyTests : IDisposable
     {
         var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
         var cache = CreatePackageCache();
+        var discovered = Path.Combine(_options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}",
+            $"{build.PullRequest}.{build.RunId}.{build.Attempt}.{build.Packages.Id}");
+        if (Directory.Exists(discovered)) Directory.Delete(discovered, recursive: true);
+        var artifactPath = Path.Combine(_options.CacheDirectory, "artifacts", $"{build.Packages.Id}.zip");
+        if (File.Exists(artifactPath)) File.Delete(artifactPath);
         _github.CorruptDownload = true;
         await Assert.That(async () => await cache.GetAsync("vpk", build, Cancellation)).ThrowsExactly<InvalidDataException>();
-        await Assert.That(Directory.Exists(Path.Combine(_options.CacheDirectory, "packages", "discovered"))).IsFalse();
+        await Assert.That(Directory.Exists(discovered)).IsFalse();
         await Assert.That(Directory.GetDirectories(_options.CacheDirectory, "staging-*")).IsEmpty();
         _github.CorruptDownload = false;
         await Assert.That(File.Exists(await cache.GetAsync("vpk", build, Cancellation))).IsTrue();
@@ -335,9 +348,9 @@ public sealed class ProxyTests : IDisposable
         using var client = new HttpClient { BaseAddress = new Uri(baseUrl) };
         using var versions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
         var listed = versions.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
-        const string forkVersion = "1.3.67-pr.755.run.100.attempt.1.artifact.2";
-        const string sameVersion = "1.3.67-pr.756.run.101.attempt.1.artifact.2";
-        const string explicitVersion = "1.3.67-pr.757.run.102.attempt.1.artifact.2";
+        var forkVersion = PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 1, 2);
+        var sameVersion = PackageRewriter.VersionFor("1.3.67-gabcdef0", 756, 101, 1, 2);
+        var explicitVersion = PackageRewriter.VersionFor("1.3.67-gabcdef0", 757, 102, 1, 2);
         await Assert.That(listed.Length).IsEqualTo(3);
         await Assert.That(listed).Contains(forkVersion);
         await Assert.That(listed).Contains(sameVersion);
