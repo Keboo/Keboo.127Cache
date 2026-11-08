@@ -166,7 +166,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         Directory.CreateDirectory(cache);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile("owner/repo", "ci.yml",
-                [new RunArtifacts(99, 1, 42, "old", github.Packages, null)]), CancellationToken.None);
+                [new RunArtifacts(99, 1, 42, "old", github.Packages, null, WorkflowVerified: true)], SchemaVersion: 2), CancellationToken.None);
         var entries = new Dictionary<string, string?>
         {
             ["Proxy:Repository"] = "owner/repo",
@@ -205,9 +205,9 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile("owner/repo", "ci.yml",
             [
-                new RunArtifacts(90, 1, 42, "previously-pinned", github.Packages, null),
-                new RunArtifacts(999, 1, 43, "closed", github.Packages, null)
-            ]), CancellationToken.None);
+                new RunArtifacts(90, 1, 42, "previously-pinned", github.Packages, null, WorkflowVerified: true),
+                new RunArtifacts(999, 1, 43, "closed", github.Packages, null, WorkflowVerified: true)
+            ], SchemaVersion: 2), CancellationToken.None);
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Proxy:Repository"] = "owner/repo",
@@ -277,7 +277,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         var runsFile = Path.Combine(cache, "runs.json");
         await JsonSettings.WriteAtomicAsync(runsFile,
             new RunArtifactsFile("owner/repo", "ci.yml",
-                [new RunArtifacts(100, 1, 42, "cached", github.Packages with { Name = "old" }, null)]),
+                [new RunArtifacts(100, 1, 42, "cached", github.Packages with { Name = "old" }, null, WorkflowVerified: true)], SchemaVersion: 2),
             CancellationToken.None);
         var original = await File.ReadAllTextAsync(runsFile);
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -354,7 +354,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
             Directory.CreateDirectory(cache);
             await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
                 new RunArtifactsFile("owner/repo", "ci.yml",
-                    [new RunArtifacts(100, 1, 42, "current", github.Packages, null)]), CancellationToken.None);
+                    [new RunArtifacts(100, 1, 42, "current", github.Packages, null, WorkflowVerified: true)], SchemaVersion: 2), CancellationToken.None);
             await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
                 new CatalogFile("owner/repo",
                     [new BuildEntry(100, 1, 42, "current", "1.2.3",
@@ -436,7 +436,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         var versionArtifact = new Artifact(8, "build-version", false, null);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile("owner/repo", "ci.yml",
-                [new RunArtifacts(100, 1, 42, "current", github.Packages, versionArtifact)]), CancellationToken.None);
+                [new RunArtifacts(100, 1, 42, "current", github.Packages, versionArtifact, WorkflowVerified: true)], SchemaVersion: 2), CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
             new CatalogFile("owner/repo",
                 [new BuildEntry(100, 1, 42, "current", "9.0.0",
@@ -477,7 +477,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         var runsFile = Path.Combine(cache, "runs.json");
         await JsonSettings.WriteAtomicAsync(runsFile,
             new RunArtifactsFile("owner/repo", "ci.yml",
-                [new RunArtifacts(100, 1, 42, "current", github.Packages, null)]), CancellationToken.None);
+                [new RunArtifacts(100, 1, 42, "current", github.Packages, null, WorkflowVerified: true)], SchemaVersion: 2), CancellationToken.None);
         var original = await File.ReadAllTextAsync(runsFile);
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {

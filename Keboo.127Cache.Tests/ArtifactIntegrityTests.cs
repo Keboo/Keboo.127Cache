@@ -284,7 +284,7 @@ public sealed class ArtifactIntegrityTests
     [Test]
     public async Task ConcurrentReadersAndWritersNeverPublishMismatchedPairs()
     {
-        for (var iteration = 0; iteration < 32; iteration++)
+        for (var iteration = 0; iteration < 96; iteration++)
         {
             using var fixture = new Fixture();
             var rendezvous = new DownloadRendezvous();

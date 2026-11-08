@@ -28,6 +28,8 @@ public sealed class ArtifactCache
         _integrity = new ArtifactIntegrityStore(logger);
     }
 
+    internal ArtifactCache CreateIndependent() => new(_options, _github, _logger);
+
     public bool Contains(Artifact artifact) => File.Exists(GetPath(artifact));
 
     private string GetPath(Artifact artifact) => Path.Combine(_options.CacheDirectory, "artifacts", $"{artifact.Id}.zip");

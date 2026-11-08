@@ -20,10 +20,12 @@ public sealed record WorkflowRun(
     string Event,
     [property: JsonPropertyName("pull_requests")] PullRequestInfo[] PullRequests,
     [property: JsonPropertyName("head_branch")] string? HeadBranch = null,
-    [property: JsonPropertyName("head_repository")] GitHubRepository? HeadRepository = null);
+    [property: JsonPropertyName("head_repository")] GitHubRepository? HeadRepository = null,
+    [property: JsonPropertyName("workflow_id")] long? WorkflowId = null);
 public sealed record Artifact(long Id, string Name, bool Expired, string? Digest);
 public sealed record RunsResponse([property: JsonPropertyName("workflow_runs")] WorkflowRun[] Runs);
 public sealed record ArtifactsResponse(Artifact[] Artifacts);
+internal sealed record WorkflowInfo(long Id);
 
 public interface IGitHubClient
 {
@@ -96,10 +98,16 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
             runs.AddRange(response.Runs.Take(ProxyOptions.RunLimit - runs.Count));
             if (response.Runs.Length < 100) break;
         }
+        WorkflowInfo? workflow = null;
         foreach (var id in options.RunIds)
         {
+            if (runs.Any(x => x.Id == id)) continue;
+            workflow ??= await GetAsync<WorkflowInfo>(
+                $"repos/{options.Repository}/actions/workflows/{options.Workflow}", cancellationToken);
+            if (workflow.Id <= 0) throw new PinnedRunWorkflowException();
             var run = await GetAsync<WorkflowRun>($"repos/{options.Repository}/actions/runs/{id}", cancellationToken);
-            if (runs.All(x => x.Id != id)) runs.Add(run);
+            if (run.Id != id || run.WorkflowId != workflow.Id) throw new PinnedRunWorkflowException();
+            runs.Add(run);
         }
         return runs;
     }

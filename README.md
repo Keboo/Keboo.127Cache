@@ -10,11 +10,14 @@ package lists do not need to be maintained by hand.
 - .NET 10 SDK/runtime
 - For a configured source, GitHub CLI (`gh`) installed and authenticated with
   permission to read its repository's pull requests, workflow runs, and artifacts
+  for live discovery and downloads. An existing offline snapshot can be served
+  without `gh`.
 
-The tool only downloads artifact contents when a request needs them. At startup
-it queries open pull requests, completed successful workflow runs, and artifact
-metadata, then caches that metadata locally. With no configured sources, the
-server starts with an empty feed and does not contact GitHub.
+The tool only downloads artifact contents when a feed request needs them.
+At startup it begins querying open pull requests, completed successful workflow
+runs, and artifact metadata in the background; the listener does not wait for
+GitHub. With no configured sources, the server starts with an empty feed and
+does not contact GitHub.
 
 ## Install and run
 
@@ -192,7 +195,10 @@ On first package access, every NuGet package in that build's configured artifact
 is discovered from its nuspec, rewritten to an immutable PR/run-specific
 version, and cached. The feed exposes only the packages actually present in each
 build. Dependencies on packages in the same artifact are pinned to their
-corresponding rewritten versions.
+corresponding rewritten versions. Before use, each cached nupkg's ZIP entries
+are read in full and checked for their recorded lengths and CRCs; a readable
+nuspec alone does not establish a healthy payload. CRCs detect corruption, not
+malicious replacement by someone who can also change the recorded CRC.
 
 For example, `1.2.0` becomes
 `1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200`, while `1.2.0-beta.3+sha`
@@ -255,6 +261,116 @@ overwritten. When an open PR falls outside the recent discovery window, its
 latest known cached run remains visible until a newer successful run is found.
 Closed PRs disappear from the feed on the next discovery refresh.
 
+## Offline use and health
+
+Offline behavior applies only to discovery **outages** (GitHub API unreachable or failing).
+While discovery succeeds, the feed serves the latest run of each open PR plus pinned
+RunIds; a skipped, expired, missing or failed build is logged and isolated, and healthy
+builds keep serving without a 503. Earlier retained runs and snapshots are served only
+during an outage.
+
+Before going offline, complete at least one successful discovery and request
+the desired packages so their artifacts or rewritten packages are cached. The
+app saves the **visible build set** from each successful discovery separately
+from historical `runs.json` metadata. The snapshot is specific to the
+repository, workflow, artifact names, PR/run selections, and run limit. A
+corrupt snapshot or one from a different source is not replaced with guessed
+visibility. If only selections or the run limit change, source-matching
+historical runs may still be filtered and served offline, but their membership
+is explicitly `unknown`; excluded selections remain excluded.
+
+Released caches without a snapshot can still be used offline when their
+`runs.json` identifies the configured repository and workflow. The app filters
+those historical runs by the configured artifact names and PR/run selections.
+**Their open-PR membership is unknown**: they can include PRs closed long ago,
+and omit other builds. No refresh time or authoritative snapshot is invented.
+Aggregate search, autocomplete, and `/builds` return 503 in this legacy mode;
+known readable packages and complete per-package indexes remain usable with an
+explicit `unknown` membership and `legacy-unverified` provenance. A legacy
+`runs.json` workflow label does not prove whether a run was originally added
+through a repository-wide pin. Known unverified pinned runs are excluded until
+live workflow and artifact association verification succeeds; other legacy runs
+may also have originated from an unrecorded pin. Operators requiring strict
+workflow provenance should not use this unverified legacy fallback. A
+catalog-only cache cannot establish workflow identity and is not guessed.
+If catalog and run metadata disagree, version indexes return 503 rather than
+hiding a cached version. Live discovery can corroborate matching runs and their
+artifact identities; uncorroborated metadata remains incomplete.
+
+If GitHub discovery or a required download fails, the server remains running
+and serves usable packages from the last successful snapshot. Open-PR membership
+is stale: a PR closed since that refresh can remain visible, while newly opened
+PRs or newer builds can be missing. Feed requests with locally usable content
+can serve it while a single shared discovery retry is in progress, without
+waiting for the `gh` timeout. Each later request retries after a failure;
+failures are not cached as an empty successful result. Once discovery succeeds,
+the feed uses the newly refreshed membership. Historical metadata and cached
+packages are not deleted when a PR disappears from the feed. A blocked download,
+catalog gate, or offline artifact repair does not make unrelated cached requests
+wait indefinitely; requests fall back to verifiable local content or return 503
+after a short bounded wait. A cold feed with blocked discovery returns 503.
+
+The app retains a source- and build-bound package inventory under `inventories`
+after successful materialization. It can therefore distinguish an unavailable
+Beta-only build from one that might contain another Alpha version, even if its
+rewritten directory and raw ZIP are later removed. The inventory includes a
+local SHA-256 checksum to detect accidental changes; it is not an authenticated
+provider statement. Someone able to change both its contents and checksum can
+forge it, so protect the entire cache from untrusted writers. Invalid or
+disagreeing inventories cannot prove index completeness.
+
+When discovery has observed an unavailable build, inconsistent metadata, or a
+pinned workflow mismatch, an `incomplete-discovery.json` marker preserves that
+uncertainty across restarts without replacing the last successful snapshot. A
+complete live refresh removes the marker. An unreadable marker fails closed
+rather than becoming a successful empty discovery. Transient read errors are
+retried, allowing a valid marker to restore its partial state; invalid metadata
+remains blocked until a complete live refresh.
+
+`GET /health` returns HTTP 200 with `status` (`ok` or `degraded`), a safe
+`error` message, and `lastSuccessfulRefreshUtc` (or `null` if there has been no
+successful snapshot). `membership` is `current`, `stale`, or `unknown`. Health
+responds without waiting for GitHub and initially reports degraded while
+discovery is pending. `ok` reflects the last successful refresh and no known
+unresolved content failure, not a continuous connectivity or integrity check;
+`/health` itself does not trigger a retry. The response also reports
+`snapshotBuilds` and, after checking cached content, counts of
+`availableCachedBuilds`, `unavailableBuilds`, `unavailablePackages`, and
+`unavailableBuildMetadata`. A known content failure remains degraded after a
+metadata refresh until a complete content check succeeds. `provenance` is
+`verified`, `legacy-unverified`, `incomplete`, or `unknown`; verification
+describes the run/workflow and artifact association, not a package signature.
+
+Degraded responses based on an available cached view carry `X-127Cache-Status`,
+`X-127Cache-Membership`, `X-127Cache-Provenance`, and a stale `Warning` header.
+The status is `degraded-partial` when content or discovery is incomplete. Search,
+autocomplete, and `/builds` then return 503 instead of claiming complete
+results. Flat and registration version indexes return 503 with problem details
+if a known version of that package is unavailable, or an unavailable build's
+package inventory is unknown. A known healthy package remains downloadable by
+ID and version; an unrelated package index can succeed with `degraded-partial`
+when retained inventories prove its cached versions are complete. An unknown
+or missing package returns 503 rather than a misleading 404.
+
+Missing or expired **unpinned** discovered builds are skipped without hiding
+healthy builds, but discovery remains degraded and incomplete and no successful
+snapshot is written. An unknown skipped build could contain any package, so
+version indexes return 503; an already-known healthy package remains
+downloadable by its exact ID and version. An unavailable pinned build fails
+explicitly. Cached raw artifacts can reconstruct missing rewritten packages
+offline, including artifacts that have since expired; damaged or unreadable
+cache files are preserved. A
+digest-less legacy ZIP without its SHA-256 record cannot be used for
+reconstruction, although an already rewritten readable package remains usable.
+
+When discovery fails and neither a matching nonempty snapshot nor a usable
+legacy view is available, feed requests (including the service index) return
+HTTP 503 with problem details and `Retry-After`, not an empty successful feed.
+Check `/health` for the reason. If `gh` is missing, install it from
+<https://cli.github.com/>; if authentication has expired, run `gh auth login`
+and `gh auth status` and check repository access. Diagnostics do not include
+raw CLI stderr or tokens.
+
 ## Development
 
 ```powershell
@@ -275,7 +391,11 @@ simulate the `dotnet tool` commands and do not install a global tool.
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol
 and artifact-cache tests live in `Keboo.127Cache.Proxy.Tests`, with additional
-artifact-integrity regression tests in `Keboo.127Cache.Tests`.
+artifact-integrity regression tests in `Keboo.127Cache.Tests`. The TUnit projects
+also build a small fake `gh` executable for process-level offline and
+authentication tests.
+The released-main disk-cache fixture can be regenerated from its pinned Git
+revision with `scripts/New-ReleasedCacheFixture.ps1`.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for test conventions and coverage commands.
 On Linux and macOS, the artifact-integrity tests require a C compiler available
 as `cc` to build their native `flock` fault injector.

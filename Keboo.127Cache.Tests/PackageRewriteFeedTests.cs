@@ -154,9 +154,9 @@ public class PackageRewriteFeedTests
         var expiredPackages = github.Packages with { Expired = true };
         var expiredVersion = github.Version with { Expired = true };
         var legacyBuild = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3", legacyVersion, expiredPackages, expiredVersion);
-        var run = new RunArtifacts(100, 1, 755, "head", expiredPackages, expiredVersion);
+        var run = new RunArtifacts(100, 1, 755, "head", expiredPackages, expiredVersion, WorkflowVerified: true);
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "runs.json"),
-            new RunArtifactsFile(options.Repository, options.Workflow, [run]), CancellationToken.None);
+            new RunArtifactsFile(options.Repository, options.Workflow, [run], SchemaVersion: 2), CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "catalog.json"),
             new { options.Repository, Builds = new[] { legacyBuild } }, CancellationToken.None);
         var oldDirectory = Path.Combine(options.CacheDirectory, "packages", "discovered", "755.100.1.200");
@@ -242,9 +242,9 @@ public class PackageRewriteFeedTests
         var healthy = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3",
             "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200", github.Packages, github.Version);
         var runs = new[] { unavailable, healthy }.Select(x =>
-            new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList();
+            new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact, WorkflowVerified: true)).ToList();
         await JsonSettings.WriteAtomicAsync(Path.Combine(cacheDirectory, "runs.json"),
-            new RunArtifactsFile(options.Repository, options.Workflow, runs), CancellationToken.None);
+            new RunArtifactsFile(options.Repository, options.Workflow, runs, SchemaVersion: 2), CancellationToken.None);
         var catalogPath = Path.Combine(cacheDirectory, "catalog.json");
         await JsonSettings.WriteAtomicAsync(catalogPath,
             new { options.Repository, Builds = new[] { unavailable, healthy } }, CancellationToken.None);
@@ -321,9 +321,9 @@ public class PackageRewriteFeedTests
         var closed = new BuildEntry(99, 1, 756, "closed", "1.2.0-beta.3",
             "1.2.0-pr.756.run.r0000000000000000099.attempt.1.artifact.300", closedArtifact, github.Version);
         var runs = new[] { open, closed }.Select(x =>
-            new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList();
+            new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact, WorkflowVerified: true)).ToList();
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "runs.json"),
-            new RunArtifactsFile(options.Repository, options.Workflow, runs), CancellationToken.None);
+            new RunArtifactsFile(options.Repository, options.Workflow, runs, SchemaVersion: 2), CancellationToken.None);
         var catalogPath = Path.Combine(options.CacheDirectory, "catalog.json");
         await JsonSettings.WriteAtomicAsync(catalogPath, new { options.Repository, Builds = new[] { open, closed } }, CancellationToken.None);
         var originalCatalog = await File.ReadAllTextAsync(catalogPath);
@@ -531,7 +531,7 @@ public class PackageRewriteFeedTests
             new(101, 1, 755, "unavailable", github.Packages, unavailableVersion)
         };
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "runs.json"),
-            new RunArtifactsFile(options.Repository, options.Workflow, runs), CancellationToken.None);
+            new RunArtifactsFile(options.Repository, options.Workflow, runs, SchemaVersion: 2), CancellationToken.None);
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var logger = new CollectingLogger<PackageCatalog>();
@@ -581,7 +581,7 @@ public class PackageRewriteFeedTests
         var builds = new[] { healthy, invalid };
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile(options.Repository, options.Workflow, builds.Select(x =>
-                new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList()),
+                new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact, WorkflowVerified: true)).ToList(), SchemaVersion: 2),
             CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
             new CatalogFile(options.Repository, builds.ToList(), CacheSchema.Version), CancellationToken.None);
@@ -745,11 +745,11 @@ public class PackageRewriteFeedTests
             (40L, "1.2.0-alpha.2")
         };
         github.Runs = originals.Select(x => new WorkflowRun(x.Item1, 1, "head", "completed", "success", "pull_request", [new(755)])).ToArray();
-        var runs = originals.Select(x => new RunArtifacts(x.Item1, 1, 755, "head", github.Packages, github.Version)).ToList();
+        var runs = originals.Select(x => new RunArtifacts(x.Item1, 1, 755, "head", github.Packages, github.Version, WorkflowVerified: true)).ToList();
         var builds = originals.Select(x => new BuildEntry(x.Item1, 1, 755, "head", x.Item2,
             PackageRewriter.VersionFor(x.Item2, 755, x.Item1, 1, github.Packages.Id), github.Packages, github.Version)).ToList();
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "runs.json"),
-            new RunArtifactsFile(options.Repository, options.Workflow, runs), CancellationToken.None);
+            new RunArtifactsFile(options.Repository, options.Workflow, runs, SchemaVersion: 2), CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "catalog.json"),
             new CatalogFile(options.Repository, builds, CacheSchema.Version), CancellationToken.None);
         using var memory = new MemoryCache(new MemoryCacheOptions());
@@ -778,7 +778,7 @@ public class PackageRewriteFeedTests
             new RunArtifactsFile(options.Repository, options.Workflow, [
                 new(outOfScope.RunId, outOfScope.Attempt, outOfScope.PullRequest, outOfScope.HeadSha, outOfScope.Packages, outOfScope.VersionArtifact),
                 new(pinnedUnavailable.RunId, pinnedUnavailable.Attempt, pinnedUnavailable.PullRequest, pinnedUnavailable.HeadSha, pinnedUnavailable.Packages, pinnedUnavailable.VersionArtifact)
-            ]), CancellationToken.None);
+            ], SchemaVersion: 2), CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cacheDirectory, "catalog.json"),
             new CatalogFile(options.Repository, [outOfScope, pinnedUnavailable], CacheSchema.Version), CancellationToken.None);
 
@@ -825,6 +825,7 @@ public class PackageRewriteFeedTests
         if (catalogLogger is not null) builder.Services.AddSingleton<ILogger<PackageCatalog>>(catalogLogger);
         var app = builder.Build();
         app.Services.GetRequiredService<ProxyOptions>().RunIds = runIds ?? [99];
+        app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync();
         app.Services.GetRequiredService<ProxyOptions>().BaseUrl = app.Urls.Single();
