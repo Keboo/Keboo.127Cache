@@ -6,11 +6,11 @@ public static class ProxyExtensions
 {
     public static IServiceCollection AddProxy(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddOptions<ProxyOptions>()
-            .Bind(configuration.GetSection("Proxy"))
-            .Validate(options => options.IsValid(), "Invalid proxy configuration.")
-            .ValidateOnStart();
-        services.AddSingleton(provider => provider.GetRequiredService<IOptions<ProxyOptions>>().Value);
+        services.AddLogging();
+        services.AddSingleton(provider =>
+            CacheConfigurationLoader.Load(configuration, provider.GetRequiredService<ILogger<CacheConfiguration>>()));
+        services.AddSingleton(provider => ProxyOptions.FromConfiguration(provider.GetRequiredService<CacheConfiguration>()));
+        services.AddSingleton<IOptions<ProxyOptions>>(provider => Options.Create(provider.GetRequiredService<ProxyOptions>()));
         services.AddMemoryCache();
         services.AddSingleton<IGitHubClient, GitHubClient>();
         services.AddSingleton<ArtifactCache>();
@@ -64,7 +64,7 @@ public static class ProxyExtensions
         app.MapGet("/health", (PackageCatalog catalog) => Results.Ok(catalog.GetHealth()));
         app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) =>
         {
-            var builds = await catalog.GetBuildsAsync(ct);
+            var builds = await catalog.GetScriptBuildsAsync(ct);
             catalog.EnsureAggregateComplete();
             return Results.Ok(builds);
         });

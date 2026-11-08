@@ -2,20 +2,22 @@
 
 `Keboo.127Cache` is a .NET global tool that serves NuGet packages produced by
 completed GitHub Actions pull-request builds through a local NuGet v3 feed. It
-discovers package IDs from each pipeline's `packages` artifact, so package lists
-do not need to be maintained by hand.
+discovers package IDs from each pipeline's configured package artifact, so
+package lists do not need to be maintained by hand.
 
 ## Requirements
 
 - .NET 10 SDK/runtime
-- GitHub CLI (`gh`) installed and authenticated with permission to read the
-  repository's pull requests, workflow runs, and artifacts for live discovery
-  and downloads. An existing offline snapshot can be served without `gh`.
+- For a configured source, GitHub CLI (`gh`) installed and authenticated with
+  permission to read its repository's pull requests, workflow runs, and artifacts
+  for live discovery and downloads. An existing offline snapshot can be served
+  without `gh`.
 
 The tool only downloads artifact contents when a feed request needs them.
 At startup it begins querying open pull requests, completed successful workflow
 runs, and artifact metadata in the background; the listener does not wait for
-GitHub.
+GitHub. With no configured sources, the server starts with an empty feed and
+does not contact GitHub.
 
 ## Install and run
 
@@ -35,8 +37,8 @@ dotnet run --project .\Keboo.127Cache\Keboo.127Cache.csproj -- serve
 The default feed is `http://localhost:55631/v3/index.json`. Check
 `http://localhost:55631/health` to see whether the service is running.
 
-To select a particular pull request and listen on the default address, copy
-`proxy.example.json`, edit its `Proxy` section, then run:
+To configure a source, copy `proxy.example.json`, replace the example repository,
+workflow, and artifact with your own, then run:
 
 ```powershell
 keboo-127cache serve --config .\proxy.json
@@ -52,50 +54,91 @@ PR build install/restore/removal against an already-running proxy.
 
 ## Configuration
 
-Configuration can be supplied in `appsettings.json`, a file passed to
-`serve --config`, or environment variables using the `Proxy__` prefix.
+Configuration layers have the following precedence, from lowest to highest:
+
+1. Built-in defaults and the tool's `appsettings.json`.
+2. The optional per-user file: `%APPDATA%\Keboo.127Cache\config.json` on Windows;
+   `$XDG_CONFIG_HOME/keboo-127cache/config.json`, or
+   `~/.config/keboo-127cache/config.json` when `XDG_CONFIG_HOME` is unset or not
+   an absolute path, elsewhere.
+3. An explicit JSON file passed to `serve --config` (the file must exist).
+4. Environment variables, using `__` between section names, for example
+   `Server__BaseUrl` or `Sources__0__Repository`.
+
+Each JSON `Sources` array replaces an earlier array, including when it is empty.
+In the same JSON layer, a `Sources` array takes precedence over all legacy
+`Proxy` source fields. For environment variables, legacy `Proxy__` source fields
+first override source 0, retaining its other inherited fields (or using legacy
+defaults when no source exists). Indexed `Sources__0__` fields then override the
+corresponding fields, so a modern environment field wins only when both forms
+set the same field. An explicitly configured source name stays unchanged; a
+legacy-derived name follows the resulting repository.
+
+A JSON `Sources` value must be an array, not a scalar or an object with numeric
+keys. A JSON `Server` value must be an object; `{}` preserves inherited settings.
+Partial environment overrides do not hide malformed section shapes. A complete
+later source configuration can replace an earlier malformed `Sources` value.
+An empty or absent `Sources` array is valid; there is no default repository.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `Repository` | `velopack/velopack` | GitHub owner/repository |
-| `Workflow` | `build.yml` | Workflow filename to query |
-| `PackagesArtifact` | `packages` | Run artifact containing `.nupkg` files |
-| `VersionArtifact` | `build-version` | Artifact containing root `version.txt`, used by `/builds` |
-| `PullRequests` | `[]` | Optional allowlist of open PR numbers |
-| `RunIds` | `[]` | Additional completed successful PR run IDs to include |
-| `RunLimit` | `100` | Number of recent successful PR runs to scan (1–500) |
-| `RefreshSeconds` | `120` | Lifetime of cached GitHub discovery data (minimum 10) |
-| `BaseUrl` | `http://localhost:55631` | Loopback URL advertised in feed metadata |
-| `CacheDirectory` | Per-user local app data | Location for metadata, artifacts, and rewritten packages |
+| `Server.BaseUrl` | `http://localhost:55631` | HTTP(S) loopback origin for listening and feed metadata; no trailing slash |
+| `Server.CacheDirectory` | `null` (per-user local app data) | Location for metadata, artifacts, and rewritten packages |
+| `Server.RefreshSeconds` | `120` | Lifetime of cached GitHub discovery data (minimum 10 seconds) |
+| `Sources` | `[]` | Flat list of independently configured sources |
+| `Sources[n].Name` | Required | Stable, case-insensitively unique filesystem key of up to 255 ASCII letters, digits, `.`, `_`, `-`, excluding reserved names and trailing `.` |
+| `Sources[n].Repository` | Required | GitHub `owner/repository` |
+| `Sources[n].Workflow` | Required | Workflow filename to query |
+| `Sources[n].Artifact` | Required | Run artifact containing `.nupkg` files |
+| `Sources[n].VersionArtifact` | `null` | Optional artifact containing root `version.txt`, used for the legacy `/builds` version |
+| `Sources[n].Type` | `GitHubActions` | Source type; only `GitHubActions` is currently supported |
 
-Example:
+`/builds` supports the existing `vpk` installer scripts. Without
+`VersionArtifact`, it downloads the packages artifact on its first request and
+uses the `vpk` package's own version; builds without `vpk` are omitted from
+`/builds`. All packages remain available through the feed with their own versions.
+
+Example (the same schema can contain several independent entries):
 
 ```json
 {
-  "Urls": "http://localhost:55631",
-  "Proxy": {
-    "Repository": "velopack/velopack",
-    "Workflow": "build.yml",
-    "PackagesArtifact": "packages",
-    "VersionArtifact": "build-version",
-    "PullRequests": [755],
-    "RunIds": [],
+  "Server": {
     "BaseUrl": "http://localhost:55631",
-    "RefreshSeconds": 120,
-    "RunLimit": 100
-  }
+    "CacheDirectory": null,
+    "RefreshSeconds": 120
+  },
+  "Sources": [
+    {
+      "Name": "widgets",
+      "Repository": "contoso/widgets",
+      "Workflow": "ci.yml",
+      "Artifact": "packages"
+    }
+  ]
 }
 ```
 
-The tool discovers the latest completed, successful run for each selected open
-PR and retains previously cached runs for that PR, even if they fall outside
-the current run listing. Queued, running, failed, cancelled, and non-PR runs
-are excluded. Explicit run IDs still have to belong to an open PR and the
-configured workflow. For IDs outside the workflow listing, the app verifies
-the run's workflow ID against the configured workflow before including it.
-The app refreshes GitHub discovery on startup and after the in-memory cache
-expires. Startup discovery lists run artifacts but does not download their
-contents.
+**Multi-source serving is not implemented yet:** a list with multiple valid
+sources passes configuration validation, but starting the server fails with a
+clear message until source aggregation and source-scoped caches are implemented
+in [#9](https://github.com/Keboo/Keboo.127Cache/issues/9). Configure at most one
+source in the meantime; the tool never silently serves only the first entry.
+
+The legacy `Proxy` section still maps to one source and logs a deprecation
+warning. `Proxy.Repository` supplies the source name from its repository
+component (prefixed when needed for filesystem safety), and
+`Proxy.PackagesArtifact` maps to `Artifact`; legacy server fields map to
+`Server`. The old default workflow, packages artifact, and version
+artifact are retained for legacy configurations, but a repository is required.
+`Proxy.PullRequests`, `Proxy.RunIds`, and `Proxy.RunLimit` are ignored, each
+with a warning. Across layers, the higher-precedence source configuration wins
+subject to the environment-field behavior above. Use `Server` and `Sources`
+for new configurations.
+
+The tool serves the latest completed, successful run for each open PR. Queued,
+running, failed, cancelled, and non-PR runs are excluded. The app refreshes
+GitHub discovery on startup and after the in-memory cache expires. Startup lists
+run artifacts but does not download their contents.
 
 When GitHub omits a run's PR association, as it often does for forks, the app
 matches the current open PR head SHA and, when available, its head repository
@@ -148,7 +191,7 @@ observed timestamps do not change (including due to filesystem timestamp
 resolution) until the next full verification, such as after a restart. It
 does not prevent changes between verification and use.
 
-On first package access, every NuGet package in that build's `packages` artifact
+On first package access, every NuGet package in that build's configured artifact
 is discovered from its nuspec, rewritten to an immutable PR/run-specific
 version, and cached. The feed exposes only the packages actually present in each
 build. Dependencies on packages in the same artifact are pinned to their
@@ -157,13 +200,66 @@ are read in full and checked for their recorded lengths and CRCs; a readable
 nuspec alone does not establish a healthy payload. CRCs detect corruption, not
 malicious replacement by someone who can also change the recorded CRC.
 
+For example, `1.2.0` becomes
+`1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200`, while `1.2.0-beta.3+sha`
+becomes `1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200`. Original
+prerelease labels are retained and build metadata is dropped. NuGet's
+four-part versions are also supported. The rewritten version is used in the
+nuspec, core properties, feed metadata, and exact in-artifact dependency pins;
+external dependency ranges are unchanged.
+
+Rewriting invalidates a package signature, so the signature is removed and
+logged; the served package is unsigned. Schema v4 regenerates the complete
+inventory from each SHA256-verified raw artifact rather than trusting a
+potentially incomplete v1 or v2 inventory. Rewritten packages use short
+internal filenames without changing their public versions. An integrity record
+binds the inventory to the artifact digest and records the SHA256 of each
+rewritten package; package identities and hashes are checked before a build is
+advertised or served. These checks detect accidental corruption, not malicious
+changes by someone who can also edit the integrity record.
+
+Before upgrading a saved catalog, the tool compares each inventory with the
+complete verified raw artifact for every known build, including closed PRs. If
+one artifact is unavailable or invalid, that build is logged and excluded while
+healthy builds remain available; the older catalog, packages, and raw artifacts
+are retained. The next request retries migration. Restore an expired artifact's
+matching raw ZIP to the artifact cache to resume migration. After migration, an
+intact v4 cache remains usable without the raw artifact.
+For a corrupt v4 cache, restore the matching inventory, integrity record, and
+package bytes from a trusted backup. Alternatively, first preserve the affected
+build directory elsewhere, then remove that directory only if its verified raw
+artifact is available; the next request can regenerate it.
+
+NuGet clients commonly write `<id>.<version>.nupkg.sha512` in their global
+package cache. On Windows, if this filename would exceed the 255-character
+(UTF-16 code unit) component limit, the entire build is logged and excluded.
+On Unix-like systems, the guard uses the 255-byte UTF-8 component limit. The
+approved public version is not shortened. Producing a new build with a shorter
+original prerelease label or package ID can avoid this limit, but this does not
+guarantee compatibility with stricter client or filesystem component/total-path
+limits.
+
+The feed enumerates run IDs numerically, including IDs larger than
+`Int32.MaxValue`. Registration page bounds instead follow NuGet's version
+comparer so exact-version dependency resolution works. When that order differs
+from numeric order, the feed uses one-version registration pages so each page's
+bounds are valid under either ordering. Some clients, including
+NuGet.Versioning 7.9, compare oversized numeric prerelease identifiers lexically.
+The rewritten `run` token avoids that path by using an `r` prefix plus a
+fixed-width 19-digit decimal value (for example `r0000000003000000000`), so
+floating version selection and real SDK restores choose newer run IDs correctly
+under the approved format.
+
 Keep the normal NuGet feeds enabled for external dependencies; this local feed
 contains only packages from the configured workflow artifacts. If using NuGet
 Package Source Mapping, allow the desired package IDs from this local source.
 
 The app refuses simultaneous instances sharing a cache directory, and refuses a
-cache belonging to a different repository or workflow. Closed PRs disappear from
-the feed on the next discovery refresh.
+cache belonging to a different repository or workflow. Changing a configured
+artifact may require a different cache directory; cached run metadata is not
+overwritten. When an open PR falls outside the recent discovery window, its
+latest known cached run remains visible until a newer successful run is found.
+Closed PRs disappear from the feed on the next discovery refresh.
 
 ## Offline use and health
 
@@ -282,6 +378,9 @@ $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
 & (Join-Path 'scripts' 'Test-PackedTool.ps1') -PackageDirectory NuGet -ExpectedSha256 $sha256
 & (Join-Path 'scripts' 'Test-InstallState.ps1')
 ```
+
+Installer compatibility tests require PowerShell 7.2 or later (`pwsh`). They
+simulate the `dotnet tool` commands and do not install a global tool.
 
 The solution follows the template's `Keboo.127Cache` / `Keboo.127Cache.Tests`
 layout. The proxy implementation is kept in the main tool project; proxy protocol

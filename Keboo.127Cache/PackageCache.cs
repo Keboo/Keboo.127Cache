@@ -1,23 +1,25 @@
 using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
-
+using System.Xml.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
-
 using NuGet.Packaging;
+using NuGet.Packaging.Core;
 using NuGet.Versioning;
 
 namespace Keboo._127Cache;
 
 public sealed record CachedPackage(string Id, string OriginalVersion, string Version);
+
 internal sealed record CachedPackageAvailability(CachedPackage[] Packages, string[] MissingPackageIds, bool HasInventory)
 {
     public int MissingPackages => MissingPackageIds.Length;
 }
 
 public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
-    IGitHubClient? github = null, ILogger<ArtifactCache>? logger = null)
+    ILogger<PackageCache>? logger = null, IGitHubClient? github = null)
 {
     private sealed record InventoryData(
         string Repository, string Workflow, long RunId, int Attempt, int PullRequest, string HeadSha,
@@ -30,8 +32,14 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly ConcurrentDictionary<long, ArtifactCache> _versionArtifactCaches = new();
     private readonly Dictionary<long, ArtifactCache> _packageArtifactCaches = [];
+    private sealed record PackageDigest(string Id, string Sha256);
+    // The seal detects corruption; migration separately verifies completeness against the raw artifact.
+    private sealed record InventorySeal(int SchemaVersion, long ArtifactId, string? ArtifactDigest,
+        string InventorySha256, PackageDigest[] Packages);
 
-    private string DirectoryFor(BuildEntry build) => Path.Combine(options.CacheDirectory, "packages", "discovered",
+    private readonly ILogger<PackageCache> _logger = logger ?? NullLogger<PackageCache>.Instance;
+
+    private string DirectoryFor(BuildEntry build) => Path.Combine(options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}",
         $"{build.PullRequest}.{build.RunId}.{build.Attempt}.{build.Packages.Id}");
 
     private string InventoryPath(BuildEntry build) => Path.Combine(options.CacheDirectory, "inventories",
@@ -42,7 +50,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     internal Task<string> GetVersionArtifactAsync(Artifact artifact, CancellationToken cancellationToken) =>
         github is null ? artifacts.GetAsync(artifact, cancellationToken)
         : _versionArtifactCaches.GetOrAdd(artifact.Id,
-            _ => new ArtifactCache(options, github, logger ?? NullLogger<ArtifactCache>.Instance))
+            _ => new ArtifactCache(options, github, NullLogger<ArtifactCache>.Instance))
             .GetAsync(artifact, cancellationToken);
 
     private Task<string> GetPackageArtifactAsync(Artifact artifact, CancellationToken cancellationToken)
@@ -54,7 +62,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             if (!_packageArtifactCaches.TryGetValue(artifact.Id, out cache!))
             {
                 cache = _packageArtifactCaches.Count == 0 ? artifacts
-                    : new ArtifactCache(options, github, logger ?? NullLogger<ArtifactCache>.Instance);
+                    : new ArtifactCache(options, github, NullLogger<ArtifactCache>.Instance);
                 _packageArtifactCaches.Add(artifact.Id, cache);
             }
         }
@@ -63,44 +71,162 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
 
     internal bool MightHaveCachedContent(RunArtifacts run)
     {
-        var directory = Path.Combine(options.CacheDirectory, "packages", "discovered",
-            $"{run.PullRequest}.{run.RunId}.{run.Attempt}.{run.Packages.Id}");
-        var retained = Path.Combine(options.CacheDirectory, "inventories",
-            $"{run.PullRequest}.{run.RunId}.{run.Attempt}.{run.Packages.Id}.json");
-        return File.Exists(Path.Combine(directory, "packages.json")) || File.Exists(retained) || artifacts.Contains(run.Packages);
+        var build = new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, "", "", run.Packages, run.VersionArtifact);
+        return File.Exists(Path.Combine(DirectoryFor(build), "packages.json")) || File.Exists(InventoryPath(build))
+            || artifacts.Contains(run.Packages);
+    }
+
+    private static string FileNameFor(string id) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(id.ToLowerInvariant()))) + ".nupkg";
+
+    private static PackageIdentity ReadIdentity(PackageArchiveReader reader, long artifactId)
+    {
+        try
+        {
+            using var stream = reader.GetNuspec();
+            PackageRewriter.ManifestIdentity(XDocument.Load(stream));
+            return reader.GetIdentity();
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or InvalidDataException)
+        {
+            throw new InvalidDataException($"Invalid package identity in artifact {artifactId}: {exception.Message}", exception);
+        }
+    }
+
+    private static void EnsureClientCacheSafe(CachedPackage package, BuildEntry build)
+    {
+        var clientFile = $"{package.Id.ToLowerInvariant()}.{package.Version.ToLowerInvariant()}.nupkg.sha512";
+        if (OperatingSystem.IsWindows())
+        {
+            var length = clientFile.Length;
+            if (length > 255)
+                throw new InvalidDataException($"Package {package.Id} {package.Version} in artifact {build.Packages.Id} requires a {length}-character " +
+                    "NuGet client cache filename, exceeding the 255-character Windows component limit. " +
+                    "The approved public version cannot be restored safely and was not changed.");
+            return;
+        }
+
+        var bytes = Encoding.UTF8.GetByteCount(clientFile);
+        if (bytes > 255)
+            throw new InvalidDataException($"Package {package.Id} {package.Version} in artifact {build.Packages.Id} requires a {bytes}-byte " +
+                "NuGet client cache filename, exceeding the 255-byte Unix component limit. " +
+                "The approved public version cannot be restored safely and was not changed.");
+    }
+
+    private static void ValidateFeedMetadata(PackageArchiveReader reader, long artifactId)
+    {
+        try
+        {
+            using (var stream = reader.GetNuspec())
+            {
+                var (metadata, _, _) = PackageRewriter.ManifestIdentity(XDocument.Load(stream));
+                foreach (var dependency in metadata.Elements().Where(x => x.Name.LocalName == "dependencies")
+                    .Descendants().Where(x => x.Name.LocalName == "dependency"))
+                {
+                    var id = (string?)dependency.Attribute("id");
+                    if (string.IsNullOrWhiteSpace(id) || !PackageIdValidator.IsValidPackageId(id))
+                        throw new InvalidDataException("A dependency has an invalid or missing package ID.");
+                    var range = (string?)dependency.Attribute("version");
+                    if (!string.IsNullOrWhiteSpace(range) && !VersionRange.TryParse(range, out _))
+                        throw new InvalidDataException($"Invalid dependency range '{range}' for {id}.");
+                }
+            }
+            var nuspec = reader.NuspecReader;
+            _ = nuspec.GetAuthors();
+            _ = nuspec.GetDescription();
+            _ = nuspec.GetPackageTypes().ToArray();
+            foreach (var group in nuspec.GetDependencyGroups())
+            {
+                _ = group.TargetFramework.GetShortFolderName();
+                foreach (var dependency in group.Packages)
+                    _ = dependency.VersionRange.ToNormalizedString();
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException or FormatException or InvalidOperationException
+            or InvalidDataException or PackagingException or System.Xml.XmlException)
+        {
+            throw new InvalidDataException($"Invalid dependency or package metadata in artifact {artifactId}: {exception.Message}", exception);
+        }
+    }
+
+    private static async Task<string> HashFileAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+    }
+
+    private static async Task<(Dictionary<string, string> Originals, List<CachedPackage> Packages)> ReadArtifactAsync(
+        BuildEntry build, string archivePath, string staging, CancellationToken cancellationToken)
+    {
+        var originals = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var packages = new List<CachedPackage>();
+        using var archive = ZipFile.OpenRead(archivePath);
+        foreach (var entry in archive.Entries.Where(x => x.FullName.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Artifact paths never become local filenames.
+            var original = Path.Combine(staging, Guid.NewGuid().ToString("N") + ".original");
+            using (var input = entry.Open())
+            {
+                await using var output = new FileStream(original, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                await input.CopyToAsync(output, cancellationToken);
+            }
+            using var reader = new PackageArchiveReader(original);
+            var identity = ReadIdentity(reader, build.Packages.Id);
+            if (!PackageIdValidator.IsValidPackageId(identity.Id))
+                throw new InvalidDataException($"Invalid package ID in artifact {build.Packages.Id}.");
+            if (!originals.TryAdd(identity.Id, original))
+                throw new InvalidDataException($"Duplicate {identity.Id} in artifact {build.Packages.Id}.");
+            var originalVersion = identity.Version.ToNormalizedString();
+            packages.Add(new CachedPackage(identity.Id, originalVersion,
+                PackageRewriter.VersionFor(originalVersion, build.PullRequest, build.RunId, build.Attempt, build.Packages.Id)));
+        }
+        if (packages.Count == 0)
+            throw new InvalidDataException($"Artifact {build.Packages.Id} contains no NuGet packages.");
+        return (originals, packages);
+    }
+
+    private static string? FindCachedPath(string directory, CachedPackage package)
+    {
+        var path = Path.Combine(directory, FileNameFor(package.Id));
+        if (File.Exists(path)) return path;
+        // A verified current-schema inventory may use the earlier public-identity filename.
+        var legacyName = $"{package.Id.ToLowerInvariant()}.{package.Version}.nupkg";
+        if (OperatingSystem.IsWindows() ? legacyName.Length > 255 : Encoding.UTF8.GetByteCount(legacyName) > 255) return null;
+        path = Path.Combine(directory, legacyName);
+        return File.Exists(path) ? path : null;
     }
 
     public async Task<string> GetAsync(string id, BuildEntry build, CancellationToken cancellationToken)
     {
-        var directory = DirectoryFor(build);
-        var index = Path.Combine(directory, "packages.json");
-        var retained = await ReadRetainedInventoryAsync(build, cancellationToken);
-        CachedPackage[]? existing = retained;
-        if (File.Exists(index))
-        {
-            existing = JsonSerializer.Deserialize<CachedPackage[]>(
-                await File.ReadAllTextAsync(index, cancellationToken), JsonSettings.Options);
-            if (!ValidInventory(existing, build)) throw new InvalidDataException("Invalid cached package inventory.");
-            if (retained is not null && !SameInventory(retained, existing!))
-                throw new InvalidDataException("Cached package inventories do not agree.");
-        }
-        var present = existing?.SingleOrDefault(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
-        if (present is not null && File.Exists(PackagePath(directory, present)))
-        {
-            var existingPath = PackagePath(directory, present);
-            if (!IsReadablePackage(existingPath, present))
-                throw new InvalidDataException($"Cached package {id} is invalid in artifact {build.Packages.Id}.");
-            return existingPath;
-        }
-
         var packages = await GetPackagesAsync(build, cancellationToken);
         var package = packages.SingleOrDefault(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidDataException($"Package {id} is not present in artifact {build.Packages.Id}.");
-        var path = PackagePath(directory, package);
-        if (!File.Exists(path)) throw new InvalidDataException($"Cached package {id} is missing from artifact {build.Packages.Id}.");
-        if (!IsReadablePackage(path, package))
-            throw new InvalidDataException($"Cached package {id} is invalid in artifact {build.Packages.Id}.");
-        return path;
+        return FindCachedPath(DirectoryFor(build), package)
+            ?? throw new InvalidDataException($"Cached package {id} is missing from artifact {build.Packages.Id}.");
+    }
+
+    internal async Task VerifyForMigrationAsync(BuildEntry build, CancellationToken cancellationToken)
+    {
+        var packages = await GetPackagesAsync(build, cancellationToken);
+        var archivePath = await GetPackageArtifactAsync(build.Packages, cancellationToken);
+        var staging = Path.Combine(options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        try
+        {
+            var (_, sourcePackages) = await ReadArtifactAsync(build, archivePath, staging, cancellationToken);
+            var source = sourcePackages.ToDictionary(x => x.Id, StringComparer.OrdinalIgnoreCase);
+            if (source.Count != packages.Length || packages.Any(package =>
+                !source.TryGetValue(package.Id, out var original)
+                || original.OriginalVersion != package.OriginalVersion || original.Version != package.Version))
+                throw new InvalidDataException($"Cached package inventory for artifact {build.Packages.Id} " +
+                    "does not match the complete verified raw artifact.");
+        }
+        finally
+        {
+            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+        }
     }
 
     public async Task<CachedPackage[]> GetPackagesAsync(BuildEntry build, CancellationToken cancellationToken)
@@ -113,23 +239,15 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
         {
             if (File.Exists(index))
             {
-                var cached = JsonSerializer.Deserialize<CachedPackage[]>(
-                    await File.ReadAllTextAsync(index, cancellationToken), JsonSettings.Options);
-                if (cached is null || !ValidInventory(cached, build))
-                    throw new InvalidDataException("Invalid cached package inventory.");
+                var inventory = ReadInventoryOrNull(index);
+                if (ValidInventory(inventory, build) && inventory!.Any(package => FindCachedPath(directory, package) is null))
+                    await RestoreFromArtifactAsync(build, directory, inventory, cancellationToken);
+                var packages = await VerifyCachedAsync(build, directory, index, cancellationToken);
                 var retained = await ReadRetainedInventoryAsync(build, cancellationToken);
-                if (retained is not null && !SameInventory(retained, cached))
+                if (retained is not null && !SameInventory(retained, packages))
                     throw new InvalidDataException("Cached package inventories do not agree.");
-                if (cached.Any(package => !File.Exists(PackagePath(directory, package))))
-                {
-                    await RestoreFromArtifactAsync(build, directory, cached, cancellationToken);
-                    if (cached.Any(package => !File.Exists(PackagePath(directory, package))))
-                        throw new InvalidDataException($"Cached packages for artifact {build.Packages.Id} are incomplete.");
-                }
-                if (cached.Any(package => !IsReadablePackage(PackagePath(directory, package), package)))
-                    throw new InvalidDataException($"Cached packages for artifact {build.Packages.Id} are invalid.");
-                await SaveRetainedInventoryAsync(build, cached, cancellationToken);
-                return cached;
+                await SaveRetainedInventoryAsync(build, packages, cancellationToken);
+                return packages;
             }
             var staging = Path.Combine(options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
             try
@@ -152,6 +270,17 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
         }
     }
 
+    private static CachedPackage[]? ReadInventoryOrNull(string index)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<CachedPackage[]>(File.ReadAllBytes(index), JsonSettings.Options);
+        }
+        catch (Exception exception) when (exception is JsonException or IOException)
+        {
+            return null;
+        }
+    }
     internal async Task<CachedPackageAvailability> GetAvailableOfflineAsync(
         BuildEntry build, CancellationToken cancellationToken, bool allowRepair = true)
     {
@@ -227,7 +356,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     }
 
     private static string PackagePath(string directory, CachedPackage package) =>
-        Path.Combine(directory, $"{package.Id.ToLowerInvariant()}.{package.Version}.nupkg");
+        FindCachedPath(directory, package) ?? Path.Combine(directory, FileNameFor(package.Id));
 
     private async Task<CachedPackage[]?> ReadRetainedInventoryAsync(BuildEntry build, CancellationToken cancellationToken)
     {
@@ -373,6 +502,9 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
                 {
                 }
             }
+            var seal = Path.Combine(directory, "integrity.json");
+            if (!File.Exists(seal) && File.Exists(Path.Combine(staging, "integrity.json")))
+                File.Move(Path.Combine(staging, "integrity.json"), seal);
             var index = Path.Combine(directory, "packages.json");
             if (!File.Exists(index))
                 await JsonSettings.WriteAtomicAsync(index, generated, cancellationToken);
@@ -385,45 +517,109 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
         }
     }
 
+    private async Task<CachedPackage[]> VerifyCachedAsync(
+        BuildEntry build, string directory, string index, CancellationToken cancellationToken)
+    {
+        CachedPackage[] packages;
+        var indexBytes = await File.ReadAllBytesAsync(index, cancellationToken);
+        try
+        {
+            packages = JsonSerializer.Deserialize<CachedPackage[]>(indexBytes, JsonSettings.Options)
+                ?? throw new InvalidDataException("Invalid cached package inventory.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Invalid cached package inventory.", exception);
+        }
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (packages.Length == 0) throw new InvalidDataException("Cached package inventory is empty.");
+        foreach (var package in packages)
+        {
+            if (package is null || string.IsNullOrEmpty(package.Id) || !PackageIdValidator.IsValidPackageId(package.Id) || !ids.Add(package.Id)
+                || !NuGetVersion.TryParse(package.OriginalVersion, out _)
+                || !NuGetVersion.TryParse(package.Version, out _)
+                || package.Version != PackageRewriter.VersionFor(package.OriginalVersion,
+                    build.PullRequest, build.RunId, build.Attempt, build.Packages.Id))
+                throw new InvalidDataException($"Invalid cached package identity for artifact {build.Packages.Id}.");
+            EnsureClientCacheSafe(package, build);
+            var path = FindCachedPath(directory, package)
+                ?? throw new InvalidDataException($"Cached package {package.Id} is missing from artifact {build.Packages.Id}.");
+            using var reader = new PackageArchiveReader(path);
+            var identity = ReadIdentity(reader, build.Packages.Id);
+            if (!identity.Id.Equals(package.Id, StringComparison.OrdinalIgnoreCase)
+                || !identity.Version.ToFullString().Equals(package.Version, StringComparison.Ordinal))
+                throw new InvalidDataException($"Cached package {package.Id} has a mismatched identity in artifact {build.Packages.Id}.");
+            ValidateFeedMetadata(reader, build.Packages.Id);
+            paths.Add(package.Id, path);
+        }
+        var sealPath = Path.Combine(directory, "integrity.json");
+        if (!File.Exists(sealPath))
+            throw new InvalidDataException($"Cached package inventory for artifact {build.Packages.Id} has no integrity record.");
+        InventorySeal seal;
+        try
+        {
+            seal = JsonSerializer.Deserialize<InventorySeal>(
+                await File.ReadAllBytesAsync(sealPath, cancellationToken), JsonSettings.Options)
+                ?? throw new InvalidDataException("Invalid cached package integrity record.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException($"Invalid package integrity record for artifact {build.Packages.Id}.", exception);
+        }
+        if (seal.SchemaVersion != CacheSchema.Version || seal.ArtifactId != build.Packages.Id
+            || !string.Equals(seal.ArtifactDigest, build.Packages.Digest, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(seal.InventorySha256, Convert.ToHexString(SHA256.HashData(indexBytes)), StringComparison.OrdinalIgnoreCase)
+            || seal.Packages is null || seal.Packages.Length != packages.Length)
+            throw new InvalidDataException($"Cached package inventory integrity failed for artifact {build.Packages.Id}.");
+        var digests = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var digest in seal.Packages)
+        {
+            if (digest is null || string.IsNullOrEmpty(digest.Id) || string.IsNullOrEmpty(digest.Sha256)
+                || !digests.TryAdd(digest.Id, digest.Sha256))
+                throw new InvalidDataException($"Invalid package integrity record for artifact {build.Packages.Id}.");
+        }
+        foreach (var package in packages)
+        {
+            if (!digests.TryGetValue(package.Id, out var expected)
+                || !string.Equals(expected, await HashFileAsync(paths[package.Id], cancellationToken), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Cached package {package.Id} failed SHA256 integrity verification in artifact {build.Packages.Id}.");
+        }
+        return packages;
+    }
+
     private async Task<CachedPackage[]> CreateStagingAsync(BuildEntry build, string staging, CancellationToken cancellationToken)
     {
         var archivePath = await GetPackageArtifactAsync(build.Packages, cancellationToken);
         Directory.CreateDirectory(staging);
-        var originals = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var packages = new List<CachedPackage>();
-        using (var archive = ZipFile.OpenRead(archivePath))
         {
-            foreach (var entry in archive.Entries.Where(x => x.FullName.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)))
-            {
-                // Artifact paths never become local filenames.
-                var original = Path.Combine(staging, Guid.NewGuid().ToString("N") + ".original");
-                entry.ExtractToFile(original);
-                if (!HasValidZipPayload(original))
-                    throw new InvalidDataException($"Package payload in artifact {build.Packages.Id} has a CRC mismatch.");
-                using var reader = new PackageArchiveReader(original);
-                var identity = reader.GetIdentity();
-                if (!PackageIdValidator.IsValidPackageId(identity.Id))
-                    throw new InvalidDataException($"Invalid package ID in artifact {build.Packages.Id}.");
-                if (!originals.TryAdd(identity.Id, original))
-                    throw new InvalidDataException($"Duplicate {identity.Id} in artifact {build.Packages.Id}.");
-                var originalVersion = identity.Version.ToNormalizedString();
-                packages.Add(new CachedPackage(identity.Id, originalVersion,
-                    PackageRewriter.VersionFor(originalVersion, build.PullRequest, build.RunId, build.Attempt, build.Packages.Id)));
-            }
-        }
-        if (packages.Count == 0)
-            throw new InvalidDataException($"Artifact {build.Packages.Id} contains no NuGet packages.");
-        var versions = packages.ToDictionary(x => x.Id, x => x.Version, StringComparer.OrdinalIgnoreCase);
-        foreach (var package in packages)
+    var (originals, packages) = await ReadArtifactAsync(build, archivePath, staging, cancellationToken);
+    foreach (var package in packages) EnsureClientCacheSafe(package, build);
+    var versions = packages.ToDictionary(x => x.Id, x => x.Version, StringComparer.OrdinalIgnoreCase);
+    var digests = new List<PackageDigest>();
+    foreach (var package in packages)
+    {
+        var original = originals[package.Id];
+        var output = Path.Combine(staging, FileNameFor(package.Id));
+        await PackageRewriter.RewriteAsync(original, output,
+            package.Id, package.OriginalVersion, package.Version, versions, _logger, cancellationToken);
+        using (var reader = new PackageArchiveReader(output))
         {
-            var original = originals[package.Id];
-            PackageRewriter.Rewrite(original, PackagePath(staging, package),
-                package.Id, package.OriginalVersion, package.Version, versions);
-            File.Delete(original);
-            if (!IsReadablePackage(PackagePath(staging, package), package))
-                throw new InvalidDataException($"Rewritten package {package.Id} has an invalid payload.");
+            var identity = ReadIdentity(reader, build.Packages.Id);
+            if (!identity.Id.Equals(package.Id, StringComparison.OrdinalIgnoreCase)
+                || !identity.Version.ToFullString().Equals(package.Version, StringComparison.Ordinal))
+                throw new InvalidDataException($"Rewritten package {package.Id} has a mismatched identity in artifact {build.Packages.Id}.");
+            ValidateFeedMetadata(reader, build.Packages.Id);
         }
-        await JsonSettings.WriteAtomicAsync(Path.Combine(staging, "packages.json"), packages, cancellationToken);
+        digests.Add(new PackageDigest(package.Id, await HashFileAsync(output, cancellationToken)));
+        File.Delete(original);
+    }
+    var stagedIndex = Path.Combine(staging, "packages.json");
+    await JsonSettings.WriteAtomicAsync(stagedIndex, packages, cancellationToken);
+    await JsonSettings.WriteAtomicAsync(Path.Combine(staging, "integrity.json"),
+        new InventorySeal(CacheSchema.Version, build.Packages.Id, build.Packages.Digest,
+            await HashFileAsync(stagedIndex, cancellationToken), digests.ToArray()), cancellationToken);
         return packages.ToArray();
+        }
     }
 }

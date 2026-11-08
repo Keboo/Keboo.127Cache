@@ -19,13 +19,13 @@ internal sealed record OfflineSnapshot(
     public static OfflineSnapshot Create(ProxyOptions options, RunArtifacts[] runs) => new(
         CurrentSchemaVersion, options.Repository, options.Workflow, options.PackagesArtifact, options.VersionArtifact,
         options.PullRequests.Distinct().Order().ToArray(), options.RunIds.Distinct().Order().ToArray(),
-        options.RunLimit, DateTimeOffset.UtcNow, runs);
+        ProxyOptions.RunLimit, DateTimeOffset.UtcNow, runs);
 
     public bool Matches(ProxyOptions options) =>
         MatchesSource(options)
         && PullRequests is not null && PullRequests.SequenceEqual(options.PullRequests.Distinct().Order())
         && RunIds is not null && RunIds.SequenceEqual(options.RunIds.Distinct().Order())
-        && RunLimit == options.RunLimit;
+        && RunLimit == ProxyOptions.RunLimit;
 
     public bool MatchesSource(ProxyOptions options) =>
         SchemaVersion is 1 or CurrentSchemaVersion

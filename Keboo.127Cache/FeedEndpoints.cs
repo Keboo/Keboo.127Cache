@@ -37,20 +37,39 @@ public static class FeedEndpoints
         app.MapMethods("/registration/{id}/index.json", ["GET", "HEAD"],
             async (string id, ProxyOptions options, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
             {
-                var builds = BuildsFor(await catalog.GetPackagesAsync(ct), id);
+                var numericBuilds = BuildsFor(await catalog.GetPackagesAsync(ct), id);
+                var builds = numericBuilds
+                    .OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
                 catalog.EnsurePackageIndexComplete(id, builds.Length > 0);
                 if (builds.Length == 0) return Results.NotFound();
-                var leaves = new List<object>();
-                foreach (var build in builds) leaves.Add(await LeafAsync(options, cache, id, build, ct));
                 var url = options.BaseUrl + "/registration/" + id.ToLowerInvariant() + "/index.json";
+                var pages = new List<object>();
+                if (builds.SequenceEqual(numericBuilds))
+                    pages.Add(await RegistrationPageAsync(options, cache, id, url, url, builds, ct));
+                else
+                {
+                    // Singleton bounds are valid under both numeric SemVer and NuGet's comparer.
+                    foreach (var build in builds)
+                    {
+                        var pageUrl = options.BaseUrl + "/registration/" + id.ToLowerInvariant() + "/page/" + build.Version + ".json";
+                        pages.Add(await RegistrationPageAsync(options, cache, id, url, pageUrl, [build], ct));
+                    }
+                }
                 return Results.Json(new Dictionary<string, object>
                 {
                     ["@id"] = url,
-                    ["count"] = 1,
-                    ["items"] = new[] { new Dictionary<string, object> {
-                        ["@id"] = url, ["count"] = leaves.Count, ["lower"] = builds[0].Version,
-                        ["upper"] = builds[^1].Version, ["items"] = leaves, ["parent"] = url } }
+                    ["count"] = pages.Count,
+                    ["items"] = pages
                 });
+            });
+        app.MapMethods("/registration/{id}/page/{version}.json", ["GET", "HEAD"],
+            async (string id, string version, ProxyOptions options, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
+            {
+                var build = await FindAsync(catalog, id, version, ct);
+                if (build is null) return Results.NotFound();
+                var prefix = options.BaseUrl + "/registration/" + id.ToLowerInvariant();
+                return Results.Json(await RegistrationPageAsync(options, cache, id, prefix + "/index.json",
+                    prefix + "/page/" + build.Version + ".json", [build], ct));
             });
         app.MapMethods("/registration/{id}/{version}.json", ["GET", "HEAD"],
             async (string id, string version, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
@@ -160,6 +179,22 @@ public static class FeedEndpoints
     {
         using var reader = new PackageArchiveReader(await cache.GetAsync(id, build, ct));
         return reader.NuspecReader.GetPackageTypes().FirstOrDefault()?.Name ?? "Dependency";
+    }
+
+    private static async Task<object> RegistrationPageAsync(ProxyOptions options, PackageCache cache, string id,
+        string parent, string pageUrl, BuildEntry[] builds, CancellationToken ct)
+    {
+        var leaves = new List<object>();
+        foreach (var build in builds) leaves.Add(await LeafAsync(options, cache, id, build, ct));
+        return new Dictionary<string, object>
+        {
+            ["@id"] = pageUrl,
+            ["count"] = leaves.Count,
+            ["lower"] = builds[0].Version,
+            ["upper"] = builds[^1].Version,
+            ["items"] = leaves,
+            ["parent"] = parent
+        };
     }
 
     private static async Task<object> LeafAsync(ProxyOptions options, PackageCache cache, string id, BuildEntry build, CancellationToken ct)

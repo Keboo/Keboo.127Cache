@@ -10,7 +10,7 @@ public sealed class DotNetToolClientTests
         await using var fixture = new NuGetClientFixture();
         var originalPackage = await fixture.CreateToolPackageAsync(cancellationToken);
         await fixture.StartAsync(includeOlderRun: false, cancellationToken, originalPackage);
-        const string version = "3.1.4-pr.755.run.100.attempt.1.artifact.2";
+        const string version = "3.1.4-pr.755.run.r0000000000000000100.attempt.1.artifact.2";
 
         await fixture.InstallToolAsync("Example.Tool", version, cancellationToken);
         var installed = await fixture.ListToolsAsync(cancellationToken);
