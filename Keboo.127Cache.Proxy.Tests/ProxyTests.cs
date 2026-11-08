@@ -38,6 +38,7 @@ public sealed class ProxyTests : IDisposable
         _github = new FakeGitHub(_directory);
         _options = new ProxyOptions
         {
+            Repository = "fixture/project",
             CacheDirectory = Path.Combine(_directory, "cache"),
             PullRequests = [755]
         };
@@ -268,7 +269,7 @@ public sealed class ProxyTests : IDisposable
         var saved = JsonSerializer.Deserialize<CatalogFile>(File.ReadAllText(Path.Combine(_options.CacheDirectory, "catalog.json")),
             JsonSettings.Options)!;
         var cachedBuild = await Assert.That(saved.Builds).HasSingleItem();
-        await Assert.That(cachedBuild.VersionArtifact.Id).IsEqualTo(build.VersionArtifact.Id);
+        await Assert.That(cachedBuild.VersionArtifact!.Id).IsEqualTo(build.VersionArtifact!.Id);
         await Assert.That(cachedBuild.Packages.Id).IsEqualTo(build.Packages.Id);
         await Assert.That(File.Exists(cachedPackage)).IsTrue();
 
@@ -746,6 +747,7 @@ public sealed class ProxyTests : IDisposable
     private async Task<WebApplication> StartHttpFeedAsync()
     {
         _options.BaseUrl = "http://127.0.0.1:0";
+        _github.OpenPullRequests = [new(755)];
         var builder = WebApplication.CreateBuilder();
         builder.Configuration.Sources.Clear();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>

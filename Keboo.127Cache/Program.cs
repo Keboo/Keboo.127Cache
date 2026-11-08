@@ -35,14 +35,12 @@ public sealed class Program
         {
             ContentRootPath = AppContext.BaseDirectory
         });
-        if (configFile is not null)
-        {
-            builder.Configuration.AddJsonFile(Path.GetFullPath(configFile.FullName), optional: false, reloadOnChange: false)
-                .AddEnvironmentVariables();
-        }
+        ConfigurationFiles.AddUserAndExplicitConfiguration(builder.Configuration, configFile);
         builder.Services.AddProxy(builder.Configuration);
         var app = builder.Build();
         var options = app.Services.GetRequiredService<ProxyOptions>();
+        app.Urls.Clear();
+        app.Urls.Add(options.BaseUrl);
         Directory.CreateDirectory(options.CacheDirectory);
         using var cacheLock = new FileStream(Path.Combine(options.CacheDirectory, ".lock"), FileMode.OpenOrCreate,
             FileAccess.ReadWrite, FileShare.None);

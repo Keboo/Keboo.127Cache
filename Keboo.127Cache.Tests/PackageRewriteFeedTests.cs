@@ -147,7 +147,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var legacyVersion = "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200";
@@ -207,7 +207,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache") };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache") };
         var legacyVersion = "1.2.0-pr.755.run.r0000000000000000100.attempt.1.artifact.200";
         var build = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3", legacyVersion,
             github.Packages with { Expired = true }, github.Version);
@@ -233,7 +233,7 @@ public class PackageRewriteFeedTests
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
         var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache");
-        var options = new ProxyOptions { CacheDirectory = cacheDirectory, PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cacheDirectory, PullRequests = [755] };
         github.SeedRawCache(cacheDirectory);
         github.FailDownloads = true;
         var unavailableArtifact = github.Packages with { Id = 300, Expired = true };
@@ -312,7 +312,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var closedArtifact = github.Packages with { Id = 300, Expired = true };
@@ -395,7 +395,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var build = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3",
@@ -435,7 +435,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var build = new BuildEntry(100, 1, 755, "head", "1.2.0-beta.3",
@@ -488,7 +488,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         using var memory = new MemoryCache(new MemoryCacheOptions());
@@ -521,7 +521,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"), PullRequests = [755], RunIds = [100, 101] };
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         var unavailableVersion = github.Version with { Id = 301, Expired = true };
@@ -559,7 +559,7 @@ public class PackageRewriteFeedTests
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
         var cache = Path.Combine(fixture.DirectoryPath, "cache");
-        var options = new ProxyOptions { CacheDirectory = cache, PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cache, PullRequests = [755] };
         github.SeedRawCache(cache);
         github.FailDownloads = true;
 
@@ -587,7 +587,7 @@ public class PackageRewriteFeedTests
             new CatalogFile(options.Repository, builds.ToList(), CacheSchema.Version), CancellationToken.None);
 
         var logger = new CollectingLogger<PackageCatalog>();
-        await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), catalogLogger: logger);
+        await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), [100, 101], catalogLogger: logger);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
         using var response = JsonDocument.Parse(await client.GetStringAsync("builds"));
         var advertised = response.RootElement.EnumerateArray().ToArray();
@@ -614,7 +614,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var options = new ProxyOptions { CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache") };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache") };
         Directory.CreateDirectory(options.CacheDirectory);
         var catalogPath = Path.Combine(options.CacheDirectory, "catalog.json");
         await JsonSettings.WriteAtomicAsync(catalogPath, new CatalogFile(options.Repository, [], CacheSchema.Version + 1), CancellationToken.None);
@@ -731,6 +731,7 @@ public class PackageRewriteFeedTests
         var github = await fixture.CreateGitHubAsync();
         var options = new ProxyOptions
         {
+            Repository = "fixture/project",
             CacheDirectory = Path.Combine(fixture.DirectoryPath, "cache"),
             PullRequests = [755],
             RunIds = [10, 20, 30, 40]
@@ -766,7 +767,7 @@ public class PackageRewriteFeedTests
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
         var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache");
-        var options = new ProxyOptions { CacheDirectory = cacheDirectory, PullRequests = [756], RunIds = [101] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cacheDirectory, PullRequests = [756], RunIds = [101] };
         Directory.CreateDirectory(cacheDirectory);
         var outOfScope = new BuildEntry(100, 1, 755, "old", "1.2.0-beta.3",
             PackageRewriter.VersionFor("1.2.0-beta.3", 755, 100, 1, github.Packages.Id), github.Packages, github.Version);
@@ -810,6 +811,7 @@ public class PackageRewriteFeedTests
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var configuration = new Dictionary<string, string?>
         {
+            ["Proxy:Repository"] = "fixture/project",
             ["Proxy:CacheDirectory"] = Path.Combine(fixture.DirectoryPath, "cache")
         };
         var configuredPullRequests = pullRequests ?? [755];
@@ -822,7 +824,7 @@ public class PackageRewriteFeedTests
         builder.Services.AddSingleton<ILogger<PackageCache>>(logger);
         if (catalogLogger is not null) builder.Services.AddSingleton<ILogger<PackageCatalog>>(catalogLogger);
         var app = builder.Build();
-        app.Services.GetRequiredService<ProxyOptions>().RunIds = runIds ?? [];
+        app.Services.GetRequiredService<ProxyOptions>().RunIds = runIds ?? [99];
         app.MapProxy();
         await app.StartAsync();
         app.Services.GetRequiredService<ProxyOptions>().BaseUrl = app.Urls.Single();

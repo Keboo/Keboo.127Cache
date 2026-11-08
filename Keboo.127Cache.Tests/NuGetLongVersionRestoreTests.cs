@@ -87,7 +87,7 @@ public class NuGetLongVersionRestoreTests
         var safe = new BuildEntry(99, 1, 755, "safe", "1.0.0", safeVersion, safeArtifact, github.Version);
         var overlong = new BuildEntry(100, 1, 755, "long", original, longVersion, github.Packages, github.Version);
         var builds = new[] { safe, overlong };
-        var options = new ProxyOptions { CacheDirectory = cache, PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cache, PullRequests = [755] };
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile(options.Repository, options.Workflow, builds.Select(x =>
                 new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact)).ToList()),
@@ -129,7 +129,7 @@ public class NuGetLongVersionRestoreTests
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
         var cache = Path.Combine(fixture.DirectoryPath, "cache");
-        var options = new ProxyOptions { CacheDirectory = cache, PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cache, PullRequests = [755] };
         github.SeedRawCache(cache);
         github.FailDownloads = true;
 

@@ -88,12 +88,12 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
     public async Task<IReadOnlyList<WorkflowRun>> GetRunsAsync(CancellationToken cancellationToken)
     {
         var runs = new List<WorkflowRun>();
-        for (var page = 1; runs.Count < options.RunLimit; page++)
+        for (var page = 1; runs.Count < ProxyOptions.RunLimit; page++)
         {
             var response = await GetAsync<RunsResponse>(
                 $"repos/{options.Repository}/actions/workflows/{options.Workflow}/runs?event=pull_request&status=success&per_page=100&page={page}",
                 cancellationToken);
-            runs.AddRange(response.Runs.Take(options.RunLimit - runs.Count));
+            runs.AddRange(response.Runs.Take(ProxyOptions.RunLimit - runs.Count));
             if (response.Runs.Length < 100) break;
         }
         foreach (var id in options.RunIds)

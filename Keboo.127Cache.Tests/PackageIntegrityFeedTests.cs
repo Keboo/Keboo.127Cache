@@ -337,7 +337,7 @@ public class PackageIntegrityFeedTests
     private static async Task<(BuildEntry Other, BuildEntry Healthy)> SeedBuildsAsync(
         string cache, FixtureGitHub github, Artifact otherArtifact, int schema)
     {
-        var options = new ProxyOptions { CacheDirectory = cache, PullRequests = [755] };
+        var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cache, PullRequests = [755] };
         var other = new BuildEntry(99, 1, 755, "other", "1.2.0-beta.3", OtherVersion, otherArtifact, github.Version);
         var healthy = new BuildEntry(100, 1, 755, "healthy", "1.2.0-beta.3", HealthyVersion, github.Packages, github.Version);
         if (schema == 1)

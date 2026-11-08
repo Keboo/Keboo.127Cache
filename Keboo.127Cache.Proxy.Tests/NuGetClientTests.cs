@@ -56,7 +56,7 @@ public sealed class NuGetClientTests
         const string older = "1.3.67-pr.755.run.r0000000000000000099.attempt.1.artifact.3";
 
         var available = await fixture.GetVersionsAsync("Velopack", Cancellation);
-        await Assert.That(available).Contains(older);
+        await Assert.That(available).DoesNotContain(older);
         await Assert.That(available).Contains(newest);
         using var assets = await fixture.RestoreAsync("Velopack", "1.3.67-pr.755.*", Cancellation);
         var target = assets.RootElement.GetProperty("targets").GetProperty("net10.0");
@@ -78,7 +78,7 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
     public async Task StartAsync(bool includeOlderRun, CancellationToken cancellationToken, string? additionalPackagePath = null)
     {
         Directory.CreateDirectory(_root);
-        var github = new FakeGitHub(_root, "1.3.67", additionalPackagePath);
+        var github = new FakeGitHub(_root, "1.3.67", additionalPackagePath) { OpenPullRequests = [new(755)] };
         var externalSource = Path.Combine(_root, "external-source");
         Directory.CreateDirectory(externalSource);
         FakeGitHub.WritePackage(Path.Combine(externalSource, "Newtonsoft.Json.13.0.4.nupkg"), "Newtonsoft.Json", "13.0.4", null);
