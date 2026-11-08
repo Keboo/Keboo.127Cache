@@ -116,8 +116,11 @@ public sealed class PackageCatalog
         Directory.CreateDirectory(options.CacheDirectory);
         _builds = [];
         _runs = [];
-        LoadCatalog();
-        LoadRuns();
+        if (options.HasSource)
+        {
+            LoadCatalog();
+            LoadRuns();
+        }
         _snapshotFile = Path.Combine(options.CacheDirectory, "visible-runs.json");
         _snapshot = OfflineSnapshot.Load(_snapshotFile, options, out _snapshotError);
         _incompleteFile = Path.Combine(options.CacheDirectory, "incomplete-discovery.json");
@@ -229,6 +232,10 @@ public sealed class PackageCatalog
                             OriginalVersion = package.OriginalVersion,
                             Version = package.Version
                         }));
+                }
+                catch (Exception exception) when (IsBuildFailure(exception) && !_options.RunIds.Contains(build.RunId))
+                {
+                    ReportUnavailableBuild(build, exception);
                 }
                 catch (Exception exception) when (DiscoveryFailure.CanHandleContent(exception, cancellationToken)
                     && !_options.RunIds.Contains(build.RunId))
@@ -522,7 +529,7 @@ public sealed class PackageCatalog
             return await RefreshAsync(cancellationToken);
 
         }
-        catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
+        catch (Exception exception) when (!exception.Data.Contains("config") && DiscoveryFailure.CanHandle(exception, cancellationToken))
         {
             var error = DiscoveryFailure.Describe(exception);
             if (exception is PinnedRunWorkflowException)
@@ -568,7 +575,8 @@ public sealed class PackageCatalog
         if (run.Packages.Name != _options.PackagesArtifact
             || (_options.VersionArtifact is not null && run.VersionArtifact?.Name != _options.VersionArtifact))
             throw new InvalidDataException(
-                $"Cached run {run.RunId} uses different configured artifacts. Use a different Server.CacheDirectory when changing Artifact or VersionArtifact.");
+                $"Cached run {run.RunId} uses different configured artifacts. Use a different Server.CacheDirectory when changing Artifact or VersionArtifact.")
+            { Data = { ["config"] = true } };
     }
     private static NuGetVersion BuildVersion(BuildEntry build) =>
         string.IsNullOrEmpty(build.Version) ? new NuGetVersion(0, 0, 0) : NuGetVersion.Parse(build.Version);
@@ -727,11 +735,14 @@ public sealed class PackageCatalog
         foreach (var (run, pr) in runs)
         {
             // Completed immutable builds already known locally need no artifact API/download request.
-            var existing = next.FindIndex(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr
-                && x.Packages.Name == _options.PackagesArtifact && x.VersionArtifact?.Name == _options.VersionArtifact);
-            var cachedRun = existing >= 0 ? next[existing] : null;
-            if (cachedRun is { WorkflowVerified: true } && cachedRun.HeadSha == run.HeadSha)
+            var existing = next.FindIndex(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr);
+            if (existing >= 0)
+            {
+                ValidateCachedArtifacts(next[existing]);
+                // The live workflow listing corroborates a cached run without refetching its immutable metadata.
+                if (!next[existing].WorkflowVerified) next[existing] = next[existing] with { WorkflowVerified = true };
                 continue;
+            }
             IReadOnlyList<Artifact> artifacts;
             try
             {
@@ -749,12 +760,9 @@ public sealed class PackageCatalog
             var versionMatches = _options.VersionArtifact is null ? [] : artifacts.Where(x => x.Name == _options.VersionArtifact).Take(2).ToArray();
             var packages = packageMatches.Length == 1 ? packageMatches[0] : null;
             var version = versionMatches.Length == 1 ? versionMatches[0] : null;
-            var preserved = cachedRun is not null && cachedRun.HeadSha == run.HeadSha
-                && cachedRun.Packages.Id == packages?.Id && cachedRun.VersionArtifact?.Id == version?.Id
-                && _packages.MightHaveCachedContent(cachedRun);
             var problem = packages is null || (_options.VersionArtifact is not null && version is null)
                 ? $"Run {run.Id} has missing package/version artifacts."
-                : !preserved && ((packages.Expired && !_artifacts.Contains(packages)) || (version is not null && version.Expired && !_artifacts.Contains(version)))
+                : ((packages.Expired && !_artifacts.Contains(packages)) || (version is not null && version.Expired && !_artifacts.Contains(version)))
                     ? $"Run {run.Id} has expired artifacts that are not cached locally."
                     : null;
             if (problem is not null)
@@ -787,21 +795,6 @@ public sealed class PackageCatalog
         var result = availableCached.Where(x => selected.Contains((x.RunId, x.Attempt, x.PullRequest)))
             .Select(x => _options.VersionArtifact is null ? x with { VersionArtifact = null } : x)
             .OrderBy(x => x.RunId).ThenBy(x => x.Attempt).ToArray();
-        var unverifiedRuns = result.Any(run => !run.WorkflowVerified);
-        var metadataIncomplete = unverifiedRuns || HasUnmatchedCatalogBuilds(result, openPullRequests);
-        if (skipped > 0 || metadataIncomplete)
-        {
-            var error = skipped > 0 ? skippedError + " Discovery is incomplete; unpinned unavailable builds were skipped." : "";
-            if (metadataIncomplete) error += " Cached catalog and run metadata do not agree; package inventories may be incomplete.";
-            if (unverifiedRuns) error += " Some cached runs lack verified workflow provenance.";
-            var incomplete = ExcludeUnverifiedPins(new Discovery(result, result.Length == 0, error.Trim(), MatchingSnapshot(),
-                SkippedBuilds: skipped, MetadataIncomplete: metadataIncomplete));
-            if (incomplete is null) throw new PinnedRunWorkflowException();
-            await PersistIncompleteAsync(incomplete, cancellationToken);
-            SetFailureHealth(incomplete.Error!, incomplete);
-            return incomplete;
-        }
-
         await PersistIncompleteAsync(new Discovery(result, true,
             "Discovery metadata has not yet been committed.", MatchingSnapshot(),
             MetadataIncomplete: true, PersistencePending: true), cancellationToken);
@@ -920,7 +913,7 @@ public sealed class PackageCatalog
         if ((File.Exists(_snapshotFile) && (_snapshot is null || !_snapshot.MatchesSource(_options)))
             || !File.Exists(_runsFile) || _runsUnreadable) return null;
         var runs = _runs.Where(run => run.Packages.Name == _options.PackagesArtifact
-                && run.VersionArtifact.Name == _options.VersionArtifact
+                && run.VersionArtifact?.Name == _options.VersionArtifact
                 && (_options.PullRequests.Length == 0 || _options.PullRequests.Contains(run.PullRequest)
                     || _options.RunIds.Contains(run.RunId)))
             .OrderBy(run => run.RunId).ThenBy(run => run.Attempt).ToArray();
@@ -1016,7 +1009,7 @@ public sealed class PackageCatalog
             && (build.VersionArtifact is null || build.VersionArtifact.Name == _options.VersionArtifact)
             && !runs.Any(run => run.RunId == build.RunId && run.Attempt == build.Attempt
                 && run.PullRequest == build.PullRequest && run.Packages.Id == build.Packages.Id
-                && run.VersionArtifact.Id == build.VersionArtifact?.Id));
+                && run.VersionArtifact?.Id == build.VersionArtifact?.Id));
 
     private bool HasContentFailure()
     {
@@ -1170,8 +1163,8 @@ public sealed class PackageCatalog
     {
         var build = knownBuilds.FirstOrDefault(x => x.RunId == run.RunId && x.Attempt == run.Attempt
             && x.PullRequest == run.PullRequest && x.Packages is not null && x.Packages.Id == run.Packages.Id
-            && x.VersionArtifact is not null && x.VersionArtifact.Id == run.VersionArtifact.Id);
-        if (build is null && _artifacts.Contains(run.VersionArtifact))
+            && x.VersionArtifact?.Id == run.VersionArtifact?.Id);
+        if (build is null && run.VersionArtifact is not null && _artifacts.Contains(run.VersionArtifact))
         {
             try
             {

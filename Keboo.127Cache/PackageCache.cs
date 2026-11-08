@@ -50,7 +50,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     internal Task<string> GetVersionArtifactAsync(Artifact artifact, CancellationToken cancellationToken) =>
         github is null ? artifacts.GetAsync(artifact, cancellationToken)
         : _versionArtifactCaches.GetOrAdd(artifact.Id,
-            _ => new ArtifactCache(options, github, NullLogger<ArtifactCache>.Instance))
+            _ => artifacts.CreateIndependent())
             .GetAsync(artifact, cancellationToken);
 
     private Task<string> GetPackageArtifactAsync(Artifact artifact, CancellationToken cancellationToken)
@@ -62,7 +62,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             if (!_packageArtifactCaches.TryGetValue(artifact.Id, out cache!))
             {
                 cache = _packageArtifactCaches.Count == 0 ? artifacts
-                    : new ArtifactCache(options, github, NullLogger<ArtifactCache>.Instance);
+                    : artifacts.CreateIndependent();
                 _packageArtifactCaches.Add(artifact.Id, cache);
             }
         }
@@ -369,7 +369,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             || data.Repository != options.Repository || data.Workflow != options.Workflow
             || data.RunId != build.RunId || data.Attempt != build.Attempt || data.PullRequest != build.PullRequest
             || data.HeadSha != build.HeadSha || data.PackagesId != build.Packages.Id || data.PackagesName != build.Packages.Name
-            || data.VersionId != build.VersionArtifact.Id || data.VersionName != build.VersionArtifact.Name
+            || data.VersionId != (build.VersionArtifact?.Id ?? 0) || data.VersionName != (build.VersionArtifact?.Name ?? "")
             || !ValidInventory(data.Packages, build) || record.Sha256 != InventoryDigest(data))
             throw new InvalidDataException("The retained package inventory is invalid or belongs to another build.");
         return data.Packages;
@@ -385,7 +385,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             return;
         }
         var data = new InventoryData(options.Repository, options.Workflow, build.RunId, build.Attempt, build.PullRequest,
-            build.HeadSha, build.Packages.Id, build.Packages.Name, build.VersionArtifact.Id, build.VersionArtifact.Name, packages);
+            build.HeadSha, build.Packages.Id, build.Packages.Name, build.VersionArtifact?.Id ?? 0, build.VersionArtifact?.Name ?? "", packages);
         var path = InventoryPath(build);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await JsonSettings.WriteAtomicAsync(path, new InventoryRecord(InventorySchemaVersion, data, InventoryDigest(data)), cancellationToken);

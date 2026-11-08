@@ -36,7 +36,8 @@ internal sealed record OfflineSnapshot(
         SchemaVersion is 1 or CurrentSchemaVersion && LastSuccessfulRefreshUtc != default && Runs is not null
         && Runs.All(run => run is not null && run.RunId > 0 && run.Attempt > 0 && run.PullRequest > 0
             && run.HeadSha is not null && run.Packages is not null && run.Packages.Id > 0 && run.Packages.Name == PackagesArtifact
-            && run.VersionArtifact is not null && run.VersionArtifact.Id > 0 && run.VersionArtifact.Name == VersionArtifact)
+            && (run.VersionArtifact is null ? VersionArtifact is null
+                : run.VersionArtifact.Id > 0 && run.VersionArtifact.Name == VersionArtifact))
         && Runs.Select(run => (run.RunId, run.Attempt, run.PullRequest)).Distinct().Count() == Runs.Length;
 
     public static OfflineSnapshot? Load(string path, ProxyOptions options, out string? error)

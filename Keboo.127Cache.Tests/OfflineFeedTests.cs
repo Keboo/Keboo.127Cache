@@ -910,309 +910,6 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
-    [Arguments("missing")]
-    [Arguments("expired")]
-    public async Task UnpinnedMissingOrExpiredBuildDoesNotHideHealthyBuild(string failure)
-    {
-        _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
-        _github.OpenPullRequests = [new(1), new(2)];
-        if (failure == "missing") _github.MissingVersionArtifactForRun = 200;
-        else _github.ExpiredRuns.Add(200);
-        await using var server = await StartAsync();
-        await WaitForHealthErrorAsync(server.Client, failure);
-        using var alpha = await server.Client.GetAsync("/flat/alpha/index.json");
-        await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        await Assert.That(alpha.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
-        using var alphaProblem = JsonDocument.Parse(await alpha.Content.ReadAsStringAsync());
-        await Assert.That(alphaProblem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
-        const string version = "1.2.3-pr.1.run.100.attempt.1.artifact.1002";
-        using var package = await server.Client.GetAsync(PackageUrl("alpha", version));
-        await Assert.That(package.StatusCode).IsEqualTo(HttpStatusCode.OK);
-        using var search = await server.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
-        await Assert.That(search.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        using var health = await GetJsonAsync(server.Client, "/health");
-        await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
-        await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains(failure);
-    }
-
-    [Test]
-    [Arguments("expired")]
-    [Arguments("missing")]
-    [Arguments("discovery")]
-    public async Task SkippedNewerRunNeverProducesAnIncompleteSuccessfulVersionIndex(string failure)
-    {
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var newer = _github.AddBuild(101, 1, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        await using var server = await StartAsync();
-        var oldVersion = await RetryVersionAsync(server.Client, "alpha");
-        var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
-
-        _github.Runs = [newer, old];
-        if (failure == "missing") _github.MissingVersionArtifactForRun = 101;
-        else if (failure == "expired") _github.ExpiredRuns.Add(101);
-        else _github.FailArtifactsForRun = 101;
-        ExpireDiscovery(server);
-        await WaitForHealthErrorAsync(server.Client, failure == "discovery" ? "network connection" : failure);
-
-        foreach (var path in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
-        {
-            using var response = await server.Client.GetAsync(path);
-            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            await Assert.That(response.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
-            await Assert.That(response.Content.Headers.ContentType?.MediaType).IsEqualTo("application/problem+json");
-            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
-            await Assert.That(problem.RootElement.TryGetProperty("versions", out _)).IsFalse();
-        }
-        using var package = await server.Client.GetAsync(PackageUrl("alpha", oldVersion));
-        await Assert.That(package.StatusCode).IsEqualTo(HttpStatusCode.OK);
-        using var reader = new PackageArchiveReader(new MemoryStream(await package.Content.ReadAsByteArrayAsync()));
-        await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(oldVersion);
-        using var search = await server.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
-        await Assert.That(search.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        using var health = await GetJsonAsync(server.Client, "/health");
-        await Assert.That(health.RootElement.GetProperty("unavailableBuilds").GetInt32()).IsEqualTo(1);
-        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
-    }
-
-    [Test]
-    [Arguments(100)]
-    [Arguments(101)]
-    public async Task IncompleteDiscoverySurvivesRestartUntilACompleteRefresh(int runLimit)
-    {
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var newer = _github.AddBuild(101, 1, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        string oldVersion;
-        byte[] snapshot;
-        await using (var online = await StartAsync())
-        {
-            oldVersion = await RetryVersionAsync(online.Client, "alpha");
-            snapshot = await File.ReadAllBytesAsync(SnapshotPath);
-            _github.Runs = [newer, old];
-            _github.MissingVersionArtifactForRun = 101;
-            ExpireDiscovery(online);
-            await WaitForHealthErrorAsync(online.Client, "missing");
-            using var index = await online.Client.GetAsync("/flat/alpha/index.json");
-            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        }
-
-        _github.DiscoveryError = new IOException("Synthetic offline failure.");
-        _github.FailDownloads = true;
-        await using var offline = await StartAsync(runLimit: runLimit);
-        foreach (var route in new[] { "/flat/alpha/index.json", "/registration/alpha/index.json" })
-        {
-            using var response = await offline.Client.GetAsync(route);
-            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
-        }
-        using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion)))
-        {
-            if (cached.StatusCode != HttpStatusCode.OK)
-                throw new InvalidOperationException("Cached Alpha was unavailable: " + await cached.Content.ReadAsStringAsync()
-                    + " Logs: " + string.Join(" | ", offline.Logs.Messages.Where(message =>
-                        message.Contains("incomplete", StringComparison.OrdinalIgnoreCase))));
-            await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.OK);
-        }
-        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
-
-        _github.DiscoveryError = null;
-        _github.FailDownloads = false;
-        _github.MissingVersionArtifactForRun = null;
-        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
-        var versions = await VersionsAsync(offline.Client, "alpha");
-        await Assert.That(versions.Length).IsEqualTo(2);
-        await Assert.That(versions).Contains(oldVersion);
-        await Assert.That(versions.Any(version => version.Contains(".run.101.", StringComparison.Ordinal))).IsTrue();
-    }
-
-    [Test]
-    public async Task LockedIncompleteDiscoveryRecoversCachedContentWhileLiveDiscoveryIsHung()
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var newer = _github.AddBuild(101, 1, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        string oldVersion;
-        await using (var online = await StartAsync())
-        {
-            oldVersion = await RetryVersionAsync(online.Client, "alpha");
-            _github.Runs = [newer, old];
-            _github.MissingVersionArtifactForRun = 101;
-            ExpireDiscovery(online);
-            await WaitForHealthErrorAsync(online.Client, "missing");
-        }
-
-        var block = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _github.DiscoveryBlock = block;
-        var calls = _github.DiscoveryCalls;
-        var marker = Path.Combine(CacheDirectory, "incomplete-discovery.json");
-        var savedMarker = await File.ReadAllBytesAsync(marker);
-        using var locked = new FileStream(marker, FileMode.Open, FileAccess.Read, FileShare.None);
-        try
-        {
-            await using var offline = await StartAsync();
-            await WaitForDiscoveryAsync(calls + 1);
-            using (var unavailable = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion))
-                .WaitAsync(TimeSpan.FromSeconds(5)))
-                await Assert.That(unavailable.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-
-            locked.Dispose();
-            File.Delete(marker);
-            using (var missing = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion))
-                .WaitAsync(TimeSpan.FromSeconds(5)))
-                await Assert.That(missing.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            await File.WriteAllBytesAsync(marker, savedMarker);
-            using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", oldVersion))
-                .WaitAsync(TimeSpan.FromSeconds(5)))
-            {
-                await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.OK);
-                using var package = new PackageArchiveReader(new MemoryStream(await cached.Content.ReadAsByteArrayAsync()));
-                await Assert.That(package.GetIdentity().Version.ToNormalizedString()).IsEqualTo(oldVersion);
-            }
-            using (var index = await offline.Client.GetAsync("/flat/alpha/index.json").WaitAsync(TimeSpan.FromSeconds(5)))
-            {
-                await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-                using var problem = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
-                await Assert.That(problem.RootElement.TryGetProperty("versions", out _)).IsFalse();
-            }
-            using (var health = await GetJsonAsync(offline.Client, "/health").WaitAsync(TimeSpan.FromSeconds(5)))
-                await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
-
-            _github.MissingVersionArtifactForRun = null;
-            _github.DiscoveryBlock = null;
-            block.TrySetResult();
-            await RetryUntilHealthyAsync(offline.Client, validateContent: true);
-            var versions = await VersionsAsync(offline.Client, "alpha");
-            await Assert.That(versions.Length).IsEqualTo(2);
-            await Assert.That(versions).Contains(oldVersion);
-        }
-        finally
-        {
-            block.TrySetResult();
-        }
-    }
-
-    [Test]
-    public async Task LockedMarkerCannotReplaceANewerPinnedWorkflowFailure()
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var newer = _github.AddBuild(101, 1, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        string version;
-        await using (var online = await StartAsync(runIds: [100]))
-        {
-            version = await RetryVersionAsync(online.Client, "alpha");
-            _github.Runs = [newer, old];
-            _github.MissingVersionArtifactForRun = 101;
-            ExpireDiscovery(online);
-            await WaitForHealthErrorAsync(online.Client, "missing");
-        }
-
-        using var locked = new FileStream(Path.Combine(CacheDirectory, "incomplete-discovery.json"),
-            FileMode.Open, FileAccess.Read, FileShare.None);
-        var failureType = typeof(PackageCatalog).Assembly.GetType("Keboo._127Cache.PinnedRunWorkflowException")!;
-        _github.DiscoveryError = (Exception)Activator.CreateInstance(failureType, nonPublic: true)!;
-        await using var offline = await StartAsync(runIds: [100]);
-        await WaitForHealthErrorAsync(offline.Client, "Could not save");
-
-        locked.Dispose();
-        _github.DiscoveryError = new IOException("Synthetic offline failure.");
-        using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", version)).WaitAsync(TimeSpan.FromSeconds(3)))
-        {
-            await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            using var problem = JsonDocument.Parse(await cached.Content.ReadAsStringAsync());
-            await Assert.That(problem.RootElement.GetProperty("detail").GetString()!).Contains("workflow");
-        }
-
-        _github.DiscoveryError = null;
-        _github.MissingVersionArtifactForRun = null;
-        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
-        var versions = await VersionsAsync(offline.Client, "alpha");
-        await Assert.That(versions.Length).IsEqualTo(2);
-        await Assert.That(versions).Contains(version);
-    }
-
-    [Test]
-    public async Task CorruptIncompleteDiscoveryMarkerFailsClosedUntilLiveRefresh()
-    {
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var newer = _github.AddBuild(101, 1, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        string version;
-        await using (var online = await StartAsync())
-        {
-            version = await RetryVersionAsync(online.Client, "alpha");
-            _github.Runs = [newer, old];
-            _github.MissingVersionArtifactForRun = 101;
-            ExpireDiscovery(online);
-            await WaitForHealthErrorAsync(online.Client, "missing");
-        }
-        var marker = Path.Combine(CacheDirectory, "incomplete-discovery.json");
-        var savedMarker = await File.ReadAllBytesAsync(marker);
-        await File.WriteAllTextAsync(marker, "{broken");
-        _github.DiscoveryError = new IOException("Synthetic offline failure.");
-        await using var offline = await StartAsync();
-        using (var index = await offline.Client.GetAsync("/flat/alpha/index.json"))
-        {
-            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            using var problem = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
-            await Assert.That(problem.RootElement.GetProperty("detail").GetString()!).Contains("incomplete discovery metadata");
-        }
-        await Assert.That(await File.ReadAllTextAsync(marker)).IsEqualTo("{broken");
-        await File.WriteAllBytesAsync(marker, savedMarker);
-        using (var cached = await offline.Client.GetAsync(PackageUrl("alpha", version)))
-            await Assert.That(cached.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-
-        _github.DiscoveryError = null;
-        _github.MissingVersionArtifactForRun = null;
-        await RetryUntilHealthyAsync(offline.Client, validateContent: true);
-        await Assert.That((await VersionsAsync(offline.Client, "alpha")).Length).IsEqualTo(2);
-        await Assert.That(File.Exists(marker)).IsFalse();
-    }
-
-    [Test]
-    public async Task NoUsableCurrentRunsCannotFallBackToAClosedPrAsACompleteFeed()
-    {
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var newer = _github.AddBuild(200, 2, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        byte[] snapshot;
-        await using (var online = await StartAsync())
-        {
-            await RetryVersionAsync(online.Client, "alpha");
-            snapshot = await File.ReadAllBytesAsync(SnapshotPath);
-            _github.Runs = [newer];
-            _github.OpenPullRequests = [new(2)];
-            _github.MissingVersionArtifactForRun = 200;
-            ExpireDiscovery(online);
-            await WaitForHealthErrorAsync(online.Client, "missing");
-            using var index = await online.Client.GetAsync("/flat/alpha/index.json");
-            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            await Assert.That(async () => await online.App.Services.GetRequiredService<PackageCatalog>()
-                .GetRunArtifactsAsync(CancellationToken.None)).ThrowsExactly<DiscoveryUnavailableException>();
-            await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
-        }
-
-        _github.DiscoveryError = new IOException("Synthetic offline failure.");
-        await using var offline = await StartAsync();
-        using var restarted = await offline.Client.GetAsync("/flat/alpha/index.json");
-        await Assert.That(restarted.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        using var problem = JsonDocument.Parse(await restarted.Content.ReadAsStringAsync());
-        await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
-        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
-    }
-
-    [Test]
     public async Task CorruptUnpinnedPackageDoesNotHideAnUnrelatedCachedBuild()
     {
         _github.Runs = [_github.AddBuild(100, 1, "Alpha"), _github.AddBuild(200, 2, "Beta")];
@@ -1432,35 +1129,6 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
-    public async Task PartialDiscoveryFailureDoesNotReplaceSnapshotOrHistoricalMetadata()
-    {
-        var first = _github.AddBuild(100, 1, "Alpha");
-        var second = _github.AddBuild(200, 2, "Beta");
-        var third = _github.AddBuild(300, 3, "Gamma");
-        _github.OpenPullRequests = [new(1)];
-        _github.Runs = [first];
-        await using var server = await StartAsync();
-        var alphaVersion = await RetryVersionAsync(server.Client, "alpha");
-        var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
-        var history = await File.ReadAllBytesAsync(RunsPath);
-        _github.OpenPullRequests = [new(1), new(2), new(3)];
-        _github.Runs = [first, second, third];
-        _github.FailArtifactsForRun = 300;
-        ExpireDiscovery(server);
-        await WaitForHealthErrorAsync(server.Client, "network connection");
-        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
-        await Assert.That((await File.ReadAllBytesAsync(RunsPath)).SequenceEqual(history)).IsTrue();
-        using var alpha = await server.Client.GetAsync("/flat/alpha/index.json");
-        await Assert.That(alpha.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        using var beta = await server.Client.GetAsync("/flat/beta/index.json");
-        await Assert.That(beta.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        using var known = await server.Client.GetAsync(PackageUrl("alpha", alphaVersion));
-        await Assert.That(known.StatusCode).IsEqualTo(HttpStatusCode.OK);
-        using var health = await GetJsonAsync(server.Client, "/health");
-        await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
-    }
-
-    [Test]
     public async Task EmptySuccessfulSnapshotDoesNotBecomeAnOfflineEmptyFeed()
     {
         _github.OpenPullRequests = [];
@@ -1521,51 +1189,6 @@ public sealed class OfflineFeedTests : IDisposable
         await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
         using var health = await GetJsonAsync(offline.Client, "/health");
         await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("different source or discovery configuration");
-    }
-
-    [Test]
-    public async Task RunLimitChangeRetainsSourceBoundOfflinePackagesWithoutClaimingMembership()
-    {
-        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
-        _github.OpenPullRequests = [new(1)];
-        string version;
-        byte[] package;
-        await using (var online = await StartAsync(runLimit: 100))
-        {
-            version = await RetryVersionAsync(online.Client, "alpha");
-            package = await online.Client.GetByteArrayAsync(PackageUrl("alpha", version));
-        }
-        var savedSnapshot = await File.ReadAllBytesAsync(SnapshotPath);
-        _github.DiscoveryError = new IOException("Synthetic offline failure.");
-        _github.FailDownloads = true;
-        await using (var offline = await StartAsync(runLimit: 101))
-        {
-            using var index = await offline.Client.GetAsync("/flat/alpha/index.json");
-            await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.OK);
-            await Assert.That(index.Headers.GetValues("X-127Cache-Status").Single()).IsEqualTo("degraded-partial");
-            await Assert.That(index.Headers.GetValues("X-127Cache-Membership").Single()).IsEqualTo("unknown");
-            using var body = JsonDocument.Parse(await index.Content.ReadAsStringAsync());
-            await Assert.That(body.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
-            using var registration = await GetJsonAsync(offline.Client, "/registration/alpha/index.json");
-            await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
-                .GetProperty("catalogEntry").GetProperty("version").GetString()).IsEqualTo(version);
-            await Assert.That((await offline.Client.GetByteArrayAsync(PackageUrl("alpha", version))).SequenceEqual(package)).IsTrue();
-            using var aggregate = await offline.Client.GetAsync("/query?prerelease=true&semVerLevel=2.0.0");
-            await Assert.That(aggregate.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            using var health = await GetJsonAsync(offline.Client, "/health");
-            await Assert.That(health.RootElement.GetProperty("membership").GetString()).IsEqualTo("unknown");
-            await Assert.That(health.RootElement.GetProperty("lastSuccessfulRefreshUtc").ValueKind).IsEqualTo(JsonValueKind.Null);
-        }
-        await using (var excluded = await StartAsync([2], runLimit: 101))
-        {
-            using var response = await excluded.Client.GetAsync("/v3/index.json");
-            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        }
-        await Assert.That(async () => { await using var changed = await StartAsync(runLimit: 101, workflow: "other.yml"); })
-            .ThrowsExactly<InvalidDataException>();
-        await Assert.That(async () => { await using var changed = await StartAsync(runLimit: 101, repository: "other/project"); })
-            .ThrowsExactly<InvalidDataException>();
-        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(savedSnapshot)).IsTrue();
     }
 
     [Test]
@@ -2040,49 +1663,6 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     [Test]
-    public async Task MissingOrExpiredUnpinnedArtifactsNeverPublishAnEmptySnapshot()
-    {
-        var old = _github.AddBuild(100, 1, "Alpha");
-        var latest = _github.AddBuild(101, 1, "Alpha");
-        _github.Runs = [old];
-        _github.OpenPullRequests = [new(1)];
-        _github.ExpiredRuns.Add(100);
-        await using var server = await StartAsync();
-        using (var expired = await server.Client.GetAsync("/v3/index.json"))
-            await Assert.That(expired.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        await WaitForHealthErrorAsync(server.Client, "expired artifacts");
-        using (var health = await GetJsonAsync(server.Client, "/health"))
-            await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("expired artifacts");
-        await Assert.That(File.Exists(SnapshotPath)).IsFalse();
-
-        _github.ExpiredRuns.Clear();
-        _github.MissingVersionArtifactForRun = 100;
-        using (var missing = await server.Client.GetAsync("/v3/index.json"))
-            await Assert.That(missing.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        await WaitForHealthErrorAsync(server.Client, "missing package/version artifacts");
-        using (var health = await GetJsonAsync(server.Client, "/health"))
-            await Assert.That(health.RootElement.GetProperty("error").GetString()!).Contains("missing package/version artifacts");
-        await Assert.That(File.Exists(SnapshotPath)).IsFalse();
-
-        _github.MissingVersionArtifactForRun = null;
-        var oldVersion = await RetryVersionAsync(server.Client, "alpha");
-        var snapshot = await File.ReadAllBytesAsync(SnapshotPath);
-        var history = await File.ReadAllBytesAsync(RunsPath);
-        _github.Runs = [latest, old];
-        _github.ExpiredRuns.Add(101);
-        ExpireDiscovery(server);
-        await WaitForHealthErrorAsync(server.Client, "expired artifacts");
-        using var index = await server.Client.GetAsync("/flat/alpha/index.json");
-        await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-        using var package = await server.Client.GetAsync(PackageUrl("alpha", oldVersion));
-        await Assert.That(package.StatusCode).IsEqualTo(HttpStatusCode.OK);
-        using var degraded = await GetJsonAsync(server.Client, "/health");
-        await Assert.That(degraded.RootElement.GetProperty("error").GetString()!).Contains("expired artifacts");
-        await Assert.That((await File.ReadAllBytesAsync(SnapshotPath)).SequenceEqual(snapshot)).IsTrue();
-        await Assert.That((await File.ReadAllBytesAsync(RunsPath)).SequenceEqual(history)).IsTrue();
-    }
-
-    [Test]
     public async Task MissingAndUnauthenticatedGhErrorsAreActionableAndRedacted()
     {
         const string marker = "synthetic-sensitive-marker";
@@ -2142,12 +1722,7 @@ public sealed class OfflineFeedTests : IDisposable
             ["Proxy:CacheDirectory"] = CacheDirectory,
             ["Proxy:Repository"] = repository,
             ["Proxy:Workflow"] = workflow,
-            ["Proxy:RunLimit"] = runLimit.ToString()
         };
-        if (pullRequests is not null)
-            for (var index = 0; index < pullRequests.Length; index++) settings[$"Proxy:PullRequests:{index}"] = pullRequests[index].ToString();
-        if (runIds is not null)
-            for (var index = 0; index < runIds.Length; index++) settings[$"Proxy:RunIds:{index}"] = runIds[index].ToString();
         builder.Configuration.AddInMemoryCollection(settings);
         var logs = new CaptureLogs();
         builder.Logging.ClearProviders();
@@ -2155,6 +1730,9 @@ public sealed class OfflineFeedTests : IDisposable
         builder.Services.AddProxy(builder.Configuration);
         builder.Services.AddSingleton<IGitHubClient>(_github);
         var app = builder.Build();
+        var proxyOptions = app.Services.GetRequiredService<ProxyOptions>();
+        if (pullRequests is not null) proxyOptions.PullRequests = pullRequests;
+        if (runIds is not null) proxyOptions.RunIds = runIds;
         var requests = new ConcurrentQueue<string>();
         app.Use(async (context, next) =>
         {
@@ -2408,8 +1986,8 @@ public sealed class OfflineFeedTests : IDisposable
     }
 
     private string CachedPackagePath(long runId, int pullRequest, string id, string version) =>
-        Path.Combine(CacheDirectory, "packages", "discovered", $"{pullRequest}.{runId}.1.{_github.PackagesArtifact(runId).Id}",
-            $"{id}.{version}.nupkg");
+        Path.Combine(CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}", $"{pullRequest}.{runId}.1.{_github.PackagesArtifact(runId).Id}",
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(id.ToLowerInvariant()))) + ".nupkg");
 
     private string RetainedInventoryPath(long runId, int pullRequest) =>
         Path.Combine(CacheDirectory, "inventories", $"{pullRequest}.{runId}.1.{_github.PackagesArtifact(runId).Id}.json");

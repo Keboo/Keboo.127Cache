@@ -90,7 +90,7 @@ public class NuGetLongVersionRestoreTests
         var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cache, PullRequests = [755] };
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile(options.Repository, options.Workflow, builds.Select(x =>
-                new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact, WorkflowVerified: true)).ToList()),
+                new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact, WorkflowVerified: true)).ToList(), SchemaVersion: 2),
             CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
             new CatalogFile(options.Repository, builds.ToList(), CacheSchema.Version), CancellationToken.None);
@@ -146,7 +146,7 @@ public class NuGetLongVersionRestoreTests
         var build = new BuildEntry(100, 1, 755, "unicode", original, version, artifact, github.Version);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
             new RunArtifactsFile(options.Repository, options.Workflow,
-                [new RunArtifacts(build.RunId, build.Attempt, build.PullRequest, build.HeadSha, build.Packages, build.VersionArtifact, WorkflowVerified: true)]),
+                [new RunArtifacts(build.RunId, build.Attempt, build.PullRequest, build.HeadSha, build.Packages, build.VersionArtifact, WorkflowVerified: true)], SchemaVersion: 2),
             CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
             new CatalogFile(options.Repository, [build], CacheSchema.Version), CancellationToken.None);

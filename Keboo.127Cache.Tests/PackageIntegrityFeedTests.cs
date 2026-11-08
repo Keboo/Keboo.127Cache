@@ -348,7 +348,7 @@ public class PackageIntegrityFeedTests
         var builds = new[] { other, healthy };
         var runs = builds.Select(x => new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact, WorkflowVerified: true)).ToList();
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "runs.json"),
-            new RunArtifactsFile(options.Repository, options.Workflow, runs), CancellationToken.None);
+            new RunArtifactsFile(options.Repository, options.Workflow, runs, SchemaVersion: 2), CancellationToken.None);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cache, "catalog.json"),
             new CatalogFile(options.Repository, builds.ToList(), schema), CancellationToken.None);
         return (other, healthy);
