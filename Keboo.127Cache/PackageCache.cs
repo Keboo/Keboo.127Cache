@@ -200,7 +200,20 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
 
     public async Task<string> GetAsync(string id, BuildEntry build, CancellationToken cancellationToken)
     {
-        var packages = await GetPackagesAsync(build, cancellationToken);
+        CachedPackage[] packages;
+        try
+        {
+            packages = await GetPackagesAsync(build, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException
+            && !cancellationToken.IsCancellationRequested)
+        {
+            // A package that is intact on disk stays servable when a sibling cannot be restored.
+            var available = await GetAvailableOfflineAsync(build, cancellationToken, allowRepair: false);
+            var present = available.Packages.SingleOrDefault(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+            if (present is null || FindCachedPath(DirectoryFor(build), present) is not { } path) throw;
+            return path;
+        }
         var package = packages.SingleOrDefault(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidDataException($"Package {id} is not present in artifact {build.Packages.Id}.");
         return FindCachedPath(DirectoryFor(build), package)
@@ -245,7 +258,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
                 var packages = await VerifyCachedAsync(build, directory, index, cancellationToken);
                 var retained = await ReadRetainedInventoryAsync(build, cancellationToken);
                 if (retained is not null && !SameInventory(retained, packages))
-                    throw new InvalidDataException("Cached package inventories do not agree.");
+                    throw new InvalidDataException("Cached package inventory does not agree with the retained inventory.");
                 await SaveRetainedInventoryAsync(build, packages, cancellationToken);
                 return packages;
             }
@@ -381,7 +394,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
         if (retained is not null)
         {
             if (!SameInventory(retained, packages))
-                throw new InvalidDataException("Cached package inventories do not agree.");
+                throw new InvalidDataException("Cached package inventory does not agree with the retained inventory.");
             return;
         }
         var data = new InventoryData(options.Repository, options.Workflow, build.RunId, build.Attempt, build.PullRequest,

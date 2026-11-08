@@ -736,11 +736,10 @@ public sealed class PackageCatalog
         {
             // Completed immutable builds already known locally need no artifact API/download request.
             var existing = next.FindIndex(x => x.RunId == run.Id && x.Attempt == run.Attempt && x.PullRequest == pr);
-            if (existing >= 0)
+            // Verified runs are immutable; legacy runs are re-associated with their artifacts from the live listing.
+            if (existing >= 0 && next[existing].WorkflowVerified)
             {
                 ValidateCachedArtifacts(next[existing]);
-                // The live workflow listing corroborates a cached run without refetching its immutable metadata.
-                if (!next[existing].WorkflowVerified) next[existing] = next[existing] with { WorkflowVerified = true };
                 continue;
             }
             IReadOnlyList<Artifact> artifacts;
@@ -808,7 +807,10 @@ public sealed class PackageCatalog
         {
             throw new SnapshotPersistenceException();
         }
-        var snapshot = OfflineSnapshot.Create(_options, result);
+        // Earlier runs of still-open PRs are retained for outages only; normal serving uses `result`.
+        var retained = availableCached.Select(x => _options.VersionArtifact is null ? x with { VersionArtifact = null } : x)
+            .OrderBy(x => x.RunId).ThenBy(x => x.Attempt).ToArray();
+        var snapshot = OfflineSnapshot.Create(_options, retained);
         try
         {
             await JsonSettings.WriteAtomicAsync(_snapshotFile, snapshot, cancellationToken);

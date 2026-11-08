@@ -263,6 +263,12 @@ Closed PRs disappear from the feed on the next discovery refresh.
 
 ## Offline use and health
 
+Offline behavior applies only to discovery **outages** (GitHub API unreachable or failing).
+While discovery succeeds, the feed serves the latest run of each open PR plus pinned
+RunIds; a skipped, expired, missing or failed build is logged and isolated, and healthy
+builds keep serving without a 503. Earlier retained runs and snapshots are served only
+during an outage.
+
 Before going offline, complete at least one successful discovery and request
 the desired packages so their artifacts or rewritten packages are cached. The
 app saves the **visible build set** from each successful discovery separately
