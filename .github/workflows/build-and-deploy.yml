@@ -22,7 +22,7 @@ jobs:
       sha256: ${{ steps.fingerprint.outputs.sha256 }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -94,7 +94,7 @@ jobs:
             throw 'The canonical package job did not produce a valid artifact ID and SHA-256.'
           }
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -222,7 +222,7 @@ jobs:
       id-token: write
     
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
