@@ -64,3 +64,14 @@ If you make a decision that affects other team members, write it to:
 ```
 The Scribe will merge it into the shared decisions file.
 <!-- squad:copilot-instructions:end -->
+
+## System Isolation (repository rule)
+
+Code, tests, scripts and agents working in this repository must **not modify anything on the
+system outside the repository**. Write only inside the repository's gitignored output folders or
+inside a uniquely named temporary directory that you create and delete. Never change user or
+machine environment variables, the registry, certificates, firewall rules, services, scheduled
+tasks, global tools or SDKs, user-level NuGet configuration, or the hosts file. Never run stress or
+soak loops on a developer machine. Any process that overrides `DOTNET_CLI_HOME` must also set
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false`; otherwise the .NET SDK edits the real user PATH.
+See "System isolation" in `CONTRIBUTING.md`.

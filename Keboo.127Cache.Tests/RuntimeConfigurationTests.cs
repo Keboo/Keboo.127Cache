@@ -559,6 +559,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
         start.Environment["PATH"] = bin + Path.PathSeparator + start.Environment["PATH"];
         start.Environment["FAKE_DOTNET_LOG"] = log;
         start.Environment["DOTNET_CLI_HOME"] = work;
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["TEMP"] = work;
         start.Environment["TMP"] = work;
         start.Environment["TMPDIR"] = work;
@@ -608,6 +610,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
             "--packages", packages, "--disable-parallel", "--verbosity", "quiet" })
             start.ArgumentList.Add(argument);
         start.Environment["DOTNET_CLI_HOME"] = work;
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
         start.Environment["DOTNET_NOLOGO"] = "1";
         start.Environment["NUGET_HTTP_CACHE_PATH"] = Path.Combine(work, "http-cache");
