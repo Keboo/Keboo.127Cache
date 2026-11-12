@@ -28,7 +28,7 @@
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="8.0.2" />
     <PackageVersion Include="Moq" Version="4.21.0" />
     <PackageVersion Include="Moq.AutoMock" Version="4.0.3" />
-    <PackageVersion Include="System.CommandLine" Version="2.0.14" />
+    <PackageVersion Include="System.CommandLine" Version="3.0.0" />
     <PackageVersion Include="TUnit" Version="1.80.0" />
     <PackageVersion Include="TUnit.Assertions" Version="1.80.0" />
     <PackageVersion Include="TUnit.Engine" Version="1.80.0" />
