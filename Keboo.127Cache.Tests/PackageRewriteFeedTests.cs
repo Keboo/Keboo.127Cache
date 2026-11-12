@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Xml.Linq;
+using Keboo._127Cache.Testing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
@@ -42,7 +43,8 @@ public class PackageRewriteFeedTests
         const string widgetVersion = "2.0.0-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
         const string emptyVersion = "1.2.3.4-pr.755.run.r0000000000000000100.attempt.1.artifact.200";
 
-        using (var index = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
+        using (var index = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), "flat/acme.core/index.json")))
             await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(coreVersion);
         using (var index = JsonDocument.Parse(await client.GetStringAsync("flat/acme.widget/index.json")))
             await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(widgetVersion);
@@ -171,8 +173,9 @@ public class PackageRewriteFeedTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var packages = new PackageCache(options, artifacts);
-        var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
-        var build = (await catalog.GetBuildsAsync(CancellationToken.None)).Single();
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
+        var build = (await CatalogTestSynchronization.WhenSettledAsync(catalog,
+            () => catalog.GetBuildsAsync(CancellationToken.None))).Single();
         const string expected = "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
         await Assert.That(build.Version).IsEqualTo(expected);
         var inventory = await packages.GetPackagesAsync(build, CancellationToken.None);
@@ -195,7 +198,7 @@ public class PackageRewriteFeedTests
         var writtenAt = File.GetLastWriteTimeUtc(rewrittenPath);
         using var restartedMemory = new MemoryCache(new MemoryCacheOptions());
         var restartedPackages = new PackageCache(options, new ArtifactCache(options, github));
-        var restartedCatalog = new PackageCatalog(options, github, restartedMemory, new ArtifactCache(options, github), restartedPackages);
+        await using var restartedCatalog = new PackageCatalog(options, github, restartedMemory, new ArtifactCache(options, github), restartedPackages);
         var restartedBuild = (await restartedCatalog.GetBuildsAsync(CancellationToken.None)).Single();
         await Assert.That(await restartedPackages.GetAsync("Acme.Core", restartedBuild, CancellationToken.None)).IsEqualTo(rewrittenPath);
         await Assert.That(File.GetLastWriteTimeUtc(rewrittenPath)).IsEqualTo(writtenAt);
@@ -264,7 +267,8 @@ public class PackageRewriteFeedTests
             catalogLogger: catalogLogger))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            using var index = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json"));
+            using var index = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+                client, app.Services.GetRequiredService<PackageCatalog>(), "flat/acme.core/index.json"));
             var versions = index.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
             await Assert.That(versions.Length).IsEqualTo(1);
             await Assert.That(versions[0]).IsEqualTo("1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
@@ -330,9 +334,9 @@ public class PackageRewriteFeedTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var logger = new CollectingLogger<PackageCatalog>();
-        var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
 
-        var visible = await catalog.GetPackagesAsync(CancellationToken.None);
+        var visible = await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetPackagesAsync(CancellationToken.None));
         await Assert.That(visible.Length).IsEqualTo(3);
         await Assert.That(visible.All(x => x.Build.PullRequest == 755)).IsTrue();
         await Assert.That(await File.ReadAllTextAsync(catalogPath)).IsEqualTo(originalCatalog);
@@ -342,7 +346,8 @@ public class PackageRewriteFeedTests
 
         File.Copy(Path.Combine(options.CacheDirectory, "artifacts", "200.zip"),
             Path.Combine(options.CacheDirectory, "artifacts", "300.zip"));
-        visible = await catalog.GetPackagesAsync(CancellationToken.None);
+        visible = await CatalogTestSynchronization.WhenSettledAsync(catalog,
+            () => catalog.GetPackagesAsync(CancellationToken.None));
         await Assert.That(visible.Length).IsEqualTo(3);
         await Assert.That(visible.All(x => x.Build.PullRequest == 755)).IsTrue();
         var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
@@ -366,7 +371,7 @@ public class PackageRewriteFeedTests
         await Assert.That(NuGetVersion.Parse(expected).ToNormalizedString()).IsEqualTo(expected);
         await Assert.That($"acme.core.{expected}.nupkg.sha512".Length).IsEqualTo(255);
         var catalog = app.Services.GetRequiredService<PackageCatalog>();
-        var build = (await catalog.GetBuildsAsync(CancellationToken.None)).Single();
+        var build = (await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetBuildsAsync(CancellationToken.None))).Single();
         var path = await app.Services.GetRequiredService<PackageCache>().GetAsync("Acme.Core", build, CancellationToken.None);
         await Assert.That(File.Exists(path)).IsTrue();
         await Assert.That(Path.GetFileName(path).Length <= 255).IsTrue();
@@ -413,7 +418,7 @@ public class PackageRewriteFeedTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var logger = new CollectingLogger<PackageCatalog>();
-        var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
 
         var available = await catalog.GetPackagesAsync(CancellationToken.None);
 
@@ -469,7 +474,7 @@ public class PackageRewriteFeedTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var logger = new CollectingLogger<PackageCatalog>();
-        var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
 
         var available = await catalog.GetPackagesAsync(CancellationToken.None);
 
@@ -494,7 +499,7 @@ public class PackageRewriteFeedTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var packages = new PackageCache(options, artifacts);
-        var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
         var build = (await catalog.GetBuildsAsync(CancellationToken.None)).Single();
         var inventory = await packages.GetPackagesAsync(build, CancellationToken.None);
         foreach (var package in inventory)
@@ -535,9 +540,9 @@ public class PackageRewriteFeedTests
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
         var logger = new CollectingLogger<PackageCatalog>();
-        var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
 
-        var healthy = await catalog.GetPackagesAsync(CancellationToken.None);
+        var healthy = await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetPackagesAsync(CancellationToken.None));
         await Assert.That(healthy.Length).IsEqualTo(3);
         await Assert.That(healthy.All(x => x.Build.RunId == 100)).IsTrue();
         await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
@@ -642,7 +647,8 @@ public class PackageRewriteFeedTests
         const string earlier = "1.2.0-beta.3.pr.755.run.r0000000003000000000.attempt.1.artifact.200";
         const string later = "1.2.0-beta.3.pr.755.run.r0000000010000000000.attempt.1.artifact.200";
 
-        using (var versions = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
+        using (var versions = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), "flat/acme.core/index.json")))
         {
             await Assert.That(versions.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(earlier);
             await Assert.That(versions.RootElement.GetProperty("versions")[1].GetString()).IsEqualTo(later);
@@ -716,7 +722,8 @@ public class PackageRewriteFeedTests
         ];
         await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), [9]);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-        using var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json"));
+        using var registration = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), "registration/acme.core/index.json"));
         await Assert.That(registration.RootElement.GetProperty("count").GetInt32()).IsEqualTo(1);
         var page = registration.RootElement.GetProperty("items")[0];
         await Assert.That(page.GetProperty("lower").GetString()).IsEqualTo("1.2.0-beta.3.pr.755.run.r0000000000000000009.attempt.1.artifact.200");
@@ -754,9 +761,10 @@ public class PackageRewriteFeedTests
             new CatalogFile(options.Repository, builds, CacheSchema.Version), CancellationToken.None);
         using var memory = new MemoryCache(new MemoryCacheOptions());
         var artifacts = new ArtifactCache(options, github);
-        var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts));
+        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts));
 
-        var actual = (await catalog.GetBuildsAsync(CancellationToken.None)).Select(x => x.OriginalVersion).ToArray();
+        var actual = (await CatalogTestSynchronization.WhenSettledAsync(
+            catalog, () => catalog.GetBuildsAsync(CancellationToken.None))).Select(x => x.OriginalVersion).ToArray();
 
         await Assert.That(string.Join(",", actual)).IsEqualTo("1.2.0-alpha.2,1.2.0-alpha.10,1.2.0-beta.3,1.2.0-rc.1");
     }

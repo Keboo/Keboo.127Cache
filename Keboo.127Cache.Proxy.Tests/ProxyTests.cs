@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 
 using Keboo._127Cache;
+using Keboo._127Cache.Testing;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Caching.Memory;
@@ -21,7 +22,7 @@ using TUnit.Assertions.Enums;
 
 namespace Keboo._127Cache.Proxy.Tests;
 
-public sealed class ProxyTests : IDisposable
+public sealed class ProxyTests : IAsyncDisposable
 {
     private static CancellationToken Cancellation => TestContext.Current!.Execution.CancellationToken;
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "pr-nuget-tests-" + Guid.NewGuid().ToString("N"));
@@ -29,8 +30,16 @@ public sealed class ProxyTests : IDisposable
     private readonly ProxyOptions _options;
     private readonly MemoryCache _memoryCache = new(new MemoryCacheOptions());
     private readonly ArtifactCache _artifacts;
-    private PackageCatalog CreateCatalog() => new(_options, _github, _memoryCache, _artifacts, CreatePackageCache());
+    private readonly List<PackageCatalog> _catalogs = [];
+    private PackageCatalog CreateCatalog()
+    {
+        var catalog = new PackageCatalog(_options, _github, _memoryCache, _artifacts, CreatePackageCache());
+        _catalogs.Add(catalog);
+        return catalog;
+    }
     private PackageCache CreatePackageCache() => new(_options, _artifacts);
+    private static Task<BuildEntry[]> GetSettledBuildsAsync(PackageCatalog catalog) =>
+        CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetBuildsAsync(Cancellation));
 
     public ProxyTests()
     {
@@ -137,7 +146,7 @@ public sealed class ProxyTests : IDisposable
     public async Task CatalogFiltersRunsAndPersistsImmutableIdentities()
     {
         var catalog = CreateCatalog();
-        var builds = await catalog.GetBuildsAsync(Cancellation);
+        var builds = await GetSettledBuildsAsync(catalog);
         var build = await Assert.That(builds).HasSingleItem();
         await Assert.That(build.RunId).IsEqualTo(100);
         await Assert.That(build.PullRequest).IsEqualTo(755);
@@ -153,7 +162,7 @@ public sealed class ProxyTests : IDisposable
     [Test]
     public async Task PackageCacheDownloadsOnceAndReusesLocalFiles()
     {
-        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var build = await Assert.That(await GetSettledBuildsAsync(CreateCatalog())).HasSingleItem();
         var cache = CreatePackageCache();
         var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => cache.GetAsync("Velopack", build, Cancellation)));
         foreach (var result in results)
@@ -188,7 +197,7 @@ public sealed class ProxyTests : IDisposable
     public async Task PackageInventoryIsDiscoveredAndPersistedWithoutConfiguration()
     {
         var catalog = CreateCatalog();
-        var packages = await catalog.GetPackagesAsync(Cancellation);
+        var packages = await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetPackagesAsync(Cancellation));
         await Assert.That(packages.Select(x => x.Id).Order().ToArray())
             .IsEquivalentTo(new[] { "Example.Plugin", "Velopack", "Velopack.Build", "vpk" }, CollectionOrdering.Matching);
         var plugin = await Assert.That(packages.Where(x => x.Id == "Example.Plugin")).HasSingleItem();
@@ -264,7 +273,7 @@ public sealed class ProxyTests : IDisposable
     {
         _options.RunIds = [100];
         var catalog = CreateCatalog();
-        var build = await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
+        var build = await Assert.That(await GetSettledBuildsAsync(catalog)).HasSingleItem();
         await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
         var cachedPackage = await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         _github.OpenPullRequests = [new(756)];
@@ -301,7 +310,7 @@ public sealed class ProxyTests : IDisposable
             new(104, 1, "closed", "completed", "success", "pull_request", [new(756)]),
             new(105, 1, "push", "completed", "success", "push", [new(755)])
         ];
-        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var build = await Assert.That(await GetSettledBuildsAsync(CreateCatalog())).HasSingleItem();
         await Assert.That(build.RunId).IsEqualTo(100);
         await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
     }
@@ -354,7 +363,8 @@ public sealed class ProxyTests : IDisposable
         await Assert.That(options.RunIds).IsEmpty();
 
         using var client = new HttpClient { BaseAddress = new Uri(baseUrl) };
-        using var versions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
+        using var versions = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), "/flat/velopack/index.json"));
         var listed = versions.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
         var forkVersion = PackageRewriter.VersionFor("1.3.67-gabcdef0", 755, 100, 1, 2);
         var sameVersion = PackageRewriter.VersionFor("1.3.67-gabcdef0", 756, 101, 1, 2);
@@ -551,12 +561,12 @@ public sealed class ProxyTests : IDisposable
     [Test]
     public async Task RawArtifactsAreReusedAfterCatalogOrRewrittenPackagesAreRemoved()
     {
-        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var build = await Assert.That(await GetSettledBuildsAsync(CreateCatalog())).HasSingleItem();
         var package = await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         Directory.Delete(Path.GetDirectoryName(package)!, recursive: true);
         File.Delete(Path.Combine(_options.CacheDirectory, "catalog.json"));
         _github.FailDownloads = true;
-        var restored = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var restored = await Assert.That(await GetSettledBuildsAsync(CreateCatalog())).HasSingleItem();
         await Assert.That(restored).IsEqualTo(build);
         await Assert.That(File.Exists(await CreatePackageCache().GetAsync("Velopack", restored, Cancellation))).IsTrue();
         await Assert.That(_github.PackageDownloads).IsEqualTo(1);
@@ -566,12 +576,12 @@ public sealed class ProxyTests : IDisposable
     [Test]
     public async Task ExpiredArtifactsCanStillBeUsedFromDisk()
     {
-        var build = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var build = await Assert.That(await GetSettledBuildsAsync(CreateCatalog())).HasSingleItem();
         await CreatePackageCache().GetAsync("Velopack", build, Cancellation);
         File.Delete(Path.Combine(_options.CacheDirectory, "catalog.json"));
         _github.Expired = true;
         _github.FailDownloads = true;
-        var restored = await Assert.That(await CreateCatalog().GetBuildsAsync(Cancellation)).HasSingleItem();
+        var restored = await Assert.That(await GetSettledBuildsAsync(CreateCatalog())).HasSingleItem();
         await Assert.That(restored.Version).IsEqualTo(build.Version);
         await Assert.That(restored.Packages.Id).IsEqualTo(build.Packages.Id);
     }
@@ -584,14 +594,14 @@ public sealed class ProxyTests : IDisposable
         await Assert.That(async () => await catalog.GetBuildsAsync(Cancellation))
             .ThrowsExactly<DiscoveryUnavailableException>();
         _github.FailDiscovery = false;
-        await Assert.That(await catalog.GetBuildsAsync(Cancellation)).HasSingleItem();
+        await Assert.That(await GetSettledBuildsAsync(catalog)).HasSingleItem();
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
     }
 
     [Test]
     public async Task CacheCannotBeReusedForAnotherRepository()
     {
-        await CreateCatalog().GetBuildsAsync(Cancellation);
+        await GetSettledBuildsAsync(CreateCatalog());
         _options.Repository = "other/project";
         await Assert.That(() => CreateCatalog()).ThrowsExactly<InvalidDataException>();
     }
@@ -744,7 +754,9 @@ public sealed class ProxyTests : IDisposable
         memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
         await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
-        await Assert.That((await client.GetAsync("/flat/velopack/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
+        using var missingIndex = await CatalogTestSynchronization.GetWhenSettledAsync(client,
+            app.Services.GetRequiredService<PackageCatalog>(), "/flat/velopack/index.json");
+        await Assert.That(missingIndex.StatusCode).IsEqualTo(HttpStatusCode.NotFound);
         await Assert.That((await client.GetAsync($"/flat/velopack/{version}/velopack.{version}.nupkg", Cancellation)).StatusCode)
             .IsEqualTo(HttpStatusCode.NotFound);
         await Assert.That((await client.GetAsync("/registration/velopack/index.json", Cancellation)).StatusCode).IsEqualTo(HttpStatusCode.NotFound);
@@ -801,8 +813,9 @@ public sealed class ProxyTests : IDisposable
         return element.GetString() ?? throw new InvalidDataException($"No version for {id}.");
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        foreach (var catalog in _catalogs) await catalog.DisposeAsync();
         _memoryCache.Dispose();
         if (Directory.Exists(_directory)) Directory.Delete(_directory, recursive: true);
     }
