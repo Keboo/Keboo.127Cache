@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Keboo._127Cache.Testing;
 
 using Keboo._127Cache;
 
@@ -62,6 +63,7 @@ public sealed class OfflineFeedTests : IDisposable
                 using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
                 await Assert.That(problem.RootElement.GetProperty("status").GetInt32()).IsEqualTo(503);
             }
+
             block.TrySetResult();
             _github.DiscoveryBlock = null;
             await RetryUntilHealthyAsync(server.Client);
@@ -71,6 +73,80 @@ public sealed class OfflineFeedTests : IDisposable
         finally
         {
             block.TrySetResult();
+        }
+    }
+
+    [Test]
+    public async Task PendingContentReturns503ThenServesVerifiedPackageAfterWorkCompletes()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        _github.BlockDownloadForArtifact = _github.PackagesArtifact(100).Id;
+        var block = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _github.DownloadBlock = block;
+        await using var server = await StartAsync();
+        try
+        {
+            var request = server.Client.GetAsync("/flat/alpha/index.json");
+            await _github.DownloadStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            using var response = await request.WaitAsync(TimeSpan.FromSeconds(10));
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            await Assert.That(await response.Content.ReadAsStringAsync()).Contains("Build content is still being prepared");
+
+            var catalog = server.App.Services.GetRequiredService<PackageCatalog>();
+            block.TrySetResult();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await catalog.WaitForBackgroundWorkAsync(timeout.Token);
+            using var health = await GetJsonAsync(server.Client, "/health");
+            await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("ok");
+            using var index = JsonDocument.Parse(await server.Client.GetStringAsync("/flat/alpha/index.json"));
+            var version = index.RootElement.GetProperty("versions")[0].GetString()!;
+            var bytes = await server.Client.GetByteArrayAsync(PackageUrl("alpha", version));
+            using var package = new PackageArchiveReader(new MemoryStream(bytes));
+            await Assert.That(package.GetIdentity().Id).IsEqualTo("Alpha");
+            await Assert.That(package.GetIdentity().Version.ToNormalizedString()).IsEqualTo(version);
+        }
+        finally
+        {
+            block.TrySetResult();
+        }
+    }
+
+    [Test]
+    public async Task ShutdownWaitsForTimedOutContentWorkToReleaseItsFile()
+    {
+        _github.Runs = [_github.AddBuild(100, 1, "Alpha")];
+        _github.OpenPullRequests = [new(1)];
+        _github.BlockDownloadForArtifact = _github.PackagesArtifact(100).Id;
+        _github.DownloadBlock = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        _github.DownloadCleanupBlock = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = await StartAsync();
+        Task? shutdown = null;
+        try
+        {
+            var request = server.Client.GetAsync("/flat/alpha/index.json");
+            await _github.DownloadStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            using var response = await request.WaitAsync(TimeSpan.FromSeconds(10));
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
+            var body = await response.Content.ReadAsStringAsync();
+            await Assert.That(body).Contains("No usable cached packages");
+
+            var temporary = Directory.GetFiles(Path.Combine(CacheDirectory, "artifacts"), "*.tmp").Single();
+            shutdown = server.DisposeAsync().AsTask();
+            await _github.DownloadCleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var completed = await Task.WhenAny(shutdown, Task.Delay(250));
+            await Assert.That(completed == shutdown).IsFalse();
+            await Assert.That(File.Exists(temporary)).IsTrue();
+            _github.DownloadCleanupBlock.TrySetResult();
+            await shutdown.WaitAsync(TimeSpan.FromSeconds(10));
+            await Assert.That(File.Exists(temporary)).IsFalse();
+        }
+        finally
+        {
+            _github.DownloadBlock.TrySetResult();
+            _github.DownloadCleanupBlock.TrySetResult();
+            if (shutdown is null) await server.DisposeAsync();
+            else await shutdown;
         }
     }
 
@@ -189,7 +265,8 @@ public sealed class OfflineFeedTests : IDisposable
         _github.FailDownloads = true;
 
         await using var server = await StartAsync();
-        using var index = await server.Client.GetAsync("/flat/velopack/index.json");
+        using var index = await CatalogTestSynchronization.GetWhenSettledAsync(server.Client,
+            server.App.Services.GetRequiredService<PackageCatalog>(), "/flat/velopack/index.json");
         await Assert.That(index.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(index.Headers.GetValues("X-127Cache-Status").Single()).Contains("degraded");
         await Assert.That(index.Headers.GetValues("X-127Cache-Membership").Single()).IsEqualTo("unknown");

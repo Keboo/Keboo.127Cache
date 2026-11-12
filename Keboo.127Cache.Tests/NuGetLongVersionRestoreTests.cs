@@ -3,9 +3,11 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Keboo._127Cache.Testing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NuGet.Packaging;
 using NuGet.Versioning;
@@ -99,7 +101,8 @@ public class NuGetLongVersionRestoreTests
         await using var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github,
             new CollectingLogger<PackageCache>(), catalogLogger: logger);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-        using var missing = await client.GetAsync("flat/acme.core/index.json");
+        using var missing = await CatalogTestSynchronization.GetWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), "flat/acme.core/index.json");
         await Assert.That((int)missing.StatusCode).IsEqualTo(404);
         using var index = JsonDocument.Parse(await client.GetStringAsync("flat/safe.package/index.json"));
         await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(safeVersion);
@@ -159,7 +162,8 @@ public class NuGetLongVersionRestoreTests
 
         if (OperatingSystem.IsWindows())
         {
-            using var index = JsonDocument.Parse(await client.GetStringAsync($"flat/{idPath}/index.json"));
+            using var index = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(client,
+                app.Services.GetRequiredService<PackageCatalog>(), $"flat/{idPath}/index.json"));
             await Assert.That(index.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
             var restore = await RestoreAsync(fixture.DirectoryPath, app.Urls.Single() + "/v3/index.json", id, version);
             if (restore.ExitCode != 0) throw new InvalidOperationException($"Unicode restore failed:\n{restore.Output}");
@@ -168,7 +172,8 @@ public class NuGetLongVersionRestoreTests
         }
         else
         {
-            using var response = await client.GetAsync($"flat/{idPath}/index.json");
+            using var response = await CatalogTestSynchronization.GetWhenSettledAsync(client,
+                app.Services.GetRequiredService<PackageCatalog>(), $"flat/{idPath}/index.json");
             await Assert.That((int)response.StatusCode).IsEqualTo(404);
             await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
                 && x.Exception?.Message.Contains("255-byte Unix component limit", StringComparison.Ordinal) == true)).IsTrue();
