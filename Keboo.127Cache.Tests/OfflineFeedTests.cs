@@ -1514,6 +1514,8 @@ public sealed class OfflineFeedTests : IDisposable
         start.Environment["TMP"] = consumer;
         start.Environment["TMPDIR"] = consumer;
         start.Environment["DOTNET_CLI_HOME"] = consumer;
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["NUGET_HTTP_CACHE_PATH"] = Path.Combine(consumer, "http-cache");
         start.Environment["NUGET_PLUGINS_CACHE_PATH"] = Path.Combine(consumer, "plugins-cache");
         start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";

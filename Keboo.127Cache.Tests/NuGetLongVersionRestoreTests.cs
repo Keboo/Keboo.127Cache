@@ -299,6 +299,8 @@ public class NuGetLongVersionRestoreTests
         start.Environment["TMP"] = scratch;
         start.Environment["TMPDIR"] = scratch;
         start.Environment["DOTNET_CLI_HOME"] = Path.Combine(project, "home");
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["NUGET_HTTP_CACHE_PATH"] = Path.Combine(project, "http-cache");
         start.Environment["NUGET_SCRATCH"] = scratch;
         start.Environment["NUGET_PLUGINS_CACHE_PATH"] = Path.Combine(project, "plugin-cache");

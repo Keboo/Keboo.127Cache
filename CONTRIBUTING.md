@@ -1,5 +1,46 @@
 # Contributing
 
+## System isolation
+
+Nothing in this repository may change the state of the machine outside the
+repository. This applies to the application, tests, scripts, CI helpers and
+agent-driven work. Write only inside the repository (gitignored output such as
+`bin`, `obj`, `artifacts`, `TestResults`) or inside a uniquely named temporary
+directory that the code creates and deletes itself.
+
+Do not, even temporarily:
+
+- Change user or machine environment variables (`setx`,
+  `[Environment]::SetEnvironmentVariable(..., 'User' | 'Machine')`, registry
+  `Environment` keys). Set variables only on a child `ProcessStartInfo` or in
+  the current process.
+- Write to the registry, install or trust certificates (`dotnet dev-certs
+  --trust`), add firewall rules, URL ACLs, services, scheduled tasks or startup
+  entries, or edit the hosts file.
+- Install global tools, workloads, SDKs or runtimes, or edit the user-level
+  `NuGet.Config` or global package sources. Use `--tool-path`, `--configfile`
+  and per-test `NUGET_PACKAGES` / `NUGET_HTTP_CACHE_PATH` directories.
+- Run stress, soak or constrained-CPU loops on a developer machine.
+
+Watch for implicit side effects of tools. The .NET SDK appends
+`<DOTNET_CLI_HOME>\.dotnet\tools` to the **user PATH** the first time it runs
+with a new `DOTNET_CLI_HOME`. `DOTNET_SKIP_FIRST_TIME_EXPERIENCE` does not stop
+this. Every process that overrides `DOTNET_CLI_HOME` must also set:
+
+```csharp
+start.Environment["DOTNET_CLI_HOME"] = home;
+start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
+start.Environment["DOTNET_GENERATE_ASPNET_CERTIFICATE"] = "false";
+start.Environment["DOTNET_NOLOGO"] = "1";
+```
+
+`SystemIsolationTests` enforces the PATH opt-out. Without it, each test run added
+hundreds of entries until the user PATH exceeded Windows' 32,767-character
+environment limit. New processes then failed with `0xc0000017`, which broke
+Task Manager, MMC and SmartScreen, and a reboot did not fix it. If a change
+needs machine-level setup, document it as a manual step for the developer
+instead of automating it.
+
 ## Test conventions
 
 Both test projects use the centrally versioned TUnit packages and the
