@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -113,21 +112,22 @@ public sealed class RuntimeConfigurationTests : IDisposable
     public async Task SourceWithoutVersionArtifactServesPackagesWithoutInventingAnInstallerVersion()
     {
         var github = new PackageGitHub(_directory) { OpenPullRequests = [new(42)] };
-        var baseUrl = FreeUrl();
         var builder = CreateBuilder(Path.Combine(_directory, "cache"), new Dictionary<string, string?>
         {
-            ["Server:BaseUrl"] = baseUrl,
             ["Sources:0:Name"] = "example",
             ["Sources:0:Repository"] = "owner/repo",
             ["Sources:0:Workflow"] = "ci.yml",
             ["Sources:0:Artifact"] = "packages"
-        }, baseUrl);
+        });
         builder.Services.AddSingleton<IGitHubClient>(github);
         await using var app = builder.Build();
         app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
+        var baseUrl = app.Urls.Single();
+        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = baseUrl;
 
+        await app.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(CancellationToken.None);
         await Assert.That(github.ArtifactQueries).IsEqualTo(1);
         await Assert.That(github.Downloads).IsEqualTo(0);
         using var client = Client(app);
@@ -360,20 +360,20 @@ public sealed class RuntimeConfigurationTests : IDisposable
                     [new BuildEntry(100, 1, 42, "current", "1.2.3",
                         "1.2.3-pr.42.run.r0000000000000000100.attempt.1.artifact.7", github.Packages, null)]), CancellationToken.None);
         }
-        var baseUrl = FreeUrl();
         var builder = CreateBuilder(cache, new Dictionary<string, string?>
         {
-            ["Server:BaseUrl"] = baseUrl,
             ["Sources:0:Name"] = "example",
             ["Sources:0:Repository"] = "owner/repo",
             ["Sources:0:Workflow"] = "ci.yml",
             ["Sources:0:Artifact"] = "packages"
-        }, baseUrl);
+        });
         builder.Services.AddSingleton<IGitHubClient>(github);
         await using var app = builder.Build();
         app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
+        var baseUrl = app.Urls.Single();
+        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = baseUrl;
 
         var (exitCode, output, commands) = await RunVpkInstallerAsync(baseUrl);
         if (exitCode != 0) throw new InvalidOperationException($"The existing installer failed:\n{output}");
@@ -399,16 +399,14 @@ public sealed class RuntimeConfigurationTests : IDisposable
     public async Task VersionArtifactRetainsLegacyBuildVersionWithoutDownloadingPackages()
     {
         var github = new PackageGitHub(_directory, includeVersionArtifact: true) { OpenPullRequests = [new(42)] };
-        var baseUrl = FreeUrl();
         var builder = CreateBuilder(Path.Combine(_directory, "cache"), new Dictionary<string, string?>
         {
-            ["Server:BaseUrl"] = baseUrl,
             ["Sources:0:Name"] = "example",
             ["Sources:0:Repository"] = "owner/repo",
             ["Sources:0:Workflow"] = "ci.yml",
             ["Sources:0:Artifact"] = "packages",
             ["Sources:0:VersionArtifact"] = "build-version"
-        }, baseUrl);
+        });
         builder.Services.AddSingleton<IGitHubClient>(github);
         await using var app = builder.Build();
         app.UseExceptionHandler();
@@ -503,7 +501,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
     }
 
     private WebApplicationBuilder CreateBuilder(
-        string cacheDirectory, Dictionary<string, string?> entries, string? listenUrl = null)
+        string cacheDirectory, Dictionary<string, string?> entries)
     {
         Directory.CreateDirectory(_directory);
         entries["Server:CacheDirectory"] = cacheDirectory;
@@ -513,7 +511,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
             EnvironmentName = "Production"
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls(listenUrl ?? "http://127.0.0.1:0");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Configuration.AddInMemoryCollection(entries);
         builder.Services.AddProxy(builder.Configuration);
         return builder;
@@ -631,20 +629,6 @@ public sealed class RuntimeConfigurationTests : IDisposable
         using var assets = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_directory, "obj", "project.assets.json")));
         await Assert.That(assets.RootElement.GetProperty("libraries").TryGetProperty($"Example.Package/{version}", out _)).IsTrue();
         await Assert.That(File.Exists(Path.Combine(packages, "example.package", version, $"example.package.{version}.nupkg"))).IsTrue();
-    }
-
-    private static string FreeUrl()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        try
-        {
-            listener.Start();
-            return $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
-        }
-        finally
-        {
-            listener.Stop();
-        }
     }
 
     public void Dispose()

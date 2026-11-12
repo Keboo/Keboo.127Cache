@@ -229,6 +229,15 @@ public class PackageIntegrityFeedTests
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
             await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                var current = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
+                if (current.SchemaVersion == CacheSchema.Version) break;
+                await Task.Delay(20);
+            }
+            var migrated = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
+            await Assert.That(migrated.SchemaVersion).IsEqualTo(CacheSchema.Version);
         }
         var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
         await Assert.That(saved.SchemaVersion).IsEqualTo(CacheSchema.Version);
