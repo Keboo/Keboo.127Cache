@@ -21,6 +21,7 @@ public static class ProxyExtensions
             provider.GetService<IHostApplicationLifetime>()));
         services.AddHostedService<CatalogWarmupService>();
         services.AddSingleton<ICacheEvictionService, CacheEvictionService>();
+        services.AddSingleton<IManagementService, ManagementService>();
         services.AddHostedService<CacheRetentionService>();
         services.AddExceptionHandler<DiscoveryExceptionHandler>();
         services.AddProblemDetails();
@@ -66,6 +67,7 @@ public static class ProxyExtensions
             }
         });
 
+        ManagementEndpoints.Map(app);
         app.MapGet("/health", (PackageCatalog catalog) => Results.Ok(catalog.GetHealth()));
         app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) =>
         {

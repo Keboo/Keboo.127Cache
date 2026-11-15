@@ -197,6 +197,8 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
     internal ArtifactCache GetArtifactCache(string? name = null) => Engine(name).Artifacts;
     internal IReadOnlyList<string> SourceNames => _engines.Select(x => x.Name).ToArray();
     internal IReadOnlyList<SourceCatalog> Sources => _engines.Where(x => x.Options.HasSource).ToArray();
+    internal IReadOnlyList<(string Name, string Repository, string Error)> FailedSources =>
+        _failed.Select(x => (x.Name, x.Repository, x.Error.Message)).ToArray();
 
     private SourceCatalog Engine(string? name) => name is null ? _engines.Single() : _engines.First(x => x.Name == name);
 

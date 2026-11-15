@@ -306,6 +306,50 @@ deleting it, and files in use are left in place and reported as an error for tha
 (`closed-pull-requests.json` in the source directory), because GitHub discovery only reports open
 pull requests.
 
+## Management API
+
+The same process serves a JSON API under `/api` (every response carries `X-127Cache-Api-Version: 1`).
+Errors are always `application/problem+json` (404 unknown source/route, 400 bad input, 403 rejected
+cross-site request, 409 a build was in use, 503 discovery unavailable). `/builds` is unchanged and
+still serves the `Install-PrBuild.ps1` scripts.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/sources` | name, repository, workflow, artifact, status (`ok`/`degraded`/`failed`), `lastRefreshUtc`, `lastError` |
+| `GET /api/builds[?source=]` | per source/PR/run: version, size, `cachedState` (`cached`/`partial`/`notCached`), `served`; never downloads |
+| `GET /api/packages[?source=]` | package id to versions, with source, PR, run, attempt (same content as the feed) |
+| `POST /api/refresh[?source=]` | force rediscovery, bypassing the memory cache; concurrent calls for a source share one discovery (`coalesced`) |
+| `DELETE /api/builds/{source}/{runId}/{attempt}` | remove one cached build |
+| `DELETE /api/pull-requests/{source}/{pullRequest}` | remove every cached run of a pull request |
+| `DELETE /api/sources/{source}/cache` | empty one source's cache |
+| `DELETE /api/closed-pull-requests[?source=&closedForDays=]` | remove builds of closed pull requests |
+
+All `DELETE`s accept `?dryRun=true` and delegate to `ICacheEvictionService`; the response lists
+`bytesReclaimed`, `removedCount` and per build `willReappear`/`reappearance` (see above). Removing a
+build that is not cached succeeds with `removedCount` 0. The UI should call the injected
+`IManagementService` (`GetSourcesAsync`, `GetBuildsAsync`, `GetPackagesAsync`, `RefreshAsync`) and
+`ICacheEvictionService` directly rather than HTTP.
+
+### Cross-site request protection
+
+Any web page can send requests to a loopback server, so `/api` enforces:
+
+- **Host**: the `Host` header must be `localhost`, a loopback address or the host of `Server.BaseUrl`
+  (blocks DNS rebinding), for every method.
+- **Origin**: on `POST`/`DELETE` an `Origin` header, if sent, must equal this server's origin, and
+  `Sec-Fetch-Site` must be `same-origin` or `none`.
+- **Custom header**: on `POST`/`DELETE` the request must send `X-127Cache-Client` (any non-empty
+  value). Browsers only send custom headers cross-origin after a CORS preflight, which the server
+  never grants.
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:55631/api/refresh -Headers @{ 'X-127Cache-Client' = 'script' }
+```
+
+Blazor form posts do not use the custom header. They post to the UI's own endpoints and use
+ASP.NET Core antiforgery (`UseAntiforgery()` plus the antiforgery token in the form); they can also
+call `ManagementRequestGuard.ValidateSameOrigin` for the Host/Origin checks.
+
 ## Offline use and health
 
 Offline behavior applies only to discovery **outages** (GitHub API unreachable or failing).
