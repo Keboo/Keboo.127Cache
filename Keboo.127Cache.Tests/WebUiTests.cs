@@ -28,6 +28,7 @@ public sealed class WebUiTests
         public required WebApplication App { get; init; }
         public required HttpClient Client { get; init; }
         public required string CacheDirectory { get; init; }
+        public required FixtureGitHub GitHub { get; init; }
         public PackageCatalog Catalog => App.Services.GetRequiredService<PackageCatalog>();
 
         public static async Task<Host> StartAsync(PackageRewriteFixture fixture)
@@ -51,7 +52,7 @@ public sealed class WebUiTests
             app.MapProxy();
             await app.StartAsync();
             var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            return new Host { App = app, Client = client, CacheDirectory = cache };
+            return new Host { App = app, Client = client, CacheDirectory = cache, GitHub = github };
         }
 
         public async Task PopulateAsync()
@@ -232,5 +233,123 @@ public sealed class WebUiTests
         var result = Program.BuildCommandLine().Parse("serve --open");
 
         await Assert.That(result.Errors).IsEmpty();
+    }
+
+    private static string Token(string html)
+    {
+        var match = Regex.Match(html, "__RequestVerificationToken[^>]*value=\"([^\"]+)\"");
+        return match.Success ? System.Net.WebUtility.HtmlDecode(match.Groups[1].Value) : throw new InvalidOperationException("No antiforgery token in the page.");
+    }
+
+    private static Task<HttpResponseMessage> PostFormAsync(Host host, string url, string handler, string token, params (string, string)[] fields) =>
+        host.Client.PostAsync(url, new FormUrlEncodedContent(new[] { ("_handler", handler), ("__RequestVerificationToken", token) }
+            .Concat(fields).Select(x => new KeyValuePair<string, string>(x.Item1, x.Item2))));
+
+    [Test]
+    public async Task RefreshButtonsPostWithAntiforgeryAndShowTheResultPerSource()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+        await host.PopulateAsync();
+        var page = await host.Client.GetStringAsync("");
+
+        await Assert.That(page).Contains("Refresh all sources");
+        await Assert.That(page).Contains("name=\"source\" value=\"main\"");
+        await Assert.That(page).Contains("form=\"refresh-form\"");
+        await Assert.That(page).Contains("method=\"post\"");
+        var token = Token(page);
+
+        using var one = await PostFormAsync(host, "", "refresh", token, ("source", "main"));
+        var oneHtml = await one.Content.ReadAsStringAsync();
+        await Assert.That(one.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(oneHtml).Contains("Refresh finished.");
+        await Assert.That(oneHtml).Contains("<strong>main</strong>");
+        await Assert.That(oneHtml).Contains("1 build(s) found");
+        await Assert.That(oneHtml).Contains("Downloaded");
+
+        using var all = await PostFormAsync(host, "", "refresh", token, ("source", ""));
+        await Assert.That(await all.Content.ReadAsStringAsync()).Contains("Refresh finished.");
+
+        using var forged = await host.Client.PostAsync("", new FormUrlEncodedContent([new("_handler", "refresh"), new("source", "main")]));
+        await Assert.That(forged.StatusCode).IsEqualTo(HttpStatusCode.BadRequest);
+    }
+
+    [Test]
+    public async Task RefreshErrorsAreDisplayed()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+        await host.PopulateAsync();
+        var token = Token(await host.Client.GetStringAsync(""));
+
+        using var response = await PostFormAsync(host, "", "refresh", token, ("source", "nope"));
+        var html = await response.Content.ReadAsStringAsync();
+
+        await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(html).Contains("role=\"alert\"");
+        await Assert.That(html).Contains("Refresh failed:");
+        await Assert.That(html).Contains("Source &#x27;nope&#x27; is not configured");
+    }
+
+    [Test]
+    public async Task RemovingABuildAsksForConfirmationThenRefreshDownloadsItAgain()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+        await host.PopulateAsync();
+        const string Url = "remove?scope=build&source=main&run=100&attempt=1";
+        var overview = await host.Client.GetStringAsync("");
+        await Assert.That(overview).Contains("href=\"/remove?scope=build&amp;source=main&amp;run=100&amp;attempt=1\"");
+        await Assert.That(overview).Contains("Remove closed-PR builds");
+        var expected = UiFormat.Size((await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync()).Single().SizeBytes);
+
+        var confirm = await host.Client.GetStringAsync(Url);
+
+        await Assert.That(confirm).Contains($"<strong>{expected}</strong>");
+        await Assert.That(confirm).Contains("downloaded again by the");
+        await Assert.That(confirm).Contains("cannot be restored");
+        await Assert.That(confirm).Contains("pull request is open: downloaded again on the next refresh");
+        var builds = await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync();
+        await Assert.That(builds.Single().CachedState).IsEqualTo("cached");
+
+        var token = Token(confirm);
+        using var removed = await PostFormAsync(host, Url, "remove", token,
+            ("scope", "build"), ("source", "main"), ("run", "100"), ("attempt", "1"));
+        var html = await removed.Content.ReadAsStringAsync();
+        await Assert.That(removed.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(html).Contains("Removed 1 build(s) and reclaimed");
+        await Assert.That(html).Contains("removed (pull request is open: downloaded again on the next refresh)");
+        var afterRemoval = await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync();
+        await Assert.That(afterRemoval.Single().CachedState).IsEqualTo("notCached");
+
+        using var refreshed = await PostFormAsync(host, "", "refresh", Token(await host.Client.GetStringAsync("")), ("source", "main"));
+        var after = await refreshed.Content.ReadAsStringAsync();
+        await Assert.That(after).Contains("Refresh finished.");
+        await Assert.That(after).Contains("Downloaded");
+        await Assert.That(after).DoesNotContain("Metadata only");
+        await Assert.That(host.GitHub.Downloads).IsGreaterThan(2);
+    }
+
+    [Test]
+    public async Task RemovingClosedPullRequestBuildsAndRemovalErrorsAreDisplayed()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+        await host.PopulateAsync();
+
+        var closed = await host.Client.GetStringAsync("remove?scope=closed");
+        await Assert.That(closed).Contains("Nothing to remove");
+
+        var unknown = await host.Client.GetStringAsync("remove?scope=build&source=nope&run=1&attempt=1");
+        await Assert.That(unknown).Contains("role=\"alert\"");
+        await Assert.That(unknown).Contains("nope");
+        await Assert.That(unknown).DoesNotContain("name=\"__RequestVerificationToken\"");
+
+        var invalid = await host.Client.GetStringAsync("remove?scope=build");
+        await Assert.That(invalid).Contains("does not say which builds to remove");
+
+        using var forged = await host.Client.PostAsync("remove", new FormUrlEncodedContent(
+            [new("_handler", "remove"), new("scope", "closed")]));
+        await Assert.That(forged.StatusCode).IsEqualTo(HttpStatusCode.BadRequest);
     }
 }

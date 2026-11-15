@@ -54,7 +54,7 @@ PR build install/restore/removal against an already-running proxy.
 
 ## Web UI
 
-`serve` also hosts a read-only web UI at `http://localhost:55631/` (the configured `Server.BaseUrl`);
+`serve` also hosts a web UI at `http://localhost:55631/` (the configured `Server.BaseUrl`);
 the startup log prints its URL. Pass `--open` to launch it in your default browser:
 
 ```powershell
@@ -66,12 +66,21 @@ keboo-127cache serve --open
   rewritten and original versions, cache state (downloaded, partially downloaded, metadata only), size
   and age, plus links to the pull request and run on GitHub.
 - **Packages** (`/packages`): every package id with its served versions.
+- **Refresh**: a "Refresh all sources" button and a per-source Refresh button rediscover builds from
+  GitHub (same as `POST /api/refresh`). The page shows a busy state while it runs, then the result per
+  source (builds found, or the error) and the updated tables.
+- **Remove** (`/remove`): each cached build has a Remove link, and "Remove closed-PR builds" removes the
+  builds of closed pull requests. Both first show a confirmation (a dry run) with the number of bytes that
+  will be reclaimed and, per build, whether it comes back. Removal deletes the cache only: a build of an
+  open pull request is downloaded again by the next refresh; a build of a closed pull request or with
+  expired artifacts cannot be restored. The result page lists what was removed.
 
 It is a Blazor Web App (Razor Components) in the same process using static server-side rendering:
-pages work without JavaScript (a ~15 line script only adds the Copy button), there is no WebAssembly,
+pages work without JavaScript (a small script only adds the Copy button and the refresh busy state; actions are
+plain POST forms protected by ASP.NET Core antiforgery tokens), there is no WebAssembly,
 no Node toolchain and no CDN. The stylesheet and script are embedded in the tool and served from
 `/_ui/`, so the browser makes no external requests. Components call `IManagementService` and
-`ICacheEvictionService` directly. The UI owns `/` and `/packages`; the feed, `/api`, `/health` and
+`ICacheEvictionService` directly. The UI owns `/`, `/packages` and `/remove`; the feed, `/api`, `/health` and
 `/builds` keep their routes. UI requests get the same Host (DNS rebinding) and Origin checks as `/api`,
 and the antiforgery key ring is stored in `{CacheDirectory}/.data-protection`, never in the user profile.
 

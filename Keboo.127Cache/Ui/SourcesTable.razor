@@ -10,6 +10,7 @@
                 <th scope="col">Status</th>
                 <th scope="col">Last refresh</th>
                 <th scope="col">Error</th>
+                <th scope="col">Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -46,6 +47,9 @@
                             <span class="error">@error</span>
                         }
                     </td>
+                    <td>
+                        <button type="submit" form="@RefreshFormId" name="source" value="@source.Name" data-busy-label="Refreshing @source.Name…">Refresh</button>
+                    </td>
                 </tr>
             }
         </tbody>
@@ -55,4 +59,6 @@
 @code {
     [Parameter, EditorRequired] public IReadOnlyList<SourceInfo> Sources { get; set; } = [];
     [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+    // The refresh buttons submit the form with this id (rendered by the page) through the HTML form attribute.
+    [Parameter] public string RefreshFormId { get; set; } = "refresh-form";
 }
