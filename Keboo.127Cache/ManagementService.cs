@@ -80,9 +80,24 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
                 seen.Add(key);
                 cached.TryGetValue(key, out var entry);
                 var state = disk.PackageBytes > 0 && !disk.IsPartial ? "cached" : "partial";
+                var version = Nullable(entry?.Version);
+                var original = Nullable(entry?.OriginalVersion);
+                if (entry is not null && version is null && state == "cached")
+                {
+                    // Without a version artifact the version comes from the packages, which are read from the cache.
+                    try
+                    {
+                        var versions = (await target.Packages.GetPackagesAsync(entry, cancellationToken))
+                            .Select(x => (x.Version, x.OriginalVersion)).Distinct().ToArray();
+                        if (versions.Length == 1) (version, original) = versions[0];
+                    }
+                    catch (Exception exception) when (exception is IOException or InvalidDataException
+                        && !cancellationToken.IsCancellationRequested)
+                    {
+                    }
+                }
                 result.Add(new BuildInfo(target.Name, disk.PullRequest, disk.RunId, disk.Attempt, entry?.HeadSha,
-                    Nullable(entry?.Version), Nullable(entry?.OriginalVersion), disk.TotalBytes, state,
-                    served.Contains(key), disk.PullRequestClosedSinceUtc));
+                    version, original, disk.TotalBytes, state, served.Contains(key), disk.PullRequestClosedSinceUtc));
             }
             foreach (var key in served.Where(x => !seen.Contains(x)))
                 result.Add(new BuildInfo(target.Name, key.Item1, key.Item2, key.Item3, null, null, null, 0, "notCached", true, null));
