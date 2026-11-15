@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -118,14 +119,29 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
                     new XElement("packageSource", new XAttribute("key", "external"),
                         new XElement("package", new XAttribute("pattern", "Newtonsoft.Json"))))))
             .Save(_configFile);
+
+        await GetVersionsAsync("Velopack", cancellationToken);
     }
 
     public async Task<string[]> GetVersionsAsync(string id, CancellationToken cancellationToken)
     {
         if (_app is null) throw new InvalidOperationException("The feed has not been started.");
         using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(_app.Urls.Single()) };
-        using var response = JsonDocument.Parse(await client.GetStringAsync($"/flat/{id.ToLowerInvariant()}/index.json", cancellationToken));
-        return response.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (true)
+        {
+            using var response = await client.GetAsync($"/flat/{id.ToLowerInvariant()}/index.json", cancellationToken);
+            if (response.StatusCode != HttpStatusCode.ServiceUnavailable)
+                response.EnsureSuccessStatusCode();
+            if (response.IsSuccessStatusCode && !response.Headers.Contains("X-127Cache-Status"))
+            {
+                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+                return json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
+            }
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException($"The package index for {id} did not become healthy: {await response.Content.ReadAsStringAsync(cancellationToken)}");
+            await Task.Delay(20, cancellationToken);
+        }
     }
 
     public async Task<JsonDocument> RestoreAsync(string id, string version, CancellationToken cancellationToken)
