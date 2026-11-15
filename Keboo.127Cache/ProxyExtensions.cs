@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Keboo.LocalCache.Ui;
 
 namespace Keboo.LocalCache;
 
@@ -25,6 +26,7 @@ public static class ProxyExtensions
         services.AddHostedService<CacheRetentionService>();
         services.AddExceptionHandler<DiscoveryExceptionHandler>();
         services.AddProblemDetails();
+        services.AddWebUi();
         return services;
     }
 
@@ -68,6 +70,7 @@ public static class ProxyExtensions
         });
 
         ManagementEndpoints.Map(app);
+        app.MapWebUi();
         app.MapGet("/health", (PackageCatalog catalog) => Results.Ok(catalog.GetHealth()));
         app.MapGet("/builds", async (PackageCatalog catalog, CancellationToken ct) =>
         {
@@ -90,7 +93,7 @@ public static class ProxyExtensions
         FeedEndpoints.Map(app);
     }
 
-    private static bool IsFeedPath(PathString path) =>
+    internal static bool IsFeedPath(PathString path) =>
         path.StartsWithSegments("/v3") || path.StartsWithSegments("/flat")
         || path.StartsWithSegments("/registration") || path.StartsWithSegments("/query")
         || path.StartsWithSegments("/autocomplete") || path.StartsWithSegments("/builds");

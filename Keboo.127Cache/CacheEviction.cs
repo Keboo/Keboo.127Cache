@@ -38,7 +38,7 @@ public sealed record RemovalResult(IReadOnlyList<RemovedBuild> Builds, long Byte
 
 public sealed record BuildDiskUsage(
     string Source, int PullRequest, long RunId, int Attempt, long ArtifactBytes, long PackageBytes,
-    DateTimeOffset? PullRequestClosedSinceUtc, bool IsPartial)
+    DateTimeOffset? PullRequestClosedSinceUtc, bool IsPartial, DateTimeOffset? CachedUtc = null)
 {
     public long TotalBytes => ArtifactBytes + PackageBytes;
 }

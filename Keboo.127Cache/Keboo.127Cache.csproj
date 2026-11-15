@@ -22,6 +22,8 @@
     <InternalsVisibleTo Include="Keboo.127Cache.Tests" />
     <InternalsVisibleTo Include="Keboo.127Cache.Proxy.Tests" />
     <None Include="..\assets\icon.png" Pack="true" PackagePath="\" />
+    <EmbeddedResource Include="Ui\app.css" />
+    <EmbeddedResource Include="Ui\app.js" />
     <PackageReference Include="System.CommandLine" />
     <PackageReference Include="NuGet.Packaging" />
   </ItemGroup>

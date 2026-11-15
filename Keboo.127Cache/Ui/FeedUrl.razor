@@ -1,0 +1,10 @@
+<div class="feed">
+    <label for="feed-url"><strong>NuGet feed URL</strong></label>
+    <input id="feed-url" type="text" readonly value="@Url" aria-describedby="feed-hint" />
+    <button type="button" data-copy-target="feed-url">Copy</button>
+</div>
+<p id="feed-hint" class="muted">Add this as a package source: <code>dotnet nuget add source @Url</code></p>
+
+@code {
+    [Parameter, EditorRequired] public string Url { get; set; } = "";
+}

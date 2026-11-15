@@ -10,7 +10,8 @@ public sealed record SourceInfo(
 // Served is true when the build is part of the current feed; Version is only known once the build was materialized.
 public sealed record BuildInfo(
     string Source, int PullRequest, long RunId, int Attempt, string? HeadSha, string? Version, string? OriginalVersion,
-    long SizeBytes, string CachedState, bool Served, DateTimeOffset? PullRequestClosedSinceUtc);
+    long SizeBytes, string CachedState, bool Served, DateTimeOffset? PullRequestClosedSinceUtc,
+    DateTimeOffset? CachedUtc = null);
 
 public sealed record PackageVersionInfo(string Version, string OriginalVersion, string Source, int PullRequest, long RunId, int Attempt);
 
@@ -97,7 +98,7 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
                     }
                 }
                 result.Add(new BuildInfo(target.Name, disk.PullRequest, disk.RunId, disk.Attempt, entry?.HeadSha,
-                    version, original, disk.TotalBytes, state, served.Contains(key), disk.PullRequestClosedSinceUtc));
+                    version, original, disk.TotalBytes, state, served.Contains(key), disk.PullRequestClosedSinceUtc, disk.CachedUtc));
             }
             foreach (var key in served.Where(x => !seen.Contains(x)))
                 result.Add(new BuildInfo(target.Name, key.Item1, key.Item2, key.Item3, null, null, null, 0, "notCached", true, null));
