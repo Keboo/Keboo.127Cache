@@ -113,8 +113,8 @@ public sealed class WebUiTests
         await Assert.That(html).Contains("href=\"https://github.com/org/main/pull/755\"");
         await Assert.That(html).Contains("href=\"https://github.com/org/main/actions/runs/100/attempts/1\"");
         await Assert.That(html).Contains("<li>acme.core</li>", StringComparison.OrdinalIgnoreCase);
-        await Assert.That(html).Contains(".pr.755.run.100.");
-        await Assert.That(html).Contains("1.2.0-beta.3.pr.755.run.100.");
+        await Assert.That(html).Contains(".pr.755.run.r0000000000000000100.attempt.1.");
+        await Assert.That(html).Contains("1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.");
         await Assert.That(html).Contains("Downloaded");
         await Assert.That(html).Contains("scope=\"col\"");
     }
@@ -150,7 +150,7 @@ public sealed class WebUiTests
         var html = await host.Client.GetStringAsync("packages");
 
         await Assert.That(html).Contains("<caption>acme.core</caption>", StringComparison.OrdinalIgnoreCase);
-        await Assert.That(html).Contains("1.2.0-beta.3.pr.755.run.100.");
+        await Assert.That(html).Contains("1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.");
         await Assert.That(html).Contains("#755");
     }
 
