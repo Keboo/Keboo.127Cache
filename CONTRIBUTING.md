@@ -61,11 +61,11 @@ advertised feed URL. Use `[NotInParallel]` only when isolation is not possible,
 and document the shared resource that requires it.
 
 Feed discovery and content preparation run in the background. Successful catalog
-assertions and NuGet-client fixtures must wait for readiness with a bounded retry
-rather than assume preparation finishes within the feed's one-second request
-budget. Retry only expected in-progress discovery/content failures (or HTTP 503),
-and keep permanent errors visible. Finish preparing the fixture before running
-consumers or deleting its cache.
+and HTTP assertions should use `CatalogTestSynchronization` to await actual
+background work rather than assume it finishes within the feed's one-second
+request budget. The shared helper bounds its wait and preserves permanent
+failures. Finish preparing the fixture before running consumers, and drain
+background work before deleting its cache.
 `WebApplication.StartAsync` does not await hosted-service warmup; await the
 warmup service's execution task before asserting metadata-only startup effects.
 

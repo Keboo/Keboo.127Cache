@@ -42,6 +42,8 @@ public sealed class ProxyTests : IAsyncDisposable
         CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetBuildsAsync(Cancellation));
     private static Task<PublishedPackage[]> GetSettledPackagesAsync(PackageCatalog catalog) =>
         CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetPackagesAsync(Cancellation));
+    private static Task<RunArtifacts[]> GetSettledRunsAsync(PackageCatalog catalog) =>
+        CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetRunArtifactsAsync(Cancellation));
 
     public ProxyTests()
     {
@@ -119,7 +121,7 @@ public sealed class ProxyTests : IAsyncDisposable
     {
         var catalog = CreateCatalog();
         _github.FailDownloads = true;
-        var run = await Assert.That(await GetRunsWhenReadyAsync(catalog)).HasSingleItem();
+        var run = await Assert.That(await GetSettledRunsAsync(catalog)).HasSingleItem();
         await Assert.That(run.RunId).IsEqualTo(100);
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
         await Assert.That(_github.RunQueries).IsEqualTo(1);
@@ -133,7 +135,7 @@ public sealed class ProxyTests : IAsyncDisposable
         var savedRun = await Assert.That(saved.Runs).HasSingleItem();
         await Assert.That(savedRun).IsEqualTo(run);
 
-        var restoredRun = await Assert.That(await GetRunsWhenReadyAsync(CreateCatalog())).HasSingleItem();
+        var restoredRun = await Assert.That(await GetSettledRunsAsync(CreateCatalog())).HasSingleItem();
         await Assert.That(restoredRun).IsEqualTo(run);
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(2);
         await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
@@ -420,7 +422,7 @@ public sealed class ProxyTests : IAsyncDisposable
             new(110, 1, "unique", "completed", "failure", "pull_request", [], "topic", new("team/widgets"))
         ];
 
-        var runs = await GetRunsWhenReadyAsync(CreateCatalog());
+        var runs = await GetSettledRunsAsync(CreateCatalog());
         await Assert.That(runs.Select(x => $"{x.RunId}:{x.PullRequest}").ToArray())
             .IsEquivalentTo(new[] { "101:755", "102:756", "105:759" }, CollectionOrdering.Matching);
         await Assert.That(_github.ArtifactQueries).IsEqualTo(3);
@@ -444,7 +446,7 @@ public sealed class ProxyTests : IAsyncDisposable
         _github.Expired = false;
         _github.MissingVersionArtifact = false;
         _github.Runs[0] = _github.Runs[0] with { Conclusion = "success" };
-        var run = await Assert.That(await GetRunsWhenReadyAsync(catalog)).HasSingleItem();
+        var run = await Assert.That(await GetSettledRunsAsync(catalog)).HasSingleItem();
         await Assert.That(run.RunId).IsEqualTo(100);
         await Assert.That(run.PullRequest).IsEqualTo(755);
     }
@@ -463,7 +465,7 @@ public sealed class ProxyTests : IAsyncDisposable
             new(100, 1, "fork-sha", "completed", "success", "pull_request", [], "feature", new("alice/widgets"))
         ];
 
-        var runs = await GetRunsWhenReadyAsync(CreateCatalog());
+        var runs = await GetSettledRunsAsync(CreateCatalog());
         await Assert.That(runs.Select(x => x.RunId).ToArray())
             .IsEquivalentTo(new long[] { 99, 100 }, CollectionOrdering.Matching);
         await Assert.That(runs[0].Packages.Id).IsEqualTo(3L);
@@ -514,12 +516,12 @@ public sealed class ProxyTests : IAsyncDisposable
         _options.RunIds = [99];
         _github.OpenPullRequests = [new(755, new("old-sha", "feature", new("alice/widgets")))];
         _github.Runs = [new(99, 1, "old-sha", "completed", "success", "pull_request", [], "feature", new("alice/widgets"))];
-        var original = await Assert.That(await GetRunsWhenReadyAsync(CreateCatalog())).HasSingleItem();
+        var original = await Assert.That(await GetSettledRunsAsync(CreateCatalog())).HasSingleItem();
 
         _github.OpenPullRequests = [new(755, new("current-sha", "feature", new("alice/widgets")))];
         _github.FailPullRequestHistory = true;
         _github.FailCommitHistory = true;
-        var restored = await Assert.That(await GetRunsWhenReadyAsync(CreateCatalog())).HasSingleItem();
+        var restored = await Assert.That(await GetSettledRunsAsync(CreateCatalog())).HasSingleItem();
         await Assert.That(restored).IsEqualTo(original);
         await Assert.That(_github.PullRequestHistoryQueries).IsEqualTo(0);
         await Assert.That(_github.PullRequestCommitQueries).IsEqualTo(0);
@@ -613,7 +615,7 @@ public sealed class ProxyTests : IAsyncDisposable
     public async Task HttpFeedWarmupDoesNotDownloadArtifactContents()
     {
         await using var app = await StartHttpFeedAsync(prepareContent: false);
-        await GetRunsWhenReadyAsync(app.Services.GetRequiredService<PackageCatalog>());
+        await GetSettledRunsAsync(app.Services.GetRequiredService<PackageCatalog>());
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
         await Assert.That(_github.RunQueries).IsEqualTo(1);
         await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
@@ -828,42 +830,14 @@ public sealed class ProxyTests : IAsyncDisposable
         if (Directory.Exists(_directory)) Directory.Delete(_directory, recursive: true);
     }
 
-    private static Task<BuildEntry[]> GetBuildsWhenReadyAsync(PackageCatalog catalog) =>
-        ReadWhenReadyAsync(catalog, catalog.GetBuildsAsync);
-
-    private static Task<RunArtifacts[]> GetRunsWhenReadyAsync(PackageCatalog catalog) =>
-        ReadWhenReadyAsync(catalog, catalog.GetRunArtifactsAsync);
-
-    private static Task<PublishedPackage[]> GetPackagesWhenReadyAsync(PackageCatalog catalog) =>
-        ReadWhenReadyAsync(catalog, catalog.GetPackagesAsync);
-
-    private static async Task<T> ReadWhenReadyAsync<T>(PackageCatalog catalog, Func<CancellationToken, Task<T>> read)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (true)
-        {
-            try
-            {
-                return await read(Cancellation);
-            }
-            catch (DiscoveryUnavailableException exception) when (DateTime.UtcNow < deadline
-                && (exception.Message == "GitHub discovery is still in progress. Retry when it completes."
-                    || catalog.GetHealth().Error?.StartsWith(
-                        "Build content is still being prepared;", StringComparison.Ordinal) == true))
-            {
-                await Task.Delay(20, Cancellation);
-            }
-        }
-    }
-
     private static async Task RefreshCatalogAsync(PackageCatalog catalog)
     {
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
-            await GetRunsWhenReadyAsync(catalog);
+            await GetSettledRunsAsync(catalog);
             if (catalog.GetHealth().Status == "ok") return;
-            await GetPackagesWhenReadyAsync(catalog);
+            await GetSettledPackagesAsync(catalog);
             if (catalog.GetHealth().Status == "ok") return;
             await Task.Delay(20, Cancellation);
         }
@@ -875,15 +849,9 @@ public sealed class ProxyTests : IAsyncDisposable
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < deadline)
         {
-            try
-            {
-                var packages = await catalog.GetPackagesAsync(Cancellation);
-                if (catalog.GetHealth().Status == "ok"
-                    && packages.Any(package => package.Id.Equals(id, StringComparison.OrdinalIgnoreCase))) return;
-            }
-            catch (DiscoveryUnavailableException)
-            {
-            }
+            var packages = await GetSettledPackagesAsync(catalog);
+            if (catalog.GetHealth().Status == "ok"
+                && packages.Any(package => package.Id.Equals(id, StringComparison.OrdinalIgnoreCase))) return;
             await Task.Delay(20, Cancellation);
         }
         throw new TimeoutException("The pinned package content did not finish loading.");
