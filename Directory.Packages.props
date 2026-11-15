@@ -29,8 +29,8 @@
     <PackageVersion Include="Moq" Version="4.21.0" />
     <PackageVersion Include="Moq.AutoMock" Version="4.0.3" />
     <PackageVersion Include="System.CommandLine" Version="3.0.0" />
-    <PackageVersion Include="TUnit" Version="1.83.8" />
-    <PackageVersion Include="TUnit.Assertions" Version="1.83.8" />
-    <PackageVersion Include="TUnit.Engine" Version="1.83.8" />
+    <PackageVersion Include="TUnit" Version="1.85.0" />
+    <PackageVersion Include="TUnit.Assertions" Version="1.85.0" />
+    <PackageVersion Include="TUnit.Engine" Version="1.85.0" />
   </ItemGroup>
 </Project>
