@@ -101,15 +101,18 @@
     private long? _run;
     private int? _attempt;
 
-    // GET shows what would be removed (dry run) and asks for confirmation; the POST performs the removal.
+    // GET shows what would be removed (dry run) and asks for confirmation; the POST repeats the dry run, then removes.
     protected override async Task OnInitializedAsync()
     {
         if (HttpContext is { Request.Method: "POST" })
         {
             (_scope, _source, _run, _attempt) = (FormScope, FormSource, FormRun, FormAttempt);
-            return;
         }
-        (_scope, _source, _run, _attempt) = (QueryScope, QuerySource, QueryRun, QueryAttempt);
+        else
+        {
+            (_scope, _source, _run, _attempt) = (QueryScope, QuerySource, QueryRun, QueryAttempt);
+        }
+        // The confirmation form must be rendered while the POST is processed, or its handler is not registered.
         await RunAsync(dryRun: true);
     }
 
