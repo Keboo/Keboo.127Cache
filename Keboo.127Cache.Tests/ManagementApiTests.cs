@@ -58,7 +58,8 @@ public sealed class ManagementApiTests
             {
                 ["Server:CacheDirectory"] = Path.Combine(fixture.DirectoryPath, "cache"),
                 ["Sources:0:Name"] = "main", ["Sources:0:Repository"] = "org/main",
-                ["Sources:0:Workflow"] = "build.yml", ["Sources:0:Artifact"] = "packages"
+                ["Sources:0:Workflow"] = "build.yml", ["Sources:0:Artifact"] = "packages",
+                ["Sources:0:VersionArtifact"] = "build-version"
             });
             builder.Logging.ClearProviders();
             builder.Services.AddProxy(builder.Configuration);
