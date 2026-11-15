@@ -85,6 +85,7 @@ An empty or absent `Sources` array is valid; there is no default repository.
 | `Server.BaseUrl` | `http://localhost:55631` | HTTP(S) loopback origin for listening and feed metadata; no trailing slash |
 | `Server.CacheDirectory` | `null` (per-user local app data) | Location for metadata, artifacts, and rewritten packages |
 | `Server.RefreshSeconds` | `120` | Lifetime of cached GitHub discovery data (minimum 10 seconds) |
+| `Server.EvictClosedPullRequestsAfterDays` | `null` (off) | When set (minimum 1), cached builds of pull requests closed for at least this many days are removed automatically, at startup and then hourly. See [Removing cached builds](#removing-cached-builds) |
 | `Sources` | `[]` | Flat list of independently configured sources |
 | `Sources[n].Name` | Required | Stable, case-insensitively unique filesystem key of up to 255 ASCII letters, digits, `.`, `_`, `-`, excluding reserved names and trailing `.` |
 | `Sources[n].Repository` | Required | GitHub `owner/repository` |
@@ -275,6 +276,35 @@ artifact may require a different cache directory; cached run metadata is not
 overwritten. When an open PR falls outside the recent discovery window, its
 latest known cached run remains visible until a newer successful run is found.
 Closed PRs disappear from the feed on the next discovery refresh.
+
+## Removing cached builds
+
+Removal deletes cached data only. Nothing records that a build was removed (no tombstone), so the
+next discovery refresh downloads and rewrites it again, with the same version, whenever its pull
+request is still open, it is the latest successful run and its artifacts have not expired.
+Builds of closed pull requests and builds with expired artifacts do not come back, so removing
+those frees the space permanently.
+
+`ICacheEvictionService` (registered by `AddProxy`) is the programmatic surface used by management
+tooling:
+
+| Method | Purpose |
+| --- | --- |
+| `GetDiskUsageAsync()` / `GetSourceDiskUsageAsync(source)` | Bytes per source and per build (artifacts, rewritten packages, closed-since time, partial-cache flag) |
+| `RemoveBuildAsync(source, runId, attempt, dryRun)` | Remove one run attempt |
+| `RemovePullRequestAsync(source, pullRequest, dryRun)` | Remove every cached run of a pull request |
+| `RemoveSourceAsync(source, dryRun)` | Empty one source, including unreferenced files |
+| `RemoveClosedPullRequestsAsync(source?, closedFor?, dryRun)` | Remove builds of pull requests GitHub reports as closed (nothing is removed if GitHub is unreachable) |
+| `ApplyRetentionPolicyAsync()` | Apply `Server.EvictClosedPullRequestsAfterDays` |
+
+Every removal returns the bytes reclaimed and, per build, whether it will reappear
+(`WillReappear`, `PullRequestClosed`, `ArtifactExpired`, `SupersededByNewerRun`,
+`NotAvailableUpstream` or `Unknown` when GitHub could not be queried). `dryRun` reports the same
+without deleting. A removal waits for an in-flight download of the same build to finish before
+deleting it, and files in use are left in place and reported as an error for that build.
+"Closed for N days" is measured from when 127Cache first observed the pull request closed
+(`closed-pull-requests.json` in the source directory), because GitHub discovery only reports open
+pull requests.
 
 ## Offline use and health
 

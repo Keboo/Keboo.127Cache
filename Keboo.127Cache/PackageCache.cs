@@ -39,8 +39,11 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
 
     private readonly ILogger<PackageCache> _logger = logger ?? NullLogger<PackageCache>.Instance;
 
-    private string DirectoryFor(BuildEntry build) => Path.Combine(options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}",
-        $"{build.PullRequest}.{build.RunId}.{build.Attempt}.{build.Packages.Id}");
+    private string DirectoryFor(BuildEntry build) => DirectoryFor(build.PullRequest, build.RunId, build.Attempt, build.Packages.Id);
+
+    private string DirectoryFor(int pullRequest, long runId, int attempt, long packagesId) =>
+        Path.Combine(options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}",
+            $"{pullRequest}.{runId}.{attempt}.{packagesId}");
 
     private string InventoryPath(BuildEntry build) => Path.Combine(options.CacheDirectory, "inventories",
         $"{build.PullRequest}.{build.RunId}.{build.Attempt}.{build.Packages.Id}.json");
@@ -53,20 +56,61 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             _ => artifacts.CreateIndependent())
             .GetAsync(artifact, cancellationToken);
 
-    private Task<string> GetPackageArtifactAsync(Artifact artifact, CancellationToken cancellationToken)
+    private Task<string> GetPackageArtifactAsync(Artifact artifact, CancellationToken cancellationToken) =>
+        PackageArtifactCache(artifact.Id).GetAsync(artifact, cancellationToken);
+
+    private ArtifactCache PackageArtifactCache(long artifactId)
     {
-        if (!independentArtifactCaches) return artifacts.GetAsync(artifact, cancellationToken);
-        ArtifactCache cache;
+        if (!independentArtifactCaches) return artifacts;
         lock (_packageArtifactCaches)
         {
-            if (!_packageArtifactCaches.TryGetValue(artifact.Id, out cache!))
+            if (!_packageArtifactCaches.TryGetValue(artifactId, out var cache))
             {
                 cache = _packageArtifactCaches.Count == 0 ? artifacts
                     : artifacts.CreateIndependent();
-                _packageArtifactCaches.Add(artifact.Id, cache);
+                _packageArtifactCaches.Add(artifactId, cache);
             }
+            return cache;
         }
-        return cache.GetAsync(artifact, cancellationToken);
+    }
+
+    // Holds the per-build gates and every artifact cache that may touch these artifacts, so that in-flight
+    // downloads and rewrites finish before the files are removed and no new ones start until the lock is released.
+    internal async Task<IDisposable> LockForEvictionAsync(
+        IEnumerable<(BuildKey Key, long PackagesArtifactId)> builds, IEnumerable<long> artifactIds,
+        CancellationToken cancellationToken)
+    {
+        var held = new List<IDisposable>();
+        try
+        {
+            foreach (var directory in builds
+                .Select(x => DirectoryFor(x.Key.PullRequest, x.Key.RunId, x.Key.Attempt, x.PackagesArtifactId))
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            {
+                var gate = _gates.GetOrAdd(directory, _ => new SemaphoreSlim(1));
+                await gate.WaitAsync(cancellationToken);
+                held.Add(new GateRelease(gate));
+            }
+            var caches = new List<(ArtifactCache Cache, long Id)>();
+            foreach (var id in artifactIds.Distinct().Order())
+            {
+                if (!independentArtifactCaches) caches.Add((artifacts, id));
+                else
+                {
+                    caches.Add((PackageArtifactCache(id), id));
+                    caches.Add((_versionArtifactCaches.GetOrAdd(id, _ => artifacts.CreateIndependent()), id));
+                }
+            }
+            foreach (var cache in caches.Select(x => x.Cache).Distinct())
+                held.Add(await cache.LockAsync(cancellationToken));
+            foreach (var (cache, id) in caches) cache.Forget(id);
+            return new HeldLocks(held);
+        }
+        catch
+        {
+            new HeldLocks(held).Dispose();
+            throw;
+        }
     }
 
     internal bool MightHaveCachedContent(RunArtifacts run)

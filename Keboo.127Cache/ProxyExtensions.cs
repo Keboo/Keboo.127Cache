@@ -20,6 +20,8 @@ public static class ProxyExtensions
             provider.GetService<ILogger<PackageCache>>(),
             provider.GetService<IHostApplicationLifetime>()));
         services.AddHostedService<CatalogWarmupService>();
+        services.AddSingleton<ICacheEvictionService, CacheEvictionService>();
+        services.AddHostedService<CacheRetentionService>();
         services.AddExceptionHandler<DiscoveryExceptionHandler>();
         services.AddProblemDetails();
         return services;

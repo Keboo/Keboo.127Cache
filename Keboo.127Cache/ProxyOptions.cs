@@ -16,6 +16,9 @@ public sealed class ProxyOptions
     public long[] RunIds { get => _origin?.RunIds ?? _runIds; set => _runIds = value; }
     public string BaseUrl { get => _origin?.BaseUrl ?? _baseUrl; set => _baseUrl = value; }
     public int RefreshSeconds { get => _origin?.RefreshSeconds ?? _refreshSeconds; set => _refreshSeconds = value; }
+    // Pull requests closed for at least this many days are evicted automatically; null disables the policy.
+    public int? EvictClosedPullRequestsAfterDays { get; set; }
+    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
     private int[] _pullRequests = [];
     private long[] _runIds = [];
     private string _baseUrl = "http://localhost:55631";
@@ -40,6 +43,7 @@ public sealed class ProxyOptions
             VersionArtifact = source?.VersionArtifact,
             BaseUrl = configuration.Server.BaseUrl,
             RefreshSeconds = configuration.Server.RefreshSeconds,
+            EvictClosedPullRequestsAfterDays = configuration.Server.EvictClosedPullRequestsAfterDays,
             ConfiguredSources = configuration.Sources.ToArray()
         };
         if (configuration.Server.CacheDirectory is not null)
@@ -75,6 +79,7 @@ public sealed class ProxyOptions
                     RefreshSeconds = RefreshSeconds
                 };
             options.Name = source.Name;
+            options.TimeProvider = TimeProvider;
             options.CacheDirectory = CacheLayout.SourceDirectory(CacheDirectory, source.Name);
             result.Add(options);
         }

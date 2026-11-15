@@ -20,6 +20,8 @@ public sealed class ServerOptions
     public string BaseUrl { get; set; } = "http://localhost:55631";
     public string? CacheDirectory { get; set; }
     public int RefreshSeconds { get; set; } = 120;
+    // Null (the default) keeps builds of closed pull requests until they are removed explicitly.
+    public int? EvictClosedPullRequestsAfterDays { get; set; }
 }
 
 public sealed class SourceOptions
@@ -215,7 +217,7 @@ public static class CacheConfigurationLoader
         ["Repository", "Workflow", "PackagesArtifact", "VersionArtifact"];
     private static readonly string[] IgnoredLegacyFields = ["PullRequests", "RunIds", "RunLimit"];
     private static readonly HashSet<string> ServerFields = new(StringComparer.OrdinalIgnoreCase)
-        { "BaseUrl", "CacheDirectory", "RefreshSeconds" };
+        { "BaseUrl", "CacheDirectory", "RefreshSeconds", "EvictClosedPullRequestsAfterDays" };
     private static readonly HashSet<string> SourceFields = new(StringComparer.OrdinalIgnoreCase)
         { "Name", "Repository", "Workflow", "Artifact", "VersionArtifact", "Type" };
 
@@ -227,6 +229,7 @@ public static class CacheConfigurationLoader
 
         var server = new ServerOptions();
         var refreshSeconds = server.RefreshSeconds.ToString(CultureInfo.InvariantCulture);
+        var evictAfterDays = "";
         var sources = new SortedDictionary<int, SourceState>();
         var serverErrors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var sourceErrors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -244,8 +247,8 @@ public static class CacheConfigurationLoader
             foreach (var field in IgnoredLegacyFields)
                 if (HasSection(provider, $"Proxy:{field}")) ignoredLegacy.Add(field);
 
-            ApplyServer(provider, "Proxy", server, ref refreshSeconds, serverErrors);
-            ApplyServer(provider, "Server", server, ref refreshSeconds, serverErrors);
+            ApplyServer(provider, "Proxy", server, ref refreshSeconds, ref evictAfterDays, serverErrors);
+            ApplyServer(provider, "Server", server, ref refreshSeconds, ref evictAfterDays, serverErrors);
 
             var sourceChildren = Children(provider, "Sources").ToArray();
             var hasSourceValue = provider.TryGet("Sources", out var sourceValue);
@@ -348,6 +351,13 @@ public static class CacheConfigurationLoader
             failures.Add("Server.RefreshSeconds must be an integer of at least 10.");
         else
             server.RefreshSeconds = refresh;
+        if (!string.IsNullOrWhiteSpace(evictAfterDays))
+        {
+            if (!int.TryParse(evictAfterDays, NumberStyles.Integer, CultureInfo.InvariantCulture, out var days) || days < 1)
+                failures.Add("Server.EvictClosedPullRequestsAfterDays must be an integer of at least 1, or empty to keep closed pull requests.");
+            else
+                server.EvictClosedPullRequestsAfterDays = days;
+        }
 
         ValidateServer(server, failures);
         ValidateSources(sources, failures);
@@ -359,7 +369,7 @@ public static class CacheConfigurationLoader
 
     private static void ApplyServer(
         IConfigurationProvider provider, string section, ServerOptions server, ref string refreshSeconds,
-        Dictionary<string, string> errors)
+        ref string evictAfterDays, Dictionary<string, string> errors)
     {
         var children = Children(provider, section).ToArray();
         if (section == "Server")
@@ -388,6 +398,7 @@ public static class CacheConfigurationLoader
                     case "BaseUrl": server.BaseUrl = value ?? ""; break;
                     case "CacheDirectory": server.CacheDirectory = value; break;
                     case "RefreshSeconds": refreshSeconds = value ?? ""; break;
+                    case "EvictClosedPullRequestsAfterDays": evictAfterDays = value ?? ""; break;
                 }
             }
         }
