@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 using NuGet.Packaging;
@@ -95,6 +96,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
 
+        await WaitForWarmupAsync(app);
         using var client = Client(app);
         using var health = JsonDocument.Parse(await client.GetStringAsync("/health", CancellationToken.None));
         var options = app.Services.GetRequiredService<ProxyOptions>();
@@ -127,6 +129,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         var baseUrl = app.Urls.Single();
         app.Services.GetRequiredService<ProxyOptions>().BaseUrl = baseUrl;
 
+        await WaitForWarmupAsync(app);
         await app.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(CancellationToken.None);
         await Assert.That(github.ArtifactQueries).IsEqualTo(1);
         await Assert.That(github.Downloads).IsEqualTo(0);
@@ -524,6 +527,10 @@ public sealed class RuntimeConfigurationTests : IDisposable
         return new HttpClient { BaseAddress = new Uri(address) };
     }
 
+    private static Task WaitForWarmupAsync(WebApplication app) =>
+        app.Services.GetServices<IHostedService>().OfType<CatalogWarmupService>().Single()
+            .ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current!.Execution.CancellationToken);
+
     private async Task<(int ExitCode, string Output, string Commands)> RunVpkInstallerAsync(string baseUrl)
     {
         var bin = Path.Combine(_directory, "fake-bin");
@@ -557,6 +564,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
         start.Environment["PATH"] = bin + Path.PathSeparator + start.Environment["PATH"];
         start.Environment["FAKE_DOTNET_LOG"] = log;
         start.Environment["DOTNET_CLI_HOME"] = work;
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["TEMP"] = work;
         start.Environment["TMP"] = work;
         start.Environment["TMPDIR"] = work;
@@ -606,6 +615,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
             "--packages", packages, "--disable-parallel", "--verbosity", "quiet" })
             start.ArgumentList.Add(argument);
         start.Environment["DOTNET_CLI_HOME"] = work;
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
         start.Environment["DOTNET_NOLOGO"] = "1";
         start.Environment["NUGET_HTTP_CACHE_PATH"] = Path.Combine(work, "http-cache");

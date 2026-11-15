@@ -2,6 +2,13 @@
 
 ## Active Decisions
 
+### 2026-11-12: System isolation, nothing outside the repository (authoritative)
+
+#### 2026-11-12T12:14:43-08:00: User directive
+**By:** Kevin Bost (via Copilot)
+**What:** Nothing in this repository (app, tests, scripts, CI helpers, agents) may modify anything about the system outside the repository. That includes user or machine environment variables, the registry, certificates, firewall rules, services, scheduled tasks, global tools and SDKs, user-level NuGet configuration, and the hosts file. Use the repository's gitignored output or self-cleaned unique temporary directories only. No stress or soak runs on developer machines. Any `DOTNET_CLI_HOME` override must set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false`, enforced by `SystemIsolationTests`.
+**Why:** Test runs silently appended 421 `.dotnet\tools` entries to the user PATH (53,005 characters). This broke process creation (0xc0000017) for Task Manager, MMC and SmartScreen, and the damage would have persisted across reboot. Details: `CONTRIBUTING.md` → "System isolation".
+
 ### 2026-11-05: Owner decisions on initial review questions (authoritative)
 
 **Source:** kevin-bost-via-copilot-owner-decisions (id 9667113e-00a3-4641-a8ad-a51fb277d27f) · loadGuidance: ALWAYS

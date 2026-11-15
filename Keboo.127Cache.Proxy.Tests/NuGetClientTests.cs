@@ -120,6 +120,8 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
                     new XElement("packageSource", new XAttribute("key", "external"),
                         new XElement("package", new XAttribute("pattern", "Newtonsoft.Json"))))))
             .Save(_configFile);
+
+        await GetVersionsAsync("Velopack", cancellationToken);
     }
 
     public async Task<string[]> GetVersionsAsync(string id, CancellationToken cancellationToken)
@@ -222,6 +224,8 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
         foreach (var argument in arguments)
             start.ArgumentList.Add(argument);
         start.Environment["DOTNET_CLI_HOME"] = Path.Combine(_root, "dotnet-home");
+        // Without this, the SDK appends <DOTNET_CLI_HOME>\.dotnet\tools to the real user PATH.
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "false";
         start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
         start.Environment["DOTNET_NOLOGO"] = "1";
         start.Environment["DOTNET_GENERATE_ASPNET_CERTIFICATE"] = "false";
