@@ -1,6 +1,7 @@
 using System.CommandLine;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Keboo.LocalCache.Ui;
 
 namespace Keboo.LocalCache;
 
@@ -14,13 +15,18 @@ public sealed class Program
         {
             Description = "Path to a JSON configuration file."
         };
-        var serveCommand = new Command("serve", "Start the local NuGet proxy.")
+        var openOption = new Option<bool>("--open")
         {
-            configOption
+            Description = "Open the web UI in the default browser once the server has started."
+        };
+        var serveCommand = new Command("serve", "Start the local NuGet proxy and web UI.")
+        {
+            configOption,
+            openOption
         };
         serveCommand.SetAction(async (parseResult, cancellationToken) =>
         {
-            await RunServerAsync(parseResult.GetValue(configOption), cancellationToken);
+            await RunServerAsync(parseResult.GetValue(configOption), parseResult.GetValue(openOption), cancellationToken);
             return 0;
         });
         return new RootCommand("Serve completed GitHub Actions pull request packages as a local NuGet feed.")
@@ -29,7 +35,7 @@ public sealed class Program
         };
     }
 
-    private static async Task RunServerAsync(FileInfo? configFile, CancellationToken cancellationToken)
+    private static async Task RunServerAsync(FileInfo? configFile, bool openBrowser, CancellationToken cancellationToken)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -37,6 +43,7 @@ public sealed class Program
         });
         ConfigurationFiles.AddUserAndExplicitConfiguration(builder.Configuration, configFile);
         builder.Services.AddProxy(builder.Configuration);
+        builder.Services.AddWebUiStartup(openBrowser);
         var app = builder.Build();
         var options = app.Services.GetRequiredService<ProxyOptions>();
         app.Urls.Clear();

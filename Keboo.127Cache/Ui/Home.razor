@@ -1,0 +1,75 @@
+@page "/"
+@inject IManagementService Management
+@inject ICacheEvictionService Eviction
+@inject ProxyOptions Options
+
+<PageTitle>127Cache</PageTitle>
+
+<h2>Overview</h2>
+<FeedUrl Url="@UiFormat.FeedUrl(Options)" />
+
+@if (_loadError is not null)
+{
+    <p role="alert" class="error">Could not read the cache: @_loadError</p>
+}
+else
+{
+    <p>Cache size on disk: <strong>@UiFormat.Size(_diskBytes)</strong> in <code>@Options.CacheDirectory</code></p>
+
+    <h2>Sources</h2>
+    @if (_sources.Count == 0)
+    {
+        <p>No sources are configured. Add a <code>Sources</code> entry to the configuration file.</p>
+    }
+    else
+    {
+        <SourcesTable Sources="_sources" Now="_now" />
+
+        <h2>Builds</h2>
+        @if (_packagesUnavailable is not null)
+        {
+            <p role="status" class="muted">Package ids are unavailable right now: @_packagesUnavailable</p>
+        }
+        <BuildsTable Sources="_sources" Builds="_builds" PackageIds="_packageIds" Now="_now" />
+    }
+}
+
+@code {
+    private IReadOnlyList<SourceInfo> _sources = [];
+    private IReadOnlyList<BuildInfo> _builds = [];
+    private IReadOnlyDictionary<(string Source, int PullRequest, long RunId, int Attempt), IReadOnlyList<string>> _packageIds
+        = new Dictionary<(string, int, long, int), IReadOnlyList<string>>();
+    private long _diskBytes;
+    private string? _loadError;
+    private string? _packagesUnavailable;
+    private DateTimeOffset _now;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _now = Options.TimeProvider.GetUtcNow();
+        try
+        {
+            _sources = await Management.GetSourcesAsync();
+            _builds = await Management.GetBuildsAsync();
+            _diskBytes = (await Eviction.GetDiskUsageAsync()).TotalBytes;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            _loadError = exception.Message;
+            return;
+        }
+        try
+        {
+            // Package ids come from the same inventory as the feed, so this can materialize builds on the first call.
+            _packageIds = (await Management.GetPackagesAsync())
+                .SelectMany(package => package.Versions.Select(v => (Id: package.Id, Version: v)))
+                .GroupBy(x => (x.Version.Source, x.Version.PullRequest, x.Version.RunId, x.Version.Attempt))
+                .ToDictionary(x => x.Key, x => (IReadOnlyList<string>)x.Select(y => y.Id).Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Order(StringComparer.OrdinalIgnoreCase).ToArray());
+        }
+        catch (Exception exception) when (exception is DiscoveryUnavailableException or IOException or InvalidOperationException)
+        {
+            _packagesUnavailable = exception.Message;
+        }
+    }
+}

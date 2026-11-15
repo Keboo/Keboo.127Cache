@@ -1,0 +1,64 @@
+@page "/packages"
+@inject IManagementService Management
+
+<PageTitle>Packages - 127Cache</PageTitle>
+
+<h2>Packages</h2>
+
+@if (_error is not null)
+{
+    <p role="alert" class="error">The package list is unavailable: @_error</p>
+}
+else if (_packages.Count == 0)
+{
+    <p>No packages are available yet.</p>
+}
+else
+{
+    @foreach (var package in _packages)
+    {
+        <div class="table-wrap">
+            <table>
+                <caption>@package.Id</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Version</th>
+                        <th scope="col">Original version</th>
+                        <th scope="col">Source</th>
+                        <th scope="col">Pull request</th>
+                        <th scope="col">Run</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var version in package.Versions)
+                    {
+                        <tr>
+                            <th scope="row">@version.Version</th>
+                            <td>@version.OriginalVersion</td>
+                            <td>@version.Source</td>
+                            <td>#@version.PullRequest</td>
+                            <td>@version.RunId (attempt @version.Attempt)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+@code {
+    private IReadOnlyList<PackageInfo> _packages = [];
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _packages = await Management.GetPackagesAsync();
+        }
+        catch (Exception exception) when (exception is DiscoveryUnavailableException or IOException or InvalidOperationException)
+        {
+            _error = exception.Message;
+        }
+    }
+}

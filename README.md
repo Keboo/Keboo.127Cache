@@ -52,6 +52,29 @@ the managed source. Run `scripts/Test-InstallState.ps1` to exercise cleanup and
 interrupted-install recovery behavior. `scripts/Smoke-Test.ps1` exercises a full
 PR build install/restore/removal against an already-running proxy.
 
+## Web UI
+
+`serve` also hosts a read-only web UI at `http://localhost:55631/` (the configured `Server.BaseUrl`);
+the startup log prints its URL. Pass `--open` to launch it in your default browser:
+
+```powershell
+keboo-127cache serve --open
+```
+
+- **Overview** (`/`): the copyable feed URL, per-source status (repository, workflow, artifact, last
+  refresh, error), cache size, and a builds table grouped source, pull request, run with package ids,
+  rewritten and original versions, cache state (downloaded, partially downloaded, metadata only), size
+  and age, plus links to the pull request and run on GitHub.
+- **Packages** (`/packages`): every package id with its served versions.
+
+It is a Blazor Web App (Razor Components) in the same process using static server-side rendering:
+pages work without JavaScript (a ~15 line script only adds the Copy button), there is no WebAssembly,
+no Node toolchain and no CDN. The stylesheet and script are embedded in the tool and served from
+`/_ui/`, so the browser makes no external requests. Components call `IManagementService` and
+`ICacheEvictionService` directly. The UI owns `/` and `/packages`; the feed, `/api`, `/health` and
+`/builds` keep their routes. UI requests get the same Host (DNS rebinding) and Origin checks as `/api`,
+and the antiforgery key ring is stored in `{CacheDirectory}/.data-protection`, never in the user profile.
+
 ## Configuration
 
 Configuration layers have the following precedence, from lowest to highest:

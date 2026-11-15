@@ -1,0 +1,58 @@
+<div class="table-wrap">
+    <table>
+        <caption>Sources</caption>
+        <thead>
+            <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Repository</th>
+                <th scope="col">Workflow</th>
+                <th scope="col">Artifact</th>
+                <th scope="col">Status</th>
+                <th scope="col">Last refresh</th>
+                <th scope="col">Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var source in Sources)
+            {
+                <tr>
+                    <th scope="row">@source.Name</th>
+                    <td>
+                        @if (UiFormat.RepositoryUrl(source.Repository) is { } url)
+                        {
+                            <a href="@url" rel="noopener noreferrer">@source.Repository</a>
+                        }
+                        else
+                        {
+                            @source.Repository
+                        }
+                    </td>
+                    <td>@source.Workflow</td>
+                    <td>@source.Artifact</td>
+                    <td><span class="status status-@source.Status">@source.Status</span></td>
+                    <td>
+                        @if (source.LastRefreshUtc is { } refreshed)
+                        {
+                            <time datetime="@refreshed.UtcDateTime.ToString("o", CultureInfo.InvariantCulture)" title="@UiFormat.Timestamp(refreshed)">@UiFormat.Age(refreshed, Now)</time>
+                        }
+                        else
+                        {
+                            <span class="muted">never</span>
+                        }
+                    </td>
+                    <td>
+                        @if (source.LastError is { Length: > 0 } error)
+                        {
+                            <span class="error">@error</span>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<SourceInfo> Sources { get; set; } = [];
+    [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+}

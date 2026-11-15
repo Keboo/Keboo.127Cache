@@ -139,11 +139,25 @@ internal sealed partial class SourceCatalog
             if (artifactBytes + packageBytes == 0 && footprint.Paths.Count == 0) continue;
             DateTimeOffset? closedSince;
             lock (_closedGate) closedSince = _closedSince.TryGetValue(key.PullRequest, out var since) ? since : null;
-            builds.Add(new BuildDiskUsage(Name, key.PullRequest, key.RunId, key.Attempt, artifactBytes, packageBytes, closedSince, partial));
+            builds.Add(new BuildDiskUsage(Name, key.PullRequest, key.RunId, key.Attempt, artifactBytes, packageBytes, closedSince, partial,
+                CachedSince(footprint.Paths)));
         }
         var total = CacheDisk.SizeOf(_options.CacheDirectory);
         return new SourceDiskUsage(Name, total, Math.Max(0, total - builds.Sum(x => x.TotalBytes)), builds);
     }, cancellationToken);
+
+    // The oldest write time among the build's cached package entries approximates when it was cached.
+    private static DateTimeOffset? CachedSince(IEnumerable<string> paths)
+    {
+        DateTimeOffset? oldest = null;
+        foreach (var path in paths)
+        {
+            var written = Directory.Exists(path) ? Directory.GetLastWriteTimeUtc(path)
+                : File.Exists(path) ? File.GetLastWriteTimeUtc(path) : (DateTime?)null;
+            if (written is { } value && (oldest is null || value < oldest)) oldest = new DateTimeOffset(value, TimeSpan.Zero);
+        }
+        return oldest;
+    }
 
     private IEnumerable<string> SweepEntries()
     {

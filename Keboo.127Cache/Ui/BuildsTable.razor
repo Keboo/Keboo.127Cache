@@ -1,0 +1,106 @@
+@* Builds grouped source -> pull request -> run. Each source is its own table; each pull request is a row group. *@
+@foreach (var source in Sources)
+{
+    var builds = Builds.Where(x => string.Equals(x.Source, source.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
+    <div class="table-wrap">
+        <table>
+            <caption>Builds of source @source.Name</caption>
+            <thead>
+                <tr>
+                    <th scope="col">Run</th>
+                    <th scope="col">Packages</th>
+                    <th scope="col">Rewritten version</th>
+                    <th scope="col">Original version</th>
+                    <th scope="col">Cache state</th>
+                    <th scope="col" class="num">Size</th>
+                    <th scope="col">Cached</th>
+                </tr>
+            </thead>
+            @if (builds.Length == 0)
+            {
+                <tbody>
+                    <tr><td colspan="7" class="muted">No builds.</td></tr>
+                </tbody>
+            }
+            @foreach (var pullRequest in builds.GroupBy(x => x.PullRequest).OrderBy(x => x.Key))
+            {
+                <tbody>
+                    <tr class="group-row">
+                        <th scope="rowgroup" colspan="7">
+                            Pull request
+                            @if (UiFormat.PullRequestUrl(source.Repository, pullRequest.Key) is { } prUrl)
+                            {
+                                <a href="@prUrl" rel="noopener noreferrer">#@pullRequest.Key</a>
+                            }
+                            else
+                            {
+                                <span>#@pullRequest.Key</span>
+                            }
+                            @if (pullRequest.Any(x => x.PullRequestClosedSinceUtc is not null))
+                            {
+                                <span class="muted"> (closed)</span>
+                            }
+                        </th>
+                    </tr>
+                    @foreach (var build in pullRequest.OrderByDescending(x => x.RunId).ThenByDescending(x => x.Attempt))
+                    {
+                        <tr>
+                            <th scope="row">
+                                @if (UiFormat.RunUrl(source.Repository, build.RunId, build.Attempt) is { } runUrl)
+                                {
+                                    <a href="@runUrl" rel="noopener noreferrer">Run @build.RunId</a>
+                                }
+                                else
+                                {
+                                    <span>Run @build.RunId</span>
+                                }
+                                <span class="muted"> attempt @build.Attempt</span>
+                                @if (!build.Served)
+                                {
+                                    <span class="muted"> (not in feed)</span>
+                                }
+                            </th>
+                            <td>
+                                @if (PackageIds.TryGetValue((build.Source, build.PullRequest, build.RunId, build.Attempt), out var ids))
+                                {
+                                    <ul class="plain">
+                                        @foreach (var id in ids)
+                                        {
+                                            <li>@id</li>
+                                        }
+                                    </ul>
+                                }
+                                else
+                                {
+                                    <span class="muted">unknown</span>
+                                }
+                            </td>
+                            <td>@(build.Version ?? "unknown")</td>
+                            <td>@(build.OriginalVersion ?? "unknown")</td>
+                            <td>@UiFormat.CacheState(build)</td>
+                            <td class="num">@(build.CachedState == "notCached" ? "n/a" : UiFormat.Size(build.SizeBytes))</td>
+                            <td>
+                                @if (build.CachedUtc is { } cached)
+                                {
+                                    <time datetime="@cached.UtcDateTime.ToString("o", CultureInfo.InvariantCulture)" title="@UiFormat.Timestamp(cached)">@UiFormat.Age(cached, Now)</time>
+                                }
+                                else
+                                {
+                                    <span class="muted">n/a</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            }
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<SourceInfo> Sources { get; set; } = [];
+    [Parameter, EditorRequired] public IReadOnlyList<BuildInfo> Builds { get; set; } = [];
+    [Parameter] public IReadOnlyDictionary<(string Source, int PullRequest, long RunId, int Attempt), IReadOnlyList<string>> PackageIds { get; set; }
+        = new Dictionary<(string, int, long, int), IReadOnlyList<string>>();
+    [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+}

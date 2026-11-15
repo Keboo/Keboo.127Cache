@@ -1,0 +1,13 @@
+@inherits LayoutComponentBase
+
+<a class="skip-link" href="#main">Skip to content</a>
+<header>
+    <h1>127Cache</h1>
+    <nav aria-label="Main">
+        <NavLink href="/" Match="NavLinkMatch.All">Overview</NavLink>
+        <NavLink href="/packages">Packages</NavLink>
+    </nav>
+</header>
+<main id="main" tabindex="-1">
+    @Body
+</main>
