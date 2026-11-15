@@ -22,7 +22,7 @@ jobs:
       sha256: ${{ steps.fingerprint.outputs.sha256 }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -94,7 +94,7 @@ jobs:
             throw 'The canonical package job did not produce a valid artifact ID and SHA-256.'
           }
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -137,7 +137,7 @@ jobs:
 
       - name: ReportGenerator
         if: runner.os == 'Linux'
-        uses: danielpalme/ReportGenerator-GitHub-Action@5.5.12
+        uses: danielpalme/ReportGenerator-GitHub-Action@5.6.0
         with:
           reports: ${{ steps.coverage.outputs.reports }}
           targetdir: coveragereport
@@ -222,7 +222,7 @@ jobs:
       id-token: write
     
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
