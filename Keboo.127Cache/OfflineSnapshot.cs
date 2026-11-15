@@ -85,4 +85,6 @@ public sealed record CatalogHealth(
     int? UnavailableBuilds,
     int? UnavailablePackages,
     int? UnavailableBuildMetadata,
-    string Provenance = "unknown");
+    string Provenance = "unknown",
+    string? Source = null,
+    IReadOnlyList<CatalogHealth>? Sources = null);

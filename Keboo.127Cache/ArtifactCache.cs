@@ -9,26 +9,31 @@ public sealed class ArtifactCache
     private static readonly Dictionary<string, PublicationGate> PublicationGates = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly ProxyOptions _options;
-    private readonly IGitHubClient _github;
-    private readonly ILogger<ArtifactCache> _logger;
+    private readonly IBuildSource _source;
+    private readonly ILogger _logger;
     private readonly ArtifactIntegrityStore _integrity;
     private readonly SemaphoreSlim _gate = new(1);
     private readonly HashSet<long> _warned = [];
 
     public ArtifactCache(ProxyOptions options, IGitHubClient github)
-        : this(options, github, NullLogger<ArtifactCache>.Instance)
+        : this(options, new GitHubActionsBuildSource(options, github), NullLogger.Instance)
     {
     }
 
     public ArtifactCache(ProxyOptions options, IGitHubClient github, ILogger<ArtifactCache> logger)
+        : this(options, new GitHubActionsBuildSource(options, github), logger)
     {
-        _options = options;
-        _github = github;
-        _logger = logger;
-        _integrity = new ArtifactIntegrityStore(logger);
     }
 
-    internal ArtifactCache CreateIndependent() => new(_options, _github, _logger);
+    public ArtifactCache(ProxyOptions options, IBuildSource source, ILogger? logger = null)
+    {
+        _options = options;
+        _source = source;
+        _logger = logger ?? NullLogger.Instance;
+        _integrity = new ArtifactIntegrityStore(_logger);
+    }
+
+    internal ArtifactCache CreateIndependent() => new(_options, _source, _logger);
 
     public bool Contains(Artifact artifact) => File.Exists(GetPath(artifact));
 
@@ -64,7 +69,7 @@ public sealed class ArtifactCache
             var temporary = Path.Combine(directory, $"{artifact.Id}.{Guid.NewGuid():N}.tmp");
             try
             {
-                await _github.DownloadAsync(artifact, temporary, cancellationToken);
+                await _source.DownloadAsync(artifact, temporary, cancellationToken);
                 var downloaded = await _integrity.HashAsync(temporary, artifact.Id, cancellationToken);
                 if (supplied is not null) ArtifactIntegrityStore.RequireMatch(downloaded.Digest, supplied, artifact.Id);
                 if (recorded is not null) ArtifactIntegrityStore.RequireMatch(downloaded.Digest, recorded, artifact.Id);

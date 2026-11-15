@@ -38,40 +38,6 @@ public sealed class CliConfigurationTests : IDisposable
     }
 
     [Test]
-    public async Task ServeRejectsMultipleSourcesRatherThanSilentlyServingOnlyOne()
-    {
-        var profile = Path.Combine(_directory, "profile");
-        Directory.CreateDirectory(profile);
-        Directory.CreateDirectory(Path.Combine(_directory, "work"));
-        var explicitFile = Path.Combine(_directory, "multiple.json");
-        File.WriteAllText(explicitFile, JsonSerializer.Serialize(new
-        {
-            Server = new { CacheDirectory = Path.Combine(_directory, "cache") },
-            Sources = new[]
-            {
-                new { Name = "one", Repository = "org/one", Workflow = "a.yml", Artifact = "a" },
-                new { Name = "two", Repository = "org/two", Workflow = "b.yml", Artifact = "b" }
-            }
-        }));
-        using var process = Process.Start(StartInfo(profile, explicitFile, FreeUrl()))
-            ?? throw new InvalidOperationException("Could not start the CLI.");
-        var stdout = process.StandardOutput.ReadToEndAsync();
-        var stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        try { await process.WaitForExitAsync(timeout.Token); }
-        finally
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-        }
-
-        var output = await stdout + await stderr;
-        await Assert.That(process.ExitCode).IsNotEqualTo(0);
-        await Assert.That(output).Contains("Multiple Sources");
-        await Assert.That(output).Contains("#9");
-    }
-
-    [Test]
     [Arguments("\"\"")]
     [Arguments("""{ "0": { "Name": "wrong", "Repository": "org/wrong", "Workflow": "ci.yml", "Artifact": "p" } }""")]
     public async Task ServeRejectsMalformedExplicitSourcesBeforeDiscovery(string malformed)

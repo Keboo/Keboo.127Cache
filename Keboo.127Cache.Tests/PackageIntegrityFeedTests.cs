@@ -27,7 +27,7 @@ public class PackageIntegrityFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+            var cache = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         github.SeedRawCache(cache);
         github.FailDownloads = true;
 
@@ -69,7 +69,7 @@ public class PackageIntegrityFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+            var cache = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         github.SeedRawCache(cache);
         github.FailDownloads = true;
 
@@ -109,7 +109,7 @@ public class PackageIntegrityFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+            var cache = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         github.SeedRawCache(cache);
         github.FailDownloads = true;
         var missingArtifact = github.Packages with { Id = 300, Expired = true };
@@ -178,7 +178,7 @@ public class PackageIntegrityFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+            var cache = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         github.SeedRawCache(cache);
         github.FailDownloads = true;
         File.Copy(Path.Combine(cache, "artifacts", "200.zip"), Path.Combine(cache, "artifacts", "300.zip"));
@@ -258,7 +258,7 @@ public class PackageIntegrityFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+            var cache = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         github.SeedRawCache(cache);
         github.FailDownloads = true;
         File.Copy(Path.Combine(cache, "artifacts", "200.zip"), Path.Combine(cache, "artifacts", "300.zip"));
@@ -272,7 +272,7 @@ public class PackageIntegrityFeedTests
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
             await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
-            var packages = app.Services.GetRequiredService<PackageCache>();
+            var packages = app.Services.GetRequiredService<PackageCatalog>().GetPackageCache();
             packagePath = await packages.GetAsync("Acme.Core", other, CancellationToken.None);
             healthyBytes = await File.ReadAllBytesAsync(await packages.GetAsync("Acme.Core", healthy, CancellationToken.None));
         }
@@ -303,7 +303,7 @@ public class PackageIntegrityFeedTests
         var corruptInventory = await File.ReadAllBytesAsync(inventoryPath);
         await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
         {
-            var packages = app.Services.GetRequiredService<PackageCache>();
+            var packages = app.Services.GetRequiredService<PackageCatalog>().GetPackageCache();
             var offline = await packages.GetAvailableOfflineAsync(other, CancellationToken.None, allowRepair: false);
             await Assert.That(offline.Packages.Any(package => package.Id.Equals("Acme.Core", StringComparison.OrdinalIgnoreCase)))
                 .IsFalse();

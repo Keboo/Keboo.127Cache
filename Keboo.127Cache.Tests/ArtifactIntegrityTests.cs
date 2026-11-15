@@ -55,7 +55,7 @@ public sealed class ArtifactIntegrityTests
         await Assert.That(fixture.Log.WarningCount(fixture.GitHub.Version.Id)).IsEqualTo(1);
         await Assert.That(fixture.Log.HashCount(fixture.GitHub.Packages.Id)).IsEqualTo(1);
 
-        var cache = app.Services.GetRequiredService<ArtifactCache>();
+        var cache = app.Services.GetRequiredService<PackageCatalog>().GetArtifactCache();
         var paths = await Task.WhenAll(Enumerable.Range(0, 12)
             .Select(_ => cache.GetAsync(fixture.GitHub.Packages, Cancellation)));
         await Assert.That(paths.All(path => path == packagePath)).IsTrue();
@@ -638,7 +638,7 @@ public sealed class ArtifactIntegrityTests
                 OnHash = () => File.WriteAllText(Path.Combine(childDirectory, $"hashed-{index}"), "hashed")
             };
             var cache = new ArtifactCache(
-                new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache") }, github, log);
+                new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache", "sources", "project") }, github, log);
             var pending = CaptureAsync(() => cache.GetAsync(github.Packages, cancellation.Token));
             if (index == 0)
             {
@@ -755,7 +755,7 @@ public sealed class ArtifactIntegrityTests
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Proxy:Repository"] = "fixture/project",
-            ["Proxy:CacheDirectory"] = fixture.Options.CacheDirectory,
+            ["Proxy:CacheDirectory"] = Path.Combine(fixture.Directory, "cache"),
             ["Proxy:PullRequests:0"] = "755"
         });
         builder.Services.AddProxy(builder.Configuration);
@@ -840,7 +840,7 @@ public sealed class ArtifactIntegrityTests
         {
             OnHash = () => File.WriteAllText(Path.Combine(directory, $"hashed-{index}"), "hashed")
         };
-        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache") }, github, log);
+        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache", "sources", "project") }, github, log);
         var artifact = index == 2
             ? github.Packages with { Digest = "sha256:" + Digest(payload).ToLowerInvariant() }
             : github.Packages;
@@ -857,7 +857,7 @@ public sealed class ArtifactIntegrityTests
             (name, _, _) => name == "libc" ? shim : IntPtr.Zero);
 
         var github = new FakeGitHub("faulted writer");
-        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache") }, github);
+        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache", "sources", "project") }, github);
         var result = await CaptureAsync(() => cache.GetAsync(github.Packages, deadline.Token));
         var status = result.Error switch
         {
@@ -871,7 +871,7 @@ public sealed class ArtifactIntegrityTests
     private static async Task RunFaultLockOwnerChildAsync(string directory)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
-        var path = Path.Combine(directory, "cache", "artifacts", "2.zip.lock");
+        var path = Path.Combine(directory, "cache", "sources", "project", "artifacts", "2.zip.lock");
         using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         await File.WriteAllTextAsync(Path.Combine(directory, "owner-held"), "held", deadline.Token);
         await WaitForFileAsync(Path.Combine(directory, "release-owner"), deadline.Token);
@@ -921,7 +921,7 @@ public sealed class ArtifactIntegrityTests
     private static async Task RunLockOwnerChildAsync(string directory)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(75));
-        var path = Path.Combine(directory, "cache", "artifacts", "2.zip");
+        var path = Path.Combine(directory, "cache", "sources", "project", "artifacts", "2.zip");
         using var held = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var digest = await File.ReadAllTextAsync(Path.Combine(directory, "owner-digest"), deadline.Token);
         await File.WriteAllTextAsync(path + ".sha256", digest, deadline.Token);
@@ -1002,7 +1002,7 @@ public sealed class ArtifactIntegrityTests
             var preload = OperatingSystem.IsMacOS() ? "DYLD_INSERT_LIBRARIES" : "LD_PRELOAD";
             start.Environment.TryGetValue(preload, out var existing);
             start.Environment[preload] = string.IsNullOrEmpty(existing) ? interposer : $"{interposer}:{existing}";
-            start.Environment["K127_FAULT_LOCK_PATH"] = Path.Combine(directory, "cache", "artifacts", "2.zip.lock");
+            start.Environment["K127_FAULT_LOCK_PATH"] = Path.Combine(directory, "cache", "sources", "project", "artifacts", "2.zip.lock");
             start.Environment["K127_FAULT_SIGNAL"] = Path.Combine(directory, "fault-0");
             start.Environment["K127_FAULT_CONTINUE"] = Path.Combine(directory, "continue-fault");
             start.Environment["K127_FAULT_DIRECT_SHIM"] = directShim!;
@@ -1054,7 +1054,7 @@ public sealed class ArtifactIntegrityTests
         public Fixture()
         {
             System.IO.Directory.CreateDirectory(Directory);
-            Options = new ProxyOptions { CacheDirectory = Path.Combine(Directory, "cache"), PullRequests = [755] };
+            Options = new ProxyOptions { CacheDirectory = Path.Combine(Directory, "cache", "sources", "project"), PullRequests = [755] };
             Cache = new ArtifactCache(Options, GitHub, Log);
         }
 

@@ -12,10 +12,13 @@ public static class ProxyExtensions
         services.AddSingleton(provider => ProxyOptions.FromConfiguration(provider.GetRequiredService<CacheConfiguration>()));
         services.AddSingleton<IOptions<ProxyOptions>>(provider => Options.Create(provider.GetRequiredService<ProxyOptions>()));
         services.AddMemoryCache();
-        services.AddSingleton<IGitHubClient, GitHubClient>();
-        services.AddSingleton<ArtifactCache>();
-        services.AddSingleton<PackageCatalog>();
-        services.AddSingleton<PackageCache>();
+        services.AddSingleton<IBuildSourceFactory, DefaultBuildSourceFactory>();
+        services.AddSingleton(provider => PackageCatalog.Create(
+            provider.GetRequiredService<ProxyOptions>(), provider.GetRequiredService<IBuildSourceFactory>(),
+            provider.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
+            provider.GetRequiredService<ILogger<PackageCatalog>>(), provider.GetService<ILogger<ArtifactCache>>(),
+            provider.GetService<ILogger<PackageCache>>(),
+            provider.GetService<IHostApplicationLifetime>()));
         services.AddHostedService<CatalogWarmupService>();
         services.AddExceptionHandler<DiscoveryExceptionHandler>();
         services.AddProblemDetails();
