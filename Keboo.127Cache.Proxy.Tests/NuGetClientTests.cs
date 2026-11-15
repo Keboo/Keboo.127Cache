@@ -5,6 +5,8 @@ using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
 
+using Keboo._127Cache.Testing;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -127,21 +129,9 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
     {
         if (_app is null) throw new InvalidOperationException("The feed has not been started.");
         using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(_app.Urls.Single()) };
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (true)
-        {
-            using var response = await client.GetAsync($"/flat/{id.ToLowerInvariant()}/index.json", cancellationToken);
-            if (response.StatusCode != HttpStatusCode.ServiceUnavailable)
-                response.EnsureSuccessStatusCode();
-            if (response.IsSuccessStatusCode && !response.Headers.Contains("X-127Cache-Status"))
-            {
-                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
-                return json.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
-            }
-            if (DateTime.UtcNow >= deadline)
-                throw new TimeoutException($"The package index for {id} did not become healthy: {await response.Content.ReadAsStringAsync(cancellationToken)}");
-            await Task.Delay(20, cancellationToken);
-        }
+        using var response = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, _app.Services.GetRequiredService<PackageCatalog>(), $"/flat/{id.ToLowerInvariant()}/index.json", cancellationToken));
+        return response.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
     }
 
     public async Task<JsonDocument> RestoreAsync(string id, string version, CancellationToken cancellationToken)

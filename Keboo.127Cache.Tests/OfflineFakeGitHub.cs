@@ -26,6 +26,8 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
     public long? BlockDownloadForArtifact { get; set; }
     public TaskCompletionSource? DownloadBlock { get; set; }
     public TaskCompletionSource DownloadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource? DownloadCleanupBlock { get; set; }
+    public TaskCompletionSource DownloadCleanupStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public int DiscoveryCalls => Volatile.Read(ref _discoveryCalls);
     public int DownloadCalls => Volatile.Read(ref _downloadCalls);
     public long[] ArtifactQueries => _artifactQueries.ToArray();
@@ -98,8 +100,23 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
         Interlocked.Increment(ref _downloadCalls);
         if (BlockDownloadForArtifact == artifact.Id && DownloadBlock is { } block)
         {
-            DownloadStarted.TrySetResult();
-            await block.Task.WaitAsync(cancellationToken);
+            if (DownloadCleanupBlock is { } cleanup)
+            {
+                using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                DownloadStarted.TrySetResult();
+                try { await block.Task.WaitAsync(cancellationToken); }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    DownloadCleanupStarted.TrySetResult();
+                    await cleanup.Task;
+                    throw;
+                }
+            }
+            else
+            {
+                DownloadStarted.TrySetResult();
+                await block.Task.WaitAsync(cancellationToken);
+            }
         }
         if (FailDownloads) throw new IOException("Synthetic download failure.");
         File.Copy(_files[artifact.Id], destination);

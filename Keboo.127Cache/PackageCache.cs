@@ -329,7 +329,17 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
                 if (retained is not null && !SameInventory(retained, inventory!)) return new([], [], false);
             }
             else if (retained is not null)
-                inventory = retained;
+            {
+                if (!allowRepair || !ownsGate || !artifacts.Contains(build.Packages))
+                    return new([], retained.Select(package => package.Id).ToArray(), true);
+                attemptedRepair = true;
+                try { inventory = await RestoreFromArtifactAsync(build, directory, retained, cancellationToken); }
+                catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
+                {
+                    return new([], retained.Select(package => package.Id).ToArray(), true);
+                }
+                if (!ValidInventory(inventory, build)) return new([], [], false);
+            }
             else
             {
                 if (!allowRepair || !ownsGate || !artifacts.Contains(build.Packages)) return new([], [], false);
@@ -345,13 +355,16 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
                 if (!ValidInventory(inventory, build)) return new([], [], false);
             }
 
-            var available = AvailablePackages(directory, inventory!);
+            var digests = await ReadOfflineDigestsAsync(build, directory, inventory!, cancellationToken);
+            if (digests is null)
+                return retained is null ? new([], [], false) : new([], retained.Select(package => package.Id).ToArray(), true);
+            var available = await AvailablePackagesAsync(directory, inventory!, digests, cancellationToken);
             if (allowRepair && ownsGate && available.Length != inventory!.Length && !attemptedRepair && artifacts.Contains(build.Packages))
             {
                 try
                 {
                     await RestoreFromArtifactAsync(build, directory, inventory, cancellationToken);
-                    available = AvailablePackages(directory, inventory);
+                    available = await AvailablePackagesAsync(directory, inventory, digests, cancellationToken);
                 }
                 catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
                 {
@@ -423,13 +436,48 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             package.OriginalVersion, build.PullRequest, build.RunId, build.Attempt, build.Packages.Id));
     }
 
-    private static CachedPackage[] AvailablePackages(string directory, CachedPackage[] inventory)
+    private static async Task<Dictionary<string, string>?> ReadOfflineDigestsAsync(
+        BuildEntry build, string directory, CachedPackage[] inventory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var index = await File.ReadAllBytesAsync(Path.Combine(directory, "packages.json"), cancellationToken);
+            var sealedInventory = JsonSerializer.Deserialize<CachedPackage[]>(index, JsonSettings.Options);
+            var seal = JsonSerializer.Deserialize<InventorySeal>(
+                await File.ReadAllBytesAsync(Path.Combine(directory, "integrity.json"), cancellationToken), JsonSettings.Options);
+            if (sealedInventory is null || !SameInventory(inventory, sealedInventory)
+                || seal is null || seal.SchemaVersion != CacheSchema.Version || seal.ArtifactId != build.Packages.Id
+                || !string.Equals(seal.ArtifactDigest, build.Packages.Digest, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(seal.InventorySha256, Convert.ToHexString(SHA256.HashData(index)), StringComparison.OrdinalIgnoreCase)
+                || seal.Packages is null || seal.Packages.Length != inventory.Length) return null;
+            var digests = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var digest in seal.Packages)
+                if (digest is null || string.IsNullOrEmpty(digest.Id) || string.IsNullOrEmpty(digest.Sha256)
+                    || !digests.TryAdd(digest.Id, digest.Sha256)) return null;
+            return inventory.All(package => digests.ContainsKey(package.Id)) ? digests : null;
+        }
+        catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken) || exception is JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<CachedPackage[]> AvailablePackagesAsync(
+        string directory, CachedPackage[] inventory, Dictionary<string, string> digests, CancellationToken cancellationToken)
     {
         var available = new List<CachedPackage>();
         foreach (var package in inventory)
         {
-            if (IsReadablePackage(PackagePath(directory, package), package))
-                available.Add(package);
+            var path = PackagePath(directory, package);
+            try
+            {
+                if (IsReadablePackage(path, package)
+                    && string.Equals(digests[package.Id], await HashFileAsync(path, cancellationToken), StringComparison.OrdinalIgnoreCase))
+                    available.Add(package);
+            }
+            catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
+            {
+            }
         }
         return available.ToArray();
     }

@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\Keboo.127Cache.Tests\CatalogTestSynchronization.cs" Link="CatalogTestSynchronization.cs" />
     <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="NuGet.Protocol" />
