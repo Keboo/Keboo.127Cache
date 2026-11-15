@@ -57,10 +57,11 @@ public sealed class ConfigurationTests : IDisposable
     }
 
     [Test]
-    public async Task MultiSourceConfigurationIsValidButCannotBeServedBeforeAggregationExists()
+    public async Task MultiSourceConfigurationResolvesOneCacheDirectoryPerSource()
     {
         var config = Json("""
-            { "Sources": [
+            { "Server": { "CacheDirectory": "root-cache" },
+              "Sources": [
               { "Name": "one", "Repository": "org/one", "Workflow": "a.yml", "Artifact": "a" },
               { "Name": "two", "Repository": "org/two", "Workflow": "b.yml", "Artifact": "b" }
             ] }
@@ -69,12 +70,10 @@ public sealed class ConfigurationTests : IDisposable
 
         var options = services.GetRequiredService<CacheConfiguration>();
         await Assert.That(options.Sources.Count).IsEqualTo(2);
-        NotSupportedException? error = null;
-        try { services.GetRequiredService<ProxyOptions>(); }
-        catch (NotSupportedException caught) { error = caught; }
-        await Assert.That(error).IsNotNull();
-        await Assert.That(error!.Message).Contains("Multiple Sources");
-        await Assert.That(error.Message).Contains("#9");
+        var sources = services.GetRequiredService<ProxyOptions>().CreateSourceOptions();
+        await Assert.That(sources.Select(x => x.Repository).ToArray()).IsEquivalentTo(new[] { "org/one", "org/two" });
+        await Assert.That(sources.Select(x => x.CacheDirectory).ToArray()).IsEquivalentTo(
+            new[] { Path.Combine("root-cache", "sources", "one"), Path.Combine("root-cache", "sources", "two") });
     }
 
     [Test]

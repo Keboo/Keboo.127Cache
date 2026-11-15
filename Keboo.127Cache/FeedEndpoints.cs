@@ -17,7 +17,7 @@ public static class FeedEndpoints
             return builds.Length == 0 ? Results.NotFound() : Results.Json(new { versions = builds.Select(x => x.Version) });
         });
         app.MapMethods("/flat/{id}/{version}/{file}", ["GET", "HEAD"],
-            async (string id, string version, string file, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
+            async (string id, string version, string file, PackageCatalog catalog, CancellationToken ct) =>
             {
                 var build = await FindAsync(catalog, id, version, ct);
                 if (build is null)
@@ -29,13 +29,13 @@ public static class FeedEndpoints
                 var manifestFile = $"{id}.nuspec";
                 if (!file.Equals(packageFile, StringComparison.OrdinalIgnoreCase)
                     && !file.Equals(manifestFile, StringComparison.OrdinalIgnoreCase)) return Results.NotFound();
-                var path = await cache.GetAsync(id, build, ct);
+                var path = await catalog.GetPackagePathAsync(id, build, ct);
                 return file.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
                     ? Results.Bytes(PackageRewriter.ReadManifest(path), "application/xml")
                     : Results.File(path, "application/octet-stream", enableRangeProcessing: true);
             });
         app.MapMethods("/registration/{id}/index.json", ["GET", "HEAD"],
-            async (string id, ProxyOptions options, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
+            async (string id, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
             {
                 var numericBuilds = BuildsFor(await catalog.GetPackagesAsync(ct), id);
                 var builds = numericBuilds
@@ -45,14 +45,14 @@ public static class FeedEndpoints
                 var url = options.BaseUrl + "/registration/" + id.ToLowerInvariant() + "/index.json";
                 var pages = new List<object>();
                 if (builds.SequenceEqual(numericBuilds))
-                    pages.Add(await RegistrationPageAsync(options, cache, id, url, url, builds, ct));
+                    pages.Add(await RegistrationPageAsync(options, catalog, id, url, url, builds, ct));
                 else
                 {
                     // Singleton bounds are valid under both numeric SemVer and NuGet's comparer.
                     foreach (var build in builds)
                     {
                         var pageUrl = options.BaseUrl + "/registration/" + id.ToLowerInvariant() + "/page/" + build.Version + ".json";
-                        pages.Add(await RegistrationPageAsync(options, cache, id, url, pageUrl, [build], ct));
+                        pages.Add(await RegistrationPageAsync(options, catalog, id, url, pageUrl, [build], ct));
                     }
                 }
                 return Results.Json(new Dictionary<string, object>
@@ -63,12 +63,12 @@ public static class FeedEndpoints
                 });
             });
         app.MapMethods("/registration/{id}/page/{version}.json", ["GET", "HEAD"],
-            async (string id, string version, ProxyOptions options, PackageCatalog catalog, PackageCache cache, CancellationToken ct) =>
+            async (string id, string version, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
             {
                 var build = await FindAsync(catalog, id, version, ct);
                 if (build is null) return Results.NotFound();
                 var prefix = options.BaseUrl + "/registration/" + id.ToLowerInvariant();
-                return Results.Json(await RegistrationPageAsync(options, cache, id, prefix + "/index.json",
+                return Results.Json(await RegistrationPageAsync(options, catalog, id, prefix + "/index.json",
                     prefix + "/page/" + build.Version + ".json", [build], ct));
             });
         app.MapMethods("/registration/{id}/{version}.json", ["GET", "HEAD"],
@@ -90,14 +90,14 @@ public static class FeedEndpoints
                 });
             });
         app.MapMethods("/query", ["GET", "HEAD"], async (HttpRequest request, ProxyOptions options, PackageCatalog catalog,
-            PackageCache cache, CancellationToken ct) =>
+            CancellationToken ct) =>
         {
             var packages = IncludesBuilds(request) ? await catalog.GetPackagesAsync(ct) : [];
             catalog.EnsureAggregateComplete();
             var query = request.Query["q"].ToString();
             var ids = PackageIds(packages).Where(x => x.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
             var types = new Dictionary<string, string>();
-            foreach (var id in ids) types[id] = await PackageTypeAsync(cache, id, BuildsFor(packages, id)[^1], ct);
+            foreach (var id in ids) types[id] = await PackageTypeAsync(catalog, id, BuildsFor(packages, id)[^1], ct);
             var type = request.Query["packageType"].ToString();
             if (type.Length > 0) ids = ids.Where(x => types[x].Equals(type, StringComparison.OrdinalIgnoreCase)).ToArray();
             var data = new List<object>();
@@ -105,13 +105,14 @@ public static class FeedEndpoints
             {
                 var builds = BuildsFor(packages, id);
                 var latest = builds[^1];
+                var repository = catalog.RepositoryFor(latest);
                 data.Add(new
                 {
                     id,
                     version = latest.Version,
-                    description = $"PR builds of {id} from {options.Repository}. Select an immutable PR/run version.",
+                    description = $"PR builds of {id}                     from {repository}. Select an immutable PR/run version.",
                     title = id + " PR builds",
-                    authors = new[] { options.Repository.Split('/')[0] },
+                                        authors = new[] { repository.Split('/')[0] },
                     totalDownloads = 0,
                     registration = options.BaseUrl + "/registration/" + id.ToLowerInvariant() + "/index.json",
                     versions = builds.Select(x => new Dictionary<string, object>
@@ -126,7 +127,7 @@ public static class FeedEndpoints
             return Results.Json(new { totalHits = ids.Length, data });
         });
         app.MapMethods("/autocomplete", ["GET", "HEAD"], async (HttpRequest request, PackageCatalog catalog,
-            PackageCache cache, CancellationToken ct) =>
+            CancellationToken ct) =>
         {
             var packages = IncludesBuilds(request) ? await catalog.GetPackagesAsync(ct) : [];
             catalog.EnsureAggregateComplete();
@@ -140,7 +141,7 @@ public static class FeedEndpoints
                 var filtered = new List<string>();
                 foreach (var candidate in values)
                 {
-                    if ((await PackageTypeAsync(cache, candidate, BuildsFor(packages, candidate)[^1], ct))
+                    if ((await PackageTypeAsync(catalog, candidate, BuildsFor(packages, candidate)[^1], ct))
                         .Equals(type, StringComparison.OrdinalIgnoreCase))
                         filtered.Add(candidate);
                 }
@@ -175,17 +176,17 @@ public static class FeedEndpoints
         return BuildsFor(await catalog.GetPackagesAsync(ct), id).SingleOrDefault(x => NuGetVersion.Parse(x.Version) == parsed);
     }
 
-    private static async Task<string> PackageTypeAsync(PackageCache cache, string id, BuildEntry build, CancellationToken ct)
+    private static async Task<string> PackageTypeAsync(PackageCatalog catalog, string id, BuildEntry build, CancellationToken ct)
     {
-        using var reader = new PackageArchiveReader(await cache.GetAsync(id, build, ct));
+        using var reader = new PackageArchiveReader(await catalog.GetPackagePathAsync(id, build, ct));
         return reader.NuspecReader.GetPackageTypes().FirstOrDefault()?.Name ?? "Dependency";
     }
 
-    private static async Task<object> RegistrationPageAsync(ProxyOptions options, PackageCache cache, string id,
+    private static async Task<object> RegistrationPageAsync(ProxyOptions options, PackageCatalog catalog, string id,
         string parent, string pageUrl, BuildEntry[] builds, CancellationToken ct)
     {
         var leaves = new List<object>();
-        foreach (var build in builds) leaves.Add(await LeafAsync(options, cache, id, build, ct));
+        foreach (var build in builds) leaves.Add(await LeafAsync(options, catalog, id, build, ct));
         return new Dictionary<string, object>
         {
             ["@id"] = pageUrl,
@@ -197,10 +198,10 @@ public static class FeedEndpoints
         };
     }
 
-    private static async Task<object> LeafAsync(ProxyOptions options, PackageCache cache, string id, BuildEntry build, CancellationToken ct)
+    private static async Task<object>     LeafAsync(ProxyOptions options, PackageCatalog catalog, string id, BuildEntry build, CancellationToken ct)
     {
         id = id.ToLowerInvariant();
-        using var reader = new PackageArchiveReader(await cache.GetAsync(id, build, ct));
+            using var reader = new PackageArchiveReader(await catalog.GetPackagePathAsync(id, build, ct));
         var nuspec = reader.NuspecReader;
         var content = $"{options.BaseUrl}/flat/{id}/{build.Version}/{id}.{build.Version}.nupkg";
         return new Dictionary<string, object>
@@ -218,7 +219,7 @@ public static class FeedEndpoints
                 ["authors"] = nuspec.GetAuthors(),
                 ["description"] = nuspec.GetDescription(),
                 ["title"] = $"{nuspec.GetId()} - PR #{build.PullRequest}, run {build.RunId}",
-                ["projectUrl"] = $"https://github.com/{options.Repository}/pull/{build.PullRequest}",
+                ["projectUrl"] = $"https://github.com/{catalog.RepositoryFor(build)}/pull/{build.PullRequest}",
                 ["packageContent"] = content,
                 ["dependencyGroups"] = nuspec.GetDependencyGroups().Select(g => new
                 {

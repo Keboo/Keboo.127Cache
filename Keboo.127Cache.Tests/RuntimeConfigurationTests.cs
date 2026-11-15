@@ -277,7 +277,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
         };
         var cache = Path.Combine(_directory, "cache");
         Directory.CreateDirectory(cache);
-        var runsFile = Path.Combine(cache, "runs.json");
+        Directory.CreateDirectory(Path.Combine(cache, "sources", "example"));
+        var runsFile = Path.Combine(cache, "sources", "example", "runs.json");
         await JsonSettings.WriteAtomicAsync(runsFile,
             new RunArtifactsFile("owner/repo", "ci.yml",
                 [new RunArtifacts(100, 1, 42, "cached", github.Packages with { Name = "old" }, null, WorkflowVerified: true)], SchemaVersion: 2),
@@ -475,7 +476,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
         var github = new PackageGitHub(_directory) { OpenPullRequests = [new(42)] };
         var cache = Path.Combine(_directory, "cache");
         Directory.CreateDirectory(cache);
-        var runsFile = Path.Combine(cache, "runs.json");
+        Directory.CreateDirectory(Path.Combine(cache, "sources", "example"));
+        var runsFile = Path.Combine(cache, "sources", "example", "runs.json");
         await JsonSettings.WriteAtomicAsync(runsFile,
             new RunArtifactsFile("owner/repo", "ci.yml",
                 [new RunArtifacts(100, 1, 42, "current", github.Packages, null, WorkflowVerified: true)], SchemaVersion: 2), CancellationToken.None);

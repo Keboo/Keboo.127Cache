@@ -75,7 +75,7 @@ public class NuGetLongVersionRestoreTests
         using var fixture = new PackageRewriteFixture();
         var original = "1.2.0-preview." + new string('a', 164);
         var github = await fixture.CreateGitHubAsync(coreVersion: original);
-        var cache = Path.Combine(fixture.DirectoryPath, "cache");
+        var cache = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         github.SeedRawCache(cache);
         github.FailDownloads = true;
         var safePackage = fixture.CreatePackage("Safe.Package", "1.0.0");

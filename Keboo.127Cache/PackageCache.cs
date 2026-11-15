@@ -19,7 +19,7 @@ internal sealed record CachedPackageAvailability(CachedPackage[] Packages, strin
 }
 
 public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
-    ILogger<PackageCache>? logger = null, IGitHubClient? github = null)
+    ILogger<PackageCache>? logger = null, bool independentArtifactCaches = false)
 {
     private sealed record InventoryData(
         string Repository, string Workflow, long RunId, int Attempt, int PullRequest, string HeadSha,
@@ -48,14 +48,14 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     private SemaphoreSlim GateFor(BuildEntry build) => _gates.GetOrAdd(DirectoryFor(build), _ => new SemaphoreSlim(1));
 
     internal Task<string> GetVersionArtifactAsync(Artifact artifact, CancellationToken cancellationToken) =>
-        github is null ? artifacts.GetAsync(artifact, cancellationToken)
+        !independentArtifactCaches ? artifacts.GetAsync(artifact, cancellationToken)
         : _versionArtifactCaches.GetOrAdd(artifact.Id,
             _ => artifacts.CreateIndependent())
             .GetAsync(artifact, cancellationToken);
 
     private Task<string> GetPackageArtifactAsync(Artifact artifact, CancellationToken cancellationToken)
     {
-        if (github is null) return artifacts.GetAsync(artifact, cancellationToken);
+        if (!independentArtifactCaches) return artifacts.GetAsync(artifact, cancellationToken);
         ArtifactCache cache;
         lock (_packageArtifactCaches)
         {

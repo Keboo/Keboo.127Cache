@@ -3,7 +3,7 @@ using System.Text;
 
 namespace Keboo.LocalCache;
 
-internal sealed class ArtifactIntegrityStore(ILogger<ArtifactCache> logger)
+internal sealed class ArtifactIntegrityStore(ILogger logger)
 {
     private const int DigestLength = 64;
     private static readonly EventId HashComputed = new(1301, "ArtifactSha256Computed");

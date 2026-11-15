@@ -22,7 +22,6 @@ public sealed record WorkflowRun(
     [property: JsonPropertyName("head_branch")] string? HeadBranch = null,
     [property: JsonPropertyName("head_repository")] GitHubRepository? HeadRepository = null,
     [property: JsonPropertyName("workflow_id")] long? WorkflowId = null);
-public sealed record Artifact(long Id, string Name, bool Expired, string? Digest);
 public sealed record RunsResponse([property: JsonPropertyName("workflow_runs")] WorkflowRun[] Runs);
 public sealed record ArtifactsResponse(Artifact[] Artifacts);
 internal sealed record WorkflowInfo(long Id);

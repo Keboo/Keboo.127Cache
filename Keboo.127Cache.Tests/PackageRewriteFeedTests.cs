@@ -235,7 +235,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache");
+        var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cacheDirectory, PullRequests = [755] };
         github.SeedRawCache(cacheDirectory);
         github.FailDownloads = true;
@@ -372,7 +372,7 @@ public class PackageRewriteFeedTests
         await Assert.That($"acme.core.{expected}.nupkg.sha512".Length).IsEqualTo(255);
         var catalog = app.Services.GetRequiredService<PackageCatalog>();
         var build = (await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetBuildsAsync(CancellationToken.None))).Single();
-        var path = await app.Services.GetRequiredService<PackageCache>().GetAsync("Acme.Core", build, CancellationToken.None);
+        var path = await app.Services.GetRequiredService<PackageCatalog>().GetPackageCache().GetAsync("Acme.Core", build, CancellationToken.None);
         await Assert.That(File.Exists(path)).IsTrue();
         await Assert.That(Path.GetFileName(path).Length <= 255).IsTrue();
 
@@ -774,7 +774,7 @@ public class PackageRewriteFeedTests
     {
         using var fixture = new PackageRewriteFixture();
         var github = await fixture.CreateGitHubAsync();
-        var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache");
+        var cacheDirectory = Path.Combine(fixture.DirectoryPath, "cache", "sources", "project");
         var options = new ProxyOptions { Repository = "fixture/project", CacheDirectory = cacheDirectory, PullRequests = [756], RunIds = [101] };
         Directory.CreateDirectory(cacheDirectory);
         var outOfScope = new BuildEntry(100, 1, 755, "old", "1.2.0-beta.3",
@@ -792,7 +792,7 @@ public class PackageRewriteFeedTests
 
         await using var app = await StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>(), runIds: [101], pullRequests: [756]);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-        var path = await app.Services.GetRequiredService<PackageCache>().GetAsync("Acme.Core", outOfScope, CancellationToken.None);
+        var path = await app.Services.GetRequiredService<PackageCatalog>().GetPackageCache().GetAsync("Acme.Core", outOfScope, CancellationToken.None);
         await Assert.That(File.Exists(path)).IsTrue();
 
         using (var builds = JsonDocument.Parse(await client.GetStringAsync("builds")))

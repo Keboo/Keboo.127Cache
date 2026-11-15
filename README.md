@@ -118,11 +118,26 @@ Example (the same schema can contain several independent entries):
 }
 ```
 
-**Multi-source serving is not implemented yet:** a list with multiple valid
-sources passes configuration validation, but starting the server fails with a
-clear message until source aggregation and source-scoped caches are implemented
-in [#9](https://github.com/Keboo/Keboo.127Cache/issues/9). Configure at most one
-source in the meantime; the tool never silently serves only the first entry.
+Every source is served from one aggregated feed. Each source keeps its own
+cache under `{CacheDirectory}/sources/{Name}/` (`runs.json`, `catalog.json`,
+`artifacts/`, `packages/`, `inventories/`, …); a build is discovered, downloaded
+and rewritten only by its own source, and its project URL and metadata come from
+that source's repository. Rewritten versions carry no source token: the unique
+artifact id already keeps versions from different sources apart. If two sources
+nevertheless produce the same package id and version, the first configured
+source wins and the collision is logged. Forks are simply additional sources.
+Only pull-request builds are discovered.
+
+If one source fails discovery, the others keep serving, but feeds that would be
+incomplete without it (version indexes, search, `/builds`) return 503 rather
+than silently omitting its packages. `/health` lists each source under
+`sources`.
+
+A cache created by an earlier version (flat `catalog.json`, `runs.json`,
+`artifacts/` … directly under `CacheDirectory`) is moved into the directory of
+the single configured source whose repository and workflow match it. If no
+source, or more than one, matches, it is left untouched and a warning is
+logged. The cache schema version is unchanged.
 
 The legacy `Proxy` section still maps to one source and logs a deprecation
 warning. `Proxy.Repository` supplies the source name from its repository

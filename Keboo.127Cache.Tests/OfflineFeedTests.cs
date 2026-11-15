@@ -30,7 +30,8 @@ public sealed class OfflineFeedTests : IDisposable
     private readonly string _directory = Path.Combine(
         Directory.GetCurrentDirectory(), "TestResults", "offline-" + Guid.NewGuid().ToString("N"));
     private readonly OfflineFakeGitHub _github;
-    private string CacheDirectory => Path.Combine(_directory, "cache");
+    private string RootCacheDirectory => Path.Combine(_directory, "cache");
+    private string CacheDirectory => Path.Combine(RootCacheDirectory, "sources", "project");
     private string SnapshotPath => Path.Combine(CacheDirectory, "visible-runs.json");
     private string RunsPath => Path.Combine(CacheDirectory, "runs.json");
 
@@ -705,8 +706,10 @@ public sealed class OfflineFeedTests : IDisposable
         if (offlineMode) await WaitForHealthErrorAsync(offline.Client, "gh auth status");
         else await RetryUntilHealthyAsync(offline.Client, validateContent: true);
         var catalog = offline.App.Services.GetRequiredService<PackageCatalog>();
-        var gate = (SemaphoreSlim)typeof(PackageCatalog).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(catalog)!;
+        var engine = ((List<SourceCatalog>)typeof(PackageCatalog).GetField("_engines", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(catalog)!).Single();
+        var gate = (SemaphoreSlim)typeof(SourceCatalog).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(engine)!;
         await gate.WaitAsync();
         try
         {
@@ -771,14 +774,14 @@ public sealed class OfflineFeedTests : IDisposable
         ArtifactCache blockedCache;
         if (versionArtifact)
         {
-            var packageCache = offline.App.Services.GetRequiredService<PackageCache>();
+            var packageCache = offline.App.Services.GetRequiredService<PackageCatalog>().GetPackageCache();
             var caches = (ConcurrentDictionary<long, ArtifactCache>)typeof(PackageCache)
                 .GetField("_versionArtifactCaches", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(packageCache)!;
             blockedCache = caches.GetOrAdd(_github.VersionArtifact(200).Id,
                 _ => new ArtifactCache(offline.App.Services.GetRequiredService<ProxyOptions>(), _github));
         }
         else
-            blockedCache = offline.App.Services.GetRequiredService<ArtifactCache>();
+            blockedCache = offline.App.Services.GetRequiredService<PackageCatalog>().GetArtifactCache();
         var gate = (SemaphoreSlim)typeof(ArtifactCache).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(blockedCache)!;
         await gate.WaitAsync();
@@ -1513,7 +1516,7 @@ public sealed class OfflineFeedTests : IDisposable
         {
             ["Urls"] = "http://127.0.0.1:0",
             ["Proxy:BaseUrl"] = "http://127.0.0.1:1",
-            ["Proxy:CacheDirectory"] = CacheDirectory,
+            ["Proxy:CacheDirectory"] = RootCacheDirectory,
             ["Proxy:Repository"] = repository,
             ["Proxy:Workflow"] = workflow,
         };
