@@ -37,6 +37,15 @@ public sealed class ArtifactCache
 
     public bool Contains(Artifact artifact) => File.Exists(GetPath(artifact));
 
+    internal async Task<IDisposable> LockAsync(CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        return new GateRelease(_gate);
+    }
+
+    // Callers hold the gate from LockAsync.
+    internal void Forget(long artifactId) => _integrity.Forget(GetPath(new Artifact(artifactId, "", false, null)));
+
     private string GetPath(Artifact artifact) => Path.Combine(_options.CacheDirectory, "artifacts", $"{artifact.Id}.zip");
 
     public async Task<string> GetAsync(Artifact artifact, CancellationToken cancellationToken)

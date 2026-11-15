@@ -1,4 +1,4 @@
-﻿using System.IO.Compression;
+using System.IO.Compression;
 using System.Text.Json;
 
 using Microsoft.Extensions.Logging.Abstractions;
@@ -18,7 +18,7 @@ public sealed record RunArtifacts(
     bool WorkflowVerified = false);
 public sealed record RunArtifactsFile(string Repository, string Workflow, List<RunArtifacts> Runs, int SchemaVersion = 1);
 
-internal sealed class SourceCatalog : IDisposable, IAsyncDisposable
+internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 {
     private readonly ProxyOptions _options;
     private readonly IBuildSource _source;
@@ -126,6 +126,9 @@ internal sealed class SourceCatalog : IDisposable, IAsyncDisposable
         _file = Path.Combine(options.CacheDirectory, "catalog.json");
         _runsFile = Path.Combine(options.CacheDirectory, "runs.json");
         Directory.CreateDirectory(options.CacheDirectory);
+        CacheDisk.SweepTrash(options.CacheDirectory);
+        _closedFile = Path.Combine(options.CacheDirectory, "closed-pull-requests.json");
+        LoadClosedPullRequests();
         _builds = [];
         _runs = [];
         if (options.HasSource)
@@ -696,6 +699,7 @@ internal sealed class SourceCatalog : IDisposable, IAsyncDisposable
             x.RunId == build.RunId && x.Attempt == build.Attempt && x.PullRequest == build.PullRequest
             && string.Equals(x.HeadSha, build.HeadSha, StringComparison.OrdinalIgnoreCase)), cancellationToken);
         var openPullRequests = discovery.OpenPullRequests;
+        TrackClosedPullRequests(openPullRequests);
         var eligibleRuns = discovery.Builds
             .Where(x => x.State == BuildCompletion.Succeeded)
             .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
@@ -1247,6 +1251,7 @@ internal sealed class SourceCatalog : IDisposable, IAsyncDisposable
         {
             Version = PackageRewriter.VersionFor(build.OriginalVersion, build.PullRequest, build.RunId, build.Attempt, build.Packages.Id)
         }).ToList();
+        _catalogSchema = saved.SchemaVersion;
         _catalogNeedsUpgrade = saved.SchemaVersion != CacheSchema.Version || !saved.Builds.SequenceEqual(_builds);
         _catalogUnreadable = false;
     }
