@@ -1,6 +1,5 @@
 @page "/remove"
 @inject ICacheEvictionService Eviction
-@inject NavigationManager Navigation
 @inject ProxyOptions Options
 
 <PageTitle>Remove cached builds - 127Cache</PageTitle>
@@ -114,16 +113,7 @@
         await RunAsync(dryRun: true);
     }
 
-    private async Task RemoveAsync()
-    {
-        await RunAsync(dryRun: false);
-        if (_result is { Builds.Count: > 0 } done && _error is null && done.Builds.All(x => x.Error is null))
-        {
-            var again = done.AnyWillReappear ? 1 : 0;
-            var permanent = done.Builds.Any(x => x.Removed && x.Reappearance != ReappearanceOutcome.WillReappear) ? 1 : 0;
-            Navigation.NavigateTo($"/?removed={done.RemovedCount}&bytes={done.BytesReclaimed}&again={again}&permanent={permanent}");
-        }
-    }
+    private Task RemoveAsync() => RunAsync(dryRun: false);
 
     private async Task RunAsync(bool dryRun)
     {

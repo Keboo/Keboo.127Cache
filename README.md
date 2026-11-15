@@ -73,7 +73,7 @@ keboo-127cache serve --open
   builds of closed pull requests. Both first show a confirmation (a dry run) with the number of bytes that
   will be reclaimed and, per build, whether it comes back. Removal deletes the cache only: a build of an
   open pull request is downloaded again by the next refresh; a build of a closed pull request or with
-  expired artifacts cannot be restored. After removing, the overview shows a summary.
+  expired artifacts cannot be restored. The result page lists what was removed.
 
 It is a Blazor Web App (Razor Components) in the same process using static server-side rendering:
 pages work without JavaScript (a small script only adds the Copy button and the refresh busy state; actions are

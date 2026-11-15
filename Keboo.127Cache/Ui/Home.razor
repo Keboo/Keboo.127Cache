@@ -8,15 +8,6 @@
 <h2>Overview</h2>
 <FeedUrl Url="@UiFormat.FeedUrl(Options)" />
 
-@if (Removed is { } removedCount)
-{
-    <p role="status" class="notice">
-        Removed @removedCount cached build(s) and reclaimed @UiFormat.Size(ReclaimedBytes).
-        @if (Again == 1) { <text> Open-pull-request builds are downloaded again on the next refresh.</text> }
-        @if (Permanent == 1) { <text> Builds whose pull request is closed or whose artifacts expired cannot be restored.</text> }
-    </p>
-}
-
 @if (_refreshError is not null)
 {
     <p role="alert" class="error">Refresh failed: @_refreshError</p>
@@ -90,10 +81,6 @@ else
     private string? _refreshError;
 
     [SupplyParameterFromForm(Name = "source")] private string? RefreshSource { get; set; }
-    [SupplyParameterFromQuery(Name = "removed")] private int? Removed { get; set; }
-    [SupplyParameterFromQuery(Name = "bytes")] private long ReclaimedBytes { get; set; }
-    [SupplyParameterFromQuery(Name = "again")] private int Again { get; set; }
-    [SupplyParameterFromQuery(Name = "permanent")] private int Permanent { get; set; }
 
     protected override Task OnInitializedAsync() => LoadAsync();
 

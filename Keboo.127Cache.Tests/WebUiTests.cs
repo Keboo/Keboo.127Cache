@@ -316,11 +316,12 @@ public sealed class WebUiTests
         using var removed = await PostFormAsync(host, Url, "remove", token,
             ("scope", "build"), ("source", "main"), ("run", "100"), ("attempt", "1"));
         var html = await removed.Content.ReadAsStringAsync();
-        await Assert.That(html).Contains("Removed 1 cached build(s)");
-        await Assert.That(html).Contains("downloaded again on the next refresh");
-        await Assert.That(removed.RequestMessage!.RequestUri!.AbsolutePath).IsEqualTo("/");
+        await Assert.That(html).Contains("Removed 1 build(s) and reclaimed");
+        await Assert.That(html).Contains("removed (pull request is open: downloaded again on the next refresh)");
+        var afterRemoval = await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync();
+        await Assert.That(afterRemoval.Single().CachedState).IsEqualTo("notCached");
 
-        using var refreshed = await PostFormAsync(host, "", "refresh", Token(html), ("source", "main"));
+        using var refreshed = await PostFormAsync(host, "", "refresh", Token(await host.Client.GetStringAsync("")), ("source", "main"));
         var after = await refreshed.Content.ReadAsStringAsync();
         await Assert.That(after).Contains("Refresh finished.");
         await Assert.That(after).Contains("Downloaded");
