@@ -17,7 +17,7 @@ using Microsoft.Extensions.Logging;
 
 using NuGet.Packaging;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public sealed class RuntimeConfigurationTests : IDisposable
 {

@@ -1,4 +1,4 @@
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 internal sealed class ConfigurationEnvironment : IDisposable
 {

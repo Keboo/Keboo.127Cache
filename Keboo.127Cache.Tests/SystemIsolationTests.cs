@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 // Code in this repository must not change machine or user state outside the repository.
 // See "System isolation" in CONTRIBUTING.md.

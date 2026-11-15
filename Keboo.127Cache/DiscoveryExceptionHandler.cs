@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 
 using Microsoft.AspNetCore.Diagnostics;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed class DiscoveryUnavailableException(string message) : IOException(message);
 internal sealed class CacheMetadataUnavailableException : IOException;

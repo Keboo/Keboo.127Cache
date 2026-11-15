@@ -7,7 +7,7 @@ using System.Xml.Linq;
 using Microsoft.Extensions.Logging;
 using NuGet.Packaging.Signing;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 internal sealed class PackageRewriteFixture : IDisposable
 {

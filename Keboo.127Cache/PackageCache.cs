@@ -9,7 +9,7 @@ using NuGet.Packaging;
 using NuGet.Packaging.Core;
 using NuGet.Versioning;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed record CachedPackage(string Id, string OriginalVersion, string Version);
 

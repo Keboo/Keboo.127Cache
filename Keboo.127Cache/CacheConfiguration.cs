@@ -7,7 +7,7 @@ using Microsoft.Extensions.Configuration.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed class CacheConfiguration
 {

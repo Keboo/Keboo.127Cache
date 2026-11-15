@@ -1,4 +1,4 @@
-namespace Keboo._127Cache.Proxy.Tests;
+namespace Keboo.LocalCache.Proxy.Tests;
 
 public sealed class DotNetToolClientTests
 {

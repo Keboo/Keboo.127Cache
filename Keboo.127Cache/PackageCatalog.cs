@@ -6,7 +6,7 @@ using Microsoft.Extensions.Caching.Memory;
 
 using NuGet.Versioning;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed record BuildEntry(
     long RunId, int Attempt, int PullRequest, string HeadSha, string OriginalVersion, string Version,

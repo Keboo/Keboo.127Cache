@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "Keboo._127Cache": {
+    "Keboo.LocalCache": {
       "commandName": "Project",
       "commandLineArgs": "serve"
     },

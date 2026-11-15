@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed record GitHubRepository([property: JsonPropertyName("full_name")] string? FullName);
 public sealed record PullRequestHead(

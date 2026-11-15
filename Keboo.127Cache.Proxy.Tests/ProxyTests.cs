@@ -3,8 +3,8 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
 
-using Keboo._127Cache;
-using Keboo._127Cache.Testing;
+using Keboo.LocalCache;
+using Keboo.LocalCache.Testing;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Caching.Memory;
@@ -20,7 +20,7 @@ using NuGet.Versioning;
 
 using TUnit.Assertions.Enums;
 
-namespace Keboo._127Cache.Proxy.Tests;
+namespace Keboo.LocalCache.Proxy.Tests;
 
 public sealed class ProxyTests : IAsyncDisposable
 {

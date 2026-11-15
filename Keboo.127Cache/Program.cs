@@ -2,7 +2,7 @@ using System.CommandLine;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed class Program
 {

@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 internal sealed record OfflineSnapshot(
     int SchemaVersion,

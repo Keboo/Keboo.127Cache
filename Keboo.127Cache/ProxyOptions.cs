@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed class ProxyOptions
 {

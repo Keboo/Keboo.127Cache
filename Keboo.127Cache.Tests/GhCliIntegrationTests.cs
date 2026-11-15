@@ -4,9 +4,9 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
-using Keboo._127Cache;
+using Keboo.LocalCache;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public sealed class GhCliIntegrationTests : IDisposable
 {

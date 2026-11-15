@@ -41,6 +41,17 @@ Task Manager, MMC and SmartScreen, and a reboot did not fix it. If a change
 needs machine-level setup, document it as a manual step for the developer
 instead of automating it.
 
+## Namespaces
+
+Use `Keboo.LocalCache` for application code, `Keboo.LocalCache.Tests` and
+`Keboo.LocalCache.Proxy.Tests` for tests, and `Keboo.LocalCache.Testing` for shared
+test helpers. Project directories, assembly names, the NuGet package ID, and the
+tool command retain their existing names. Namespace/directory mismatch warnings
+are disabled in `.editorconfig`.
+
+The released-cache fixture generator intentionally retains the historical
+namespace because it compiles source from a pinned, pre-rename revision.
+
 ## Test conventions
 
 Both test projects use the centrally versioned TUnit packages and the
