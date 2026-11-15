@@ -32,6 +32,16 @@ internal static partial class UiFormat
 
     public static string Timestamp(DateTimeOffset value) => value.UtcDateTime.ToString("u", CultureInfo.InvariantCulture);
 
+    public static string Reappearance(ReappearanceOutcome outcome) => outcome switch
+    {
+        ReappearanceOutcome.WillReappear => "pull request is open: downloaded again on the next refresh",
+        ReappearanceOutcome.PullRequestClosed => "pull request is closed: cannot be restored",
+        ReappearanceOutcome.ArtifactExpired => "artifacts expired on GitHub: cannot be restored",
+        ReappearanceOutcome.SupersededByNewerRun => "a newer run of the pull request is served: this run cannot be restored",
+        ReappearanceOutcome.NotAvailableUpstream => "no longer available on GitHub: cannot be restored",
+        _ => "GitHub could not be queried: it may not be restorable"
+    };
+
     public static string CacheState(BuildInfo build) => build.CachedState switch
     {
         "cached" => "Downloaded",

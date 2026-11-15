@@ -13,3 +13,15 @@ document.addEventListener("click", async (event) => {
     document.execCommand("copy");
   }
 });
+
+// Shows an in-progress state while a refresh runs; the server renders the result when the request returns.
+document.addEventListener("submit", (event) => {
+  const form = event.target;
+  if (!form.dataset || !form.dataset.busy) return;
+  const label = event.submitter && event.submitter.dataset.busyLabel;
+  const status = document.getElementById(form.dataset.busy);
+  if (status) { status.textContent = label || "Working…"; status.hidden = false; }
+  document.querySelectorAll("button[form='" + form.id + "']").forEach((b) => { b.setAttribute("aria-busy", "true"); });
+  // Disabling synchronously would drop the clicked button's value from the posted data.
+  setTimeout(() => document.querySelectorAll("button[form='" + form.id + "'], #" + form.id + " button").forEach((b) => { b.disabled = true; }), 0);
+});

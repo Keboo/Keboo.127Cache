@@ -1,0 +1,145 @@
+@page "/remove"
+@inject ICacheEvictionService Eviction
+@inject NavigationManager Navigation
+@inject ProxyOptions Options
+
+<PageTitle>Remove cached builds - 127Cache</PageTitle>
+
+<h2>Remove cached builds</h2>
+
+@if (_error is not null)
+{
+    <p role="alert" class="error">@_error</p>
+}
+
+@if (_result is { } result)
+{
+    @if (result.Builds.Count == 0)
+    {
+        <p>Nothing to remove: no matching builds are cached.</p>
+    }
+    else if (result.DryRun)
+    {
+        <p>
+            This removes <strong>@result.Builds.Count cached build(s)</strong> and reclaims
+            <strong>@UiFormat.Size(result.BytesReclaimed)</strong> from <code>@Options.CacheDirectory</code>.
+        </p>
+        <ul>
+            @foreach (var build in result.Builds)
+            {
+                <li>
+                    @build.Source, pull request #@build.PullRequest, run @build.RunId attempt @build.Attempt:
+                    @UiFormat.Size(build.BytesReclaimed) (@UiFormat.Reappearance(build.Reappearance))
+                </li>
+            }
+        </ul>
+        <p>
+            Removing deletes the cached copy only. A build whose pull request is still open is downloaded again by the
+            next refresh. A build whose pull request is closed, or whose artifacts expired on GitHub, cannot be restored.
+        </p>
+        @if (result.AnyWillReappear)
+        {
+            <p role="note">Open-pull-request builds in this list will be re-downloaded on the next refresh.</p>
+        }
+        @if (result.Builds.Any(x => !x.WillReappear))
+        {
+            <p role="note"><strong>Builds that are not marked as downloaded again above cannot be restored.</strong></p>
+        }
+        <form method="post" @formname="remove" @onsubmit="RemoveAsync">
+            <AntiforgeryToken />
+            <input type="hidden" name="scope" value="@_scope" />
+            <input type="hidden" name="source" value="@_source" />
+            <input type="hidden" name="run" value="@_run" />
+            <input type="hidden" name="attempt" value="@_attempt" />
+            <button type="submit">Remove @UiFormat.Size(result.BytesReclaimed)</button>
+            <a class="button" href="/">Cancel</a>
+        </form>
+    }
+    else
+    {
+        <p role="status" class="notice">
+            Removed @result.RemovedCount build(s) and reclaimed @UiFormat.Size(result.BytesReclaimed).
+        </p>
+        <ul>
+            @foreach (var build in result.Builds)
+            {
+                <li>
+                    @build.Source, pull request #@build.PullRequest, run @build.RunId attempt @build.Attempt:
+                    @if (build.Error is { } error)
+                    {
+                        <span class="error">not removed: @error</span>
+                    }
+                    else
+                    {
+                        <span>removed (@UiFormat.Reappearance(build.Reappearance))</span>
+                    }
+                </li>
+            }
+        </ul>
+    }
+}
+
+@if (_result is null || !_result.DryRun)
+{
+    <p><a href="/">Back to the overview</a></p>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "scope")] private string? QueryScope { get; set; }
+    [SupplyParameterFromQuery(Name = "source")] private string? QuerySource { get; set; }
+    [SupplyParameterFromQuery(Name = "run")] private long? QueryRun { get; set; }
+    [SupplyParameterFromQuery(Name = "attempt")] private int? QueryAttempt { get; set; }
+    [SupplyParameterFromForm(Name = "scope")] private string? FormScope { get; set; }
+    [SupplyParameterFromForm(Name = "source")] private string? FormSource { get; set; }
+    [SupplyParameterFromForm(Name = "run")] private long? FormRun { get; set; }
+    [SupplyParameterFromForm(Name = "attempt")] private int? FormAttempt { get; set; }
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private RemovalResult? _result;
+    private string? _error;
+    private string? _scope;
+    private string? _source;
+    private long? _run;
+    private int? _attempt;
+
+    // GET shows what would be removed (dry run) and asks for confirmation; the POST performs the removal.
+    protected override async Task OnInitializedAsync()
+    {
+        if (HttpContext is { Request.Method: "POST" })
+        {
+            (_scope, _source, _run, _attempt) = (FormScope, FormSource, FormRun, FormAttempt);
+            return;
+        }
+        (_scope, _source, _run, _attempt) = (QueryScope, QuerySource, QueryRun, QueryAttempt);
+        await RunAsync(dryRun: true);
+    }
+
+    private async Task RemoveAsync()
+    {
+        await RunAsync(dryRun: false);
+        if (_result is { Builds.Count: > 0 } done && _error is null && done.Builds.All(x => x.Error is null))
+        {
+            var again = done.AnyWillReappear ? 1 : 0;
+            var permanent = done.Builds.Any(x => x.Removed && x.Reappearance != ReappearanceOutcome.WillReappear) ? 1 : 0;
+            Navigation.NavigateTo($"/?removed={done.RemovedCount}&bytes={done.BytesReclaimed}&again={again}&permanent={permanent}");
+        }
+    }
+
+    private async Task RunAsync(bool dryRun)
+    {
+        try
+        {
+            _result = _scope switch
+            {
+                "build" when !string.IsNullOrEmpty(_source) && _run is { } run && _attempt is { } attempt =>
+                    await Eviction.RemoveBuildAsync(_source, run, attempt, dryRun),
+                "closed" => await Eviction.RemoveClosedPullRequestsAsync(string.IsNullOrEmpty(_source) ? null : _source, null, dryRun),
+                _ => throw new ArgumentException("The request does not say which builds to remove.")
+            };
+        }
+        catch (Exception exception) when (exception is KeyNotFoundException or ArgumentException or IOException or InvalidOperationException)
+        {
+            _error = exception.Message;
+        }
+    }
+}

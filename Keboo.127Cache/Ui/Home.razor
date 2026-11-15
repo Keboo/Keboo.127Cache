@@ -8,6 +8,43 @@
 <h2>Overview</h2>
 <FeedUrl Url="@UiFormat.FeedUrl(Options)" />
 
+@if (Removed is { } removedCount)
+{
+    <p role="status" class="notice">
+        Removed @removedCount cached build(s) and reclaimed @UiFormat.Size(ReclaimedBytes).
+        @if (Again == 1) { <text> Open-pull-request builds are downloaded again on the next refresh.</text> }
+        @if (Permanent == 1) { <text> Builds whose pull request is closed or whose artifacts expired cannot be restored.</text> }
+    </p>
+}
+
+@if (_refreshError is not null)
+{
+    <p role="alert" class="error">Refresh failed: @_refreshError</p>
+}
+else if (_refreshSummary is not null)
+{
+    <div role="status" class="notice">
+        <p>@(_refreshSummary.Succeeded ? "Refresh finished." : "Refresh finished with errors.")</p>
+        <ul class="plain">
+            @foreach (var result in _refreshSummary.Sources)
+            {
+                <li>
+                    <strong>@result.Source</strong>:
+                    @if (result.Succeeded)
+                    {
+                        <span>@result.Builds build(s) found</span>
+                        @if (result.Coalesced) { <span class="muted"> (joined a refresh already in progress)</span> }
+                    }
+                    else
+                    {
+                        <span class="error">failed: @result.Error</span>
+                    }
+                </li>
+            }
+        </ul>
+    </div>
+}
+
 @if (_loadError is not null)
 {
     <p role="alert" class="error">Could not read the cache: @_loadError</p>
@@ -23,6 +60,12 @@ else
     }
     else
     {
+        <form id="refresh-form" method="post" @formname="refresh" @onsubmit="RefreshAsync" data-busy="refresh-status">
+            <AntiforgeryToken />
+            <button type="submit" name="source" value="" data-busy-label="Refreshing all sources…">Refresh all sources</button>
+            <a class="button" href="/remove?scope=closed">Remove closed-PR builds…</a>
+            <span id="refresh-status" role="status" class="muted" hidden></span>
+        </form>
         <SourcesTable Sources="_sources" Now="_now" />
 
         <h2>Builds</h2>
@@ -43,24 +86,40 @@ else
     private string? _loadError;
     private string? _packagesUnavailable;
     private DateTimeOffset _now;
+    private RefreshSummary? _refreshSummary;
+    private string? _refreshError;
 
-    protected override async Task OnInitializedAsync()
+    [SupplyParameterFromForm(Name = "source")] private string? RefreshSource { get; set; }
+    [SupplyParameterFromQuery(Name = "removed")] private int? Removed { get; set; }
+    [SupplyParameterFromQuery(Name = "bytes")] private long ReclaimedBytes { get; set; }
+    [SupplyParameterFromQuery(Name = "again")] private int Again { get; set; }
+    [SupplyParameterFromQuery(Name = "permanent")] private int Permanent { get; set; }
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    // On the form post this runs after OnInitializedAsync, so the tables are reloaded to show the refreshed state.
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            _refreshSummary = await Management.RefreshAsync(string.IsNullOrEmpty(RefreshSource) ? null : RefreshSource);
+        }
+        catch (Exception exception) when (exception is KeyNotFoundException or IOException or InvalidOperationException)
+        {
+            _refreshError = exception.Message;
+        }
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
     {
         _now = Options.TimeProvider.GetUtcNow();
+        _loadError = null;
+        _packagesUnavailable = null;
         try
         {
-            _sources = await Management.GetSourcesAsync();
-            _builds = await Management.GetBuildsAsync();
-            _diskBytes = (await Eviction.GetDiskUsageAsync()).TotalBytes;
-        }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException or UnauthorizedAccessException)
-        {
-            _loadError = exception.Message;
-            return;
-        }
-        try
-        {
-            // Package ids come from the same inventory as the feed, so this can materialize builds on the first call.
+            // Package ids come from the same inventory as the feed, so this can materialize (download) builds. It runs
+            // before the builds are listed so a build that was removed and is open again shows as downloaded.
             _packageIds = (await Management.GetPackagesAsync())
                 .SelectMany(package => package.Versions.Select(v => (Id: package.Id, Version: v)))
                 .GroupBy(x => (x.Version.Source, x.Version.PullRequest, x.Version.RunId, x.Version.Attempt))
@@ -70,6 +129,16 @@ else
         catch (Exception exception) when (exception is DiscoveryUnavailableException or IOException or InvalidOperationException)
         {
             _packagesUnavailable = exception.Message;
+        }
+        try
+        {
+            _sources = await Management.GetSourcesAsync();
+            _builds = await Management.GetBuildsAsync();
+            _diskBytes = (await Eviction.GetDiskUsageAsync()).TotalBytes;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            _loadError = exception.Message;
         }
     }
 }

@@ -14,19 +14,20 @@
                     <th scope="col">Cache state</th>
                     <th scope="col" class="num">Size</th>
                     <th scope="col">Cached</th>
+                    <th scope="col">Actions</th>
                 </tr>
             </thead>
             @if (builds.Length == 0)
             {
                 <tbody>
-                    <tr><td colspan="7" class="muted">No builds.</td></tr>
+                    <tr><td colspan="8" class="muted">No builds.</td></tr>
                 </tbody>
             }
             @foreach (var pullRequest in builds.GroupBy(x => x.PullRequest).OrderBy(x => x.Key))
             {
                 <tbody>
                     <tr class="group-row">
-                        <th scope="rowgroup" colspan="7">
+                        <th scope="rowgroup" colspan="8">
                             Pull request
                             @if (UiFormat.PullRequestUrl(source.Repository, pullRequest.Key) is { } prUrl)
                             {
@@ -87,6 +88,13 @@
                                 else
                                 {
                                     <span class="muted">n/a</span>
+                                }
+                            </td>
+                            <td>
+                                @if (build.CachedState != "notCached")
+                                {
+                                    <a href="@($"/remove?scope=build&source={Uri.EscapeDataString(build.Source)}&run={build.RunId}&attempt={build.Attempt}")"
+                                       aria-label="Remove run @build.RunId attempt @build.Attempt of pull request #@build.PullRequest from the cache">Remove</a>
                                 }
                             </td>
                         </tr>
