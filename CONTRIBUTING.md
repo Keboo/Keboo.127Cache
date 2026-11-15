@@ -60,12 +60,14 @@ Kestrel bind loopback port `0`, then use its assigned address for the client and
 advertised feed URL. Use `[NotInParallel]` only when isolation is not possible,
 and document the shared resource that requires it.
 
-Feed content is prepared in the background. Successful catalog assertions and
-NuGet-client fixtures must wait for readiness with a bounded retry rather than
-assume preparation finishes within the feed's one-second request budget. Retry
-only the expected pending-content failure (or HTTP 503), and keep permanent
-errors visible. Finish preparing the fixture before running consumers or
-deleting its cache.
+Feed discovery and content preparation run in the background. Successful catalog
+assertions and NuGet-client fixtures must wait for readiness with a bounded retry
+rather than assume preparation finishes within the feed's one-second request
+budget. Retry only expected in-progress discovery/content failures (or HTTP 503),
+and keep permanent errors visible. Finish preparing the fixture before running
+consumers or deleting its cache.
+`WebApplication.StartAsync` does not await hosted-service warmup; await the
+warmup service's execution task before asserting metadata-only startup effects.
 
 Run the complete solution:
 

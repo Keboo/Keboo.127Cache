@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 using NuGet.Packaging;
@@ -96,6 +97,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
 
+        await WaitForWarmupAsync(app);
         using var client = Client(app);
         using var health = JsonDocument.Parse(await client.GetStringAsync("/health", CancellationToken.None));
         var options = app.Services.GetRequiredService<ProxyOptions>();
@@ -128,6 +130,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
 
+        await WaitForWarmupAsync(app);
         await Assert.That(github.ArtifactQueries).IsEqualTo(1);
         await Assert.That(github.Downloads).IsEqualTo(0);
         using var client = Client(app);
@@ -525,6 +528,10 @@ public sealed class RuntimeConfigurationTests : IDisposable
             .Get<IServerAddressesFeature>()!.Addresses.Single();
         return new HttpClient { BaseAddress = new Uri(address) };
     }
+
+    private static Task WaitForWarmupAsync(WebApplication app) =>
+        app.Services.GetServices<IHostedService>().OfType<CatalogWarmupService>().Single()
+            .ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current!.Execution.CancellationToken);
 
     private async Task<(int ExitCode, string Output, string Commands)> RunVpkInstallerAsync(string baseUrl)
     {
