@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Keboo._127Cache.Testing;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -31,7 +32,8 @@ public sealed class ArtifactIntegrityTests
         await using var app = await StartFeedAsync(fixture);
         using var client = CreateClient(app);
 
-        using var versions = JsonDocument.Parse(await client.GetStringAsync("/flat/example.package/index.json", Cancellation));
+        using var versions = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), "/flat/example.package/index.json"));
         var version = versions.RootElement.GetProperty("versions")[0].GetString()!;
         var bytes = await client.GetByteArrayAsync(
             $"/flat/example.package/{version}/example.package.{version}.nupkg", Cancellation);

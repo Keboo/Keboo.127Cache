@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 
 using Keboo._127Cache;
@@ -36,11 +36,7 @@ public sealed class GhCliIntegrationTests : IDisposable
                     | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         }
 
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        var address = $"http://127.0.0.1:{port}";
+        const string address = "http://127.0.0.1:0";
         var config = Path.Combine(fixture, "proxy.json");
         await File.WriteAllTextAsync(config, JsonSerializer.Serialize(new
         {
@@ -83,11 +79,14 @@ public sealed class GhCliIntegrationTests : IDisposable
         start.Environment["DOTNET_ROOT"] = dotnetRoot;
 
         using var process = Process.Start(start) ?? throw new InvalidOperationException("The server process did not start.");
-        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var output = new StringBuilder();
+        Task<string>? standardOutput = null;
         var standardError = process.StandardError.ReadToEndAsync();
         try
         {
-            using var client = new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(2) };
+            var actualAddress = await ReadServerAddressAsync(process, output);
+            standardOutput = process.StandardOutput.ReadToEndAsync();
+            using var client = new HttpClient { BaseAddress = actualAddress, Timeout = TimeSpan.FromSeconds(2) };
             await WaitForServerAsync(process, client);
             using var response = await client.GetAsync("/v3/index.json");
             var body = await response.Content.ReadAsStringAsync();
@@ -106,8 +105,23 @@ public sealed class GhCliIntegrationTests : IDisposable
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
         }
-        var logs = await standardOutput + await standardError;
+        var logs = output + (standardOutput is null ? await process.StandardOutput.ReadToEndAsync() : await standardOutput)
+            + await standardError;
         await Assert.That(logs.Contains(marker, StringComparison.Ordinal)).IsFalse();
+    }
+
+    private static async Task<Uri> ReadServerAddressAsync(Process process, StringBuilder output)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (await process.StandardOutput.ReadLineAsync(timeout.Token) is { } line)
+        {
+            output.AppendLine(line);
+            const string prefix = "Now listening on: ";
+            var start = line.IndexOf(prefix, StringComparison.Ordinal);
+            if (start >= 0 && Uri.TryCreate(line[(start + prefix.Length)..].Trim(), UriKind.Absolute, out var address))
+                return address;
+        }
+        throw new InvalidOperationException($"Server exited before announcing its address. Output: {output}");
     }
 
     private static async Task WaitForServerAsync(Process process, HttpClient client)

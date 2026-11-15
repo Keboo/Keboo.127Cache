@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
+using Keboo._127Cache.Testing;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NuGet.Packaging;
@@ -46,7 +48,7 @@ public class PackageIntegrityFeedTests
         await using var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github,
             new CollectingLogger<PackageCache>(), catalogLogger: logger);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-        var versions = await VersionsAsync(client, "acme.core");
+        var versions = await VersionsAsync(app, client, "acme.core");
         await Assert.That(string.Join(",", versions)).IsEqualTo(HealthyVersion);
         using var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json"));
         await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
@@ -85,7 +87,8 @@ public class PackageIntegrityFeedTests
             new CollectingLogger<PackageCache>(), catalogLogger: logger);
         using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
 
-        using (var flat = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json")))
+        using (var flat = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(client,
+            app.Services.GetRequiredService<PackageCatalog>(), "flat/acme.core/index.json")))
             await Assert.That(flat.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(HealthyVersion);
         using (var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json")))
             await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items")[0]
@@ -132,8 +135,8 @@ public class PackageIntegrityFeedTests
             await using var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github,
                 new CollectingLogger<PackageCache>(), catalogLogger: logger);
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core"))).IsEqualTo(HealthyVersion);
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.widget")))
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core"))).IsEqualTo(HealthyVersion);
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.widget")))
                 .IsEqualTo("2.0.0-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
             await Assert.That(await File.ReadAllTextAsync(catalogPath)).IsEqualTo(originalCatalog);
             await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
@@ -145,11 +148,11 @@ public class PackageIntegrityFeedTests
         await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core")))
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.widget")))
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.widget")))
                 .IsEqualTo("2.0.0-rc.1.pr.755.run.r0000000000000000099.attempt.1.artifact.300,2.0.0-rc.1.pr.755.run.r0000000000000000100.attempt.1.artifact.200");
-            await Assert.That((await VersionsAsync(client, "acme.empty")).Length).IsEqualTo(2);
+            await Assert.That((await VersionsAsync(app, client, "acme.empty")).Length).IsEqualTo(2);
             var bytes = await client.GetByteArrayAsync($"flat/acme.core/{OtherVersion}/acme.core.{OtherVersion}.nupkg");
             using var reader = new PackageArchiveReader(new MemoryStream(bytes));
             await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(OtherVersion);
@@ -183,7 +186,7 @@ public class PackageIntegrityFeedTests
         await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That((await VersionsAsync(client, "acme.core")).Length).IsEqualTo(2);
+            await Assert.That((await VersionsAsync(app, client, "acme.core")).Length).IsEqualTo(2);
         }
 
         var directory = Path.Combine(cache, "packages", "discovered", $"v{CacheSchema.Version}", "755.99.1.300");
@@ -212,7 +215,7 @@ public class PackageIntegrityFeedTests
             new CollectingLogger<PackageCache>(), catalogLogger: logger))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core"))).IsEqualTo(HealthyVersion);
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core"))).IsEqualTo(HealthyVersion);
             await Assert.That(await File.ReadAllTextAsync(catalogPath)).IsEqualTo(legacyCatalog);
             await Assert.That(logger.Messages.Any(x => x.Level == LogLevel.Warning
                 && x.Message.Contains("99", StringComparison.Ordinal)
@@ -227,8 +230,17 @@ public class PackageIntegrityFeedTests
         await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core")))
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                var current = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
+                if (current.SchemaVersion == CacheSchema.Version) break;
+                await Task.Delay(20);
+            }
+            var migrated = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
+            await Assert.That(migrated.SchemaVersion).IsEqualTo(CacheSchema.Version);
         }
         var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
         await Assert.That(saved.SchemaVersion).IsEqualTo(CacheSchema.Version);
@@ -258,7 +270,7 @@ public class PackageIntegrityFeedTests
         await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core")))
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
             var packages = app.Services.GetRequiredService<PackageCache>();
             packagePath = await packages.GetAsync("Acme.Core", other, CancellationToken.None);
@@ -289,6 +301,13 @@ public class PackageIntegrityFeedTests
         }
         var corruptPackage = await File.ReadAllBytesAsync(packagePath);
         var corruptInventory = await File.ReadAllBytesAsync(inventoryPath);
+        await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
+        {
+            var packages = app.Services.GetRequiredService<PackageCache>();
+            var offline = await packages.GetAvailableOfflineAsync(other, CancellationToken.None, allowRepair: false);
+            await Assert.That(offline.Packages.Any(package => package.Id.Equals("Acme.Core", StringComparison.OrdinalIgnoreCase)))
+                .IsFalse();
+        }
         var expectedReason = corruption switch
         {
             "identity" or "different-id" => "mismatched identity",
@@ -304,7 +323,7 @@ public class PackageIntegrityFeedTests
             await using var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github,
                 new CollectingLogger<PackageCache>(), catalogLogger: logger);
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core"))).IsEqualTo(HealthyVersion);
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core"))).IsEqualTo(HealthyVersion);
             using var registration = JsonDocument.Parse(await client.GetStringAsync("registration/acme.core/index.json"));
             await Assert.That(registration.RootElement.GetProperty("items")[0].GetProperty("items").GetArrayLength()).IsEqualTo(1);
             var bytes = await client.GetByteArrayAsync($"flat/acme.core/{HealthyVersion}/acme.core.{HealthyVersion}.nupkg");
@@ -327,9 +346,9 @@ public class PackageIntegrityFeedTests
         await using (var app = await PackageRewriteFeedTests.StartFeedAsync(fixture, github, new CollectingLogger<PackageCache>()))
         {
             using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            await Assert.That(string.Join(",", await VersionsAsync(client, "acme.core")))
+            await Assert.That(string.Join(",", await VersionsAsync(app, client, "acme.core")))
                 .IsEqualTo($"{OtherVersion},{HealthyVersion}");
-            await Assert.That((await VersionsAsync(client, "acme.widget")).Length).IsEqualTo(2);
+            await Assert.That((await VersionsAsync(app, client, "acme.widget")).Length).IsEqualTo(2);
         }
         await Assert.That(github.Downloads).IsEqualTo(0);
     }
@@ -354,9 +373,10 @@ public class PackageIntegrityFeedTests
         return (other, healthy);
     }
 
-    private static async Task<string[]> VersionsAsync(HttpClient client, string id)
+    private static async Task<string[]> VersionsAsync(WebApplication app, HttpClient client, string id)
     {
-        using var document = JsonDocument.Parse(await client.GetStringAsync($"flat/{id}/index.json"));
+        using var document = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, app.Services.GetRequiredService<PackageCatalog>(), $"flat/{id}/index.json"));
         return document.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
     }
 

@@ -18,6 +18,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Keboo.127Cache.Tests" />
+    <InternalsVisibleTo Include="Keboo.127Cache.Proxy.Tests" />
     <None Include="..\assets\icon.png" Pack="true" PackagePath="\" />
     <PackageReference Include="System.CommandLine" />
     <PackageReference Include="NuGet.Packaging" />

@@ -309,6 +309,10 @@ packages are not deleted when a PR disappears from the feed. A blocked download,
 catalog gate, or offline artifact repair does not make unrelated cached requests
 wait indefinitely; requests fall back to verifiable local content or return 503
 after a short bounded wait. A cold feed with blocked discovery returns 503.
+Problem details distinguish content or cached verification still in progress from
+a known failure. Once pending content preparation succeeds, health can recover
+without another feed request. Shutdown cancels and waits for background cache
+work to release its files.
 
 The app retains a source- and build-bound package inventory under `inventories`
 after successful materialization. It can therefore distinguish an unavailable

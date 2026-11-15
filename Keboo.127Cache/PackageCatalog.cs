@@ -18,7 +18,7 @@ public sealed record RunArtifacts(
     bool WorkflowVerified = false);
 public sealed record RunArtifactsFile(string Repository, string Workflow, List<RunArtifacts> Runs, int SchemaVersion = 1);
 
-public sealed class PackageCatalog
+public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 {
     private readonly ProxyOptions _options;
     private readonly IGitHubClient _github;
@@ -33,6 +33,11 @@ public sealed class PackageCatalog
     private readonly object _buildRefreshGate = new();
     private readonly object _offlineVersionGate = new();
     private readonly object _incompleteGate = new();
+    private readonly object _backgroundGate = new();
+    private readonly HashSet<Task> _backgroundWork = [];
+    private long _backgroundWorkStarted;
+    private readonly CancellationTokenSource _shutdown;
+    private bool _disposed;
     private readonly Dictionary<long, Task<string>> _offlineVersionReads = [];
     private readonly CancellationToken _stopping;
     private readonly string _file;
@@ -74,14 +79,14 @@ public sealed class PackageCatalog
     private sealed record OfflineResolution(
         PublishedPackage[] Packages, BuildEntry[] Builds, int AvailableBuilds, int UnavailableBuilds,
         int UnavailablePackages, int UnavailableBuildMetadata, bool UnknownInventory, HashSet<string> MissingPackageIds,
-        bool DiscoveryIncomplete)
+        bool DiscoveryIncomplete, bool VerificationPending)
     {
         public bool IsPartial => DiscoveryIncomplete || UnavailableBuilds > 0 || UnavailablePackages > 0 || UnavailableBuildMetadata > 0;
     }
 
     private sealed record OnlineBuilds(BuildEntry[] Builds, Exception? Failure);
     private sealed record OnlinePackages(PublishedPackage[] Packages, Exception? Failure);
-    private sealed record OfflineRun(BuildEntry? Build, CachedPackageAvailability Availability);
+    private sealed record OfflineRun(BuildEntry? Build, CachedPackageAvailability Availability, bool VerificationPending = false);
     private sealed record PartialDiscovery(OfflineSnapshot Configuration, Discovery Discovery);
     private sealed record IncompleteDiscoveryFile(
         int SchemaVersion, string Repository, string Workflow, string PackagesArtifact, string VersionArtifact,
@@ -96,6 +101,7 @@ public sealed class PackageCatalog
     {
         public Discovery? Discovery { get; set; }
         public OfflineResolution? Offline { get; set; }
+        public bool ContentPending { get; set; }
         public FeedAvailability Availability { get; set; } = new(false, false, "current", "unknown");
         public void Dispose() => catalog._requestScope.Value = previous;
     }
@@ -107,7 +113,8 @@ public sealed class PackageCatalog
         _options = options;
         _github = github;
         _logger = logger ?? NullLogger<PackageCatalog>.Instance;
-        _stopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
+        _shutdown = CancellationTokenSource.CreateLinkedTokenSource(lifetime?.ApplicationStopping ?? CancellationToken.None);
+        _stopping = _shutdown.Token;
         _memoryCache = memoryCache;
         _artifacts = artifacts;
         _packages = packages;
@@ -134,16 +141,16 @@ public sealed class PackageCatalog
 
     public async Task<PublishedPackage[]> GetPackagesAsync(CancellationToken cancellationToken)
     {
+        if (!_options.HasSource) return [];
         var discovery = await DiscoverAsync(cancellationToken);
         if (discovery.IsStale)
             return (await RequireOfflinePackagesAsync(discovery, cancellationToken)).Packages;
 
         try
         {
-            var work = StartContentRefresh(discovery.Runs);
+            var work = StartContentRefresh(discovery);
             if (work is not null)
             {
-                if (!work.IsCompleted) MarkContentPending(discovery);
                 if (await CompletesWithinRequestAsync(work, cancellationToken))
                 {
                     var result = await work;
@@ -153,6 +160,7 @@ public sealed class PackageCatalog
                     return result.Packages;
                 }
             }
+            else MarkContentPending(discovery);
             return (await ResolvePendingContentAsync(discovery, cancellationToken)).Packages;
         }
         catch (Exception exception) when (exception is not DiscoveryUnavailableException
@@ -164,6 +172,7 @@ public sealed class PackageCatalog
 
     public async Task<BuildEntry[]> GetBuildsAsync(CancellationToken cancellationToken)
     {
+        if (!_options.HasSource) return [];
         var discovery = await DiscoverAsync(cancellationToken);
         if (discovery.IsStale)
             return (await RequireOfflinePackagesAsync(discovery, cancellationToken)).Builds;
@@ -180,6 +189,7 @@ public sealed class PackageCatalog
                     return online.Builds;
                 }
             }
+            MarkContentPending(discovery);
             return (await ResolvePendingContentAsync(discovery, cancellationToken)).Builds;
         }
         catch (Exception exception) when (exception is not DiscoveryUnavailableException
@@ -189,15 +199,20 @@ public sealed class PackageCatalog
         }
     }
 
-    private Task<OnlinePackages>? StartContentRefresh(RunArtifacts[] runs)
+    private Task<OnlinePackages>? StartContentRefresh(Discovery discovery)
     {
         lock (_contentRefreshGate)
         {
             if (_contentRefresh is { Work.IsCompleted: false } pending)
-                return pending.Runs.SequenceEqual(runs) ? pending.Work : null;
-            var work = MaterializePackagesAsync(runs, _stopping);
-            _contentRefresh = new ContentRefresh(runs, work);
-            ObserveFault(work);
+                return pending.Runs.SequenceEqual(discovery.Runs) ? pending.Work : null;
+            MarkContentPending(discovery);
+            var work = TrackBackground(async () =>
+            {
+                var result = await MaterializePackagesAsync(discovery.Runs, _stopping);
+                if (result.Failure is null) MarkContentHealthy(discovery, pendingOnly: true);
+                return result;
+            });
+            _contentRefresh = new ContentRefresh(discovery.Runs, work);
             return work;
         }
     }
@@ -208,9 +223,8 @@ public sealed class PackageCatalog
         {
             if (_buildRefresh is { Work.IsCompleted: false } pending)
                 return pending.Runs.SequenceEqual(runs) ? pending.Work : null;
-            var work = GetOnlineBuildsAsync(runs, _stopping);
+            var work = TrackBackground(() => GetOnlineBuildsAsync(runs, _stopping));
             _buildRefresh = new BuildRefresh(runs, work);
-            ObserveFault(work);
             return work;
         }
     }
@@ -252,9 +266,66 @@ public sealed class PackageCatalog
         }
     }
 
-    private static void ObserveFault(Task task) =>
-        _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    private Task<T> TrackBackground<T>(Func<Task<T>> start)
+    {
+        lock (_backgroundGate)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(PackageCatalog));
+            _backgroundWorkStarted++;
+            var task = start();
+            _backgroundWork.Add(task);
+            _ = task.ContinueWith(completed =>
+            {
+                _ = completed.Exception;
+                lock (_backgroundGate) _backgroundWork.Remove(completed);
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return task;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        lock (_backgroundGate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
+        _shutdown.Cancel();
+        for (;;)
+        {
+            Task[] pending;
+            lock (_backgroundGate)
+            {
+                _backgroundWork.RemoveWhere(task => task.IsCompleted);
+                pending = _backgroundWork.ToArray();
+            }
+            if (pending.Length == 0) break;
+            try { await Task.WhenAll(pending).ConfigureAwait(false); }
+            catch { /* Work failures are observed when requests consume them. */ }
+        }
+        _shutdown.Dispose();
+    }
+
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    internal long BackgroundWorkStarted
+    {
+        get { lock (_backgroundGate) return _backgroundWorkStarted; }
+    }
+
+    internal async Task<bool> WaitForBackgroundWorkAsync(CancellationToken cancellationToken)
+    {
+        var waited = false;
+        for (;;)
+        {
+            Task[] pending;
+            lock (_backgroundGate) pending = _backgroundWork.Where(task => !task.IsCompleted).ToArray();
+            if (pending.Length == 0) return waited;
+            waited = true;
+            try { await Task.WhenAll(pending).WaitAsync(cancellationToken).ConfigureAwait(false); }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
+        }
+    }
 
     private static async Task<bool> CompletesWithinRequestAsync(
         Task work, CancellationToken cancellationToken, TimeSpan? wait = null)
@@ -272,10 +343,12 @@ public sealed class PackageCatalog
 
     private async Task<OfflineResolution> ResolvePendingContentAsync(Discovery discovery, CancellationToken cancellationToken)
     {
-        MarkContentPending(discovery);
-        var resolution = await RequireOfflinePackagesAsync(discovery, cancellationToken);
+        var resolution = await RequireOfflinePackagesAsync(discovery with { Error = ContentPending }, cancellationToken);
         if (_requestScope.Value is { } scope)
+        {
+            scope.ContentPending = true;
             scope.Availability = new FeedAvailability(true, true, discovery.Membership, discovery.Provenance);
+        }
         return resolution;
     }
 
@@ -343,7 +416,9 @@ public sealed class PackageCatalog
             throw new DiscoveryUnavailableException("Cached build metadata is incomplete, so package versions cannot be enumerated.");
         if (scope?.Offline is { } offline
             && (offline.UnknownInventory || offline.MissingPackageIds.Contains(id)))
-            throw new DiscoveryUnavailableException("A cached build may have an unavailable version of this package.");
+            throw new DiscoveryUnavailableException("A cached build may have an unavailable version of this package."
+                + (scope.ContentPending ? " Build content is still being prepared." : "")
+                + (offline.VerificationPending ? " Cached content verification is still in progress." : ""));
         if (!hasVersions && scope?.Availability.IsPartial == true)
             throw new DiscoveryUnavailableException("The incomplete feed cannot determine whether this package is available.");
     }
@@ -351,13 +426,19 @@ public sealed class PackageCatalog
     internal void EnsureLookupComplete()
     {
         if (_requestScope.Value?.Availability.IsPartial == true)
-            throw new DiscoveryUnavailableException("The incomplete feed cannot determine whether this package version is available.");
+            throw new DiscoveryUnavailableException("The incomplete feed cannot determine whether this package version is available."
+                + (_requestScope.Value.ContentPending ? " Build content is still being prepared." : "")
+                + (_requestScope.Value.Offline?.VerificationPending == true
+                    ? " Cached content verification is still in progress." : ""));
     }
 
     internal void EnsureAggregateComplete()
     {
         if (_requestScope.Value?.Availability.IsPartial == true)
-            throw new DiscoveryUnavailableException("The cached feed is incomplete and cannot enumerate a complete result.");
+            throw new DiscoveryUnavailableException("The cached feed is incomplete and cannot enumerate a complete result."
+                + (_requestScope.Value.ContentPending ? " Build content is still being prepared." : "")
+                + (_requestScope.Value.Offline?.VerificationPending == true
+                    ? " Cached content verification is still in progress." : ""));
     }
 
     internal string ReportWarmupFailure(Exception exception)
@@ -516,8 +597,7 @@ public sealed class PackageCatalog
             var health = GetHealth();
             if (pending is not null && (health.Status == "ok" || health.Error == "Initial GitHub discovery has not completed."))
                 SetFailureHealth(pending.Error!, pending);
-            var task = RefreshAndHandleFailureAsync(_stopping);
-            ObserveFault(task);
+            var task = TrackBackground(() => RefreshAndHandleFailureAsync(_stopping));
             return _refreshTask = task;
         }
     }
@@ -830,9 +910,12 @@ public sealed class PackageCatalog
             Volatile.Write(ref _partialDiscovery, null);
         }
         lock (_healthGate)
+        {
+            if (result.Length == 0 && skipped == 0) _contentError = null;
             _health = new CatalogHealth(_contentError is null ? "ok" : "degraded", _options.Repository, _contentError,
                 snapshot.LastSuccessfulRefreshUtc,
                 "current", snapshot.Runs.Length, null, null, null, null, ProvenanceFor(snapshot.Runs));
+        }
         _memoryCache.Set(_cacheKey, result, TimeSpan.FromSeconds(_options.RefreshSeconds));
         return new Discovery(result, false, null, snapshot);
     }
@@ -1018,12 +1101,13 @@ public sealed class PackageCatalog
         lock (_healthGate) return _contentError is not null;
     }
 
-    private void MarkContentHealthy(Discovery discovery)
+    private void MarkContentHealthy(Discovery discovery, bool pendingOnly = false)
     {
         if (discovery.IsPartial || discovery.Snapshot is null) return;
         lock (_healthGate)
         {
-            if (_contentError is null || _health.Membership != "current"
+            if (_contentError is null || (pendingOnly && _contentError != ContentPending)
+                || _health.Membership != "current"
                 || _health.LastSuccessfulRefreshUtc != discovery.Snapshot.LastSuccessfulRefreshUtc) return;
             _contentError = null;
             _health = _health with
@@ -1058,7 +1142,9 @@ public sealed class PackageCatalog
     {
         var resolution = await ResolveOfflineAsync(discovery, cancellationToken);
         if (resolution.Packages.Length == 0)
-            throw new DiscoveryUnavailableException(discovery.Error + " No usable cached packages are available for this snapshot.");
+            throw new DiscoveryUnavailableException(discovery.Error
+                + (resolution.VerificationPending ? " Cached content verification is still in progress." : "")
+                + " No usable cached packages are available for this snapshot.");
         return resolution;
     }
 
@@ -1097,13 +1183,15 @@ public sealed class PackageCatalog
             var unavailablePackages = 0;
             var unavailableMetadata = 0;
             var unknownInventory = discovery.MetadataIncomplete || discovery.SkippedBuilds > 0;
+            var verificationPending = false;
             var missingPackageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var resolved = await Task.WhenAll(discovery.Runs.Select(run =>
                 ResolveOfflineRunAsync(run, knownBuilds, cancellationToken)));
             for (var index = 0; index < discovery.Runs.Length; index++)
             {
                 var run = discovery.Runs[index];
-                var (build, available) = resolved[index];
+                var (build, available, pending) = resolved[index];
+                verificationPending |= pending;
                 var template = build ?? new BuildEntry(run.RunId, run.Attempt, run.PullRequest, run.HeadSha, "", "",
                     run.Packages, run.VersionArtifact);
                 unavailablePackages += available.MissingPackages;
@@ -1129,10 +1217,11 @@ public sealed class PackageCatalog
                 packages.OrderBy(x => NuGetVersion.Parse(x.Build.Version), VersionComparer.VersionRelease).ToArray(),
                 builds.OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray(),
                 availableBuilds, unavailableBuilds, unavailablePackages, unavailableMetadata,
-                unknownInventory, missingPackageIds, discovery.IsPartial || discovery.MembershipUnknown);
+                unknownInventory, missingPackageIds, discovery.IsPartial || discovery.MembershipUnknown, verificationPending);
             lock (_healthGate)
             {
-                if (!discovery.PersistencePending && (result.UnavailableBuilds > discovery.SkippedBuilds
+                if (_health.Status == "degraded" && !verificationPending && !discovery.PersistencePending
+                    && (result.UnavailableBuilds > discovery.SkippedBuilds
                     || result.UnavailablePackages > 0 || result.UnavailableBuildMetadata > 0))
                     _contentError ??= "Cached build content or metadata is incomplete or invalid.";
                 if (_health.Status == "degraded"
@@ -1163,6 +1252,7 @@ public sealed class PackageCatalog
     private async Task<OfflineRun> ResolveOfflineRunAsync(
         RunArtifacts run, List<BuildEntry> knownBuilds, CancellationToken cancellationToken)
     {
+        var pending = false;
         var build = knownBuilds.FirstOrDefault(x => x.RunId == run.RunId && x.Attempt == run.Attempt
             && x.PullRequest == run.PullRequest && x.Packages is not null && x.Packages.Id == run.Packages.Id
             && x.VersionArtifact?.Id == run.VersionArtifact?.Id);
@@ -1178,6 +1268,7 @@ public sealed class PackageCatalog
                         PackageRewriter.VersionFor(original, run.PullRequest, run.RunId, run.Attempt, run.Packages.Id),
                         run.Packages, run.VersionArtifact);
                 }
+                else pending = true;
             }
             catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
             {
@@ -1188,20 +1279,19 @@ public sealed class PackageCatalog
             run.Packages, run.VersionArtifact);
         try
         {
-            var work = Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping));
-            ObserveFault(work);
+            var work = TrackBackground(() => Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping)));
             if (await CompletesWithinRequestAsync(work, cancellationToken, OfflineWait))
-                return new OfflineRun(build, await work);
+                return new OfflineRun(build, await work, pending);
+            pending = true;
 
-            var inspect = Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping, allowRepair: false));
-            ObserveFault(inspect);
+            var inspect = TrackBackground(() => Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping, allowRepair: false)));
             if (await CompletesWithinRequestAsync(inspect, cancellationToken, OfflineWait))
-                return new OfflineRun(build, await inspect);
+                return new OfflineRun(build, await inspect, pending);
         }
         catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
         {
         }
-        return new OfflineRun(build, new CachedPackageAvailability([], [], false));
+        return new OfflineRun(build, new CachedPackageAvailability([], [], false), pending);
     }
 
     private Task<string> StartOfflineVersionRead(Artifact artifact)
@@ -1210,8 +1300,7 @@ public sealed class PackageCatalog
         {
             if (_offlineVersionReads.TryGetValue(artifact.Id, out var pending) && !pending.IsCompleted)
                 return pending;
-            var work = Task.Run(() => ReadVersionAsync(artifact, _stopping));
-            ObserveFault(work);
+            var work = TrackBackground(() => Task.Run(() => ReadVersionAsync(artifact, _stopping)));
             return _offlineVersionReads[artifact.Id] = work;
         }
     }
