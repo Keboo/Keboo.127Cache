@@ -31,9 +31,10 @@ internal static class CatalogTestSynchronization
     }
 
     public static async Task<HttpResponseMessage> GetWhenSettledAsync(
-        HttpClient client, PackageCatalog catalog, string path)
+        HttpClient client, PackageCatalog catalog, string path, CancellationToken cancellationToken = default)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
         var repeatedSuccess = false;
         var racedCompletion = false;
         for (;;)
@@ -60,10 +61,10 @@ internal static class CatalogTestSynchronization
     }
 
     public static async Task<string> GetStringWhenSettledAsync(
-        HttpClient client, PackageCatalog catalog, string path)
+        HttpClient client, PackageCatalog catalog, string path, CancellationToken cancellationToken = default)
     {
-        using var response = await GetWhenSettledAsync(client, catalog, path);
-        var body = await response.Content.ReadAsStringAsync();
+        using var response = await GetWhenSettledAsync(client, catalog, path, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw new HttpRequestException($"Feed returned {(int)response.StatusCode}: {body}", null, response.StatusCode);
         return body;

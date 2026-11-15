@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
 
+using Keboo._127Cache.Testing;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -124,7 +126,8 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
     {
         if (_app is null) throw new InvalidOperationException("The feed has not been started.");
         using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(_app.Urls.Single()) };
-        using var response = JsonDocument.Parse(await client.GetStringAsync($"/flat/{id.ToLowerInvariant()}/index.json", cancellationToken));
+        using var response = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, _app.Services.GetRequiredService<PackageCatalog>(), $"/flat/{id.ToLowerInvariant()}/index.json", cancellationToken));
         return response.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()!).ToArray();
     }
 
