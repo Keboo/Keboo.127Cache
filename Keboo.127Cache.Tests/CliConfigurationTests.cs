@@ -3,7 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public sealed class CliConfigurationTests : IDisposable
 {

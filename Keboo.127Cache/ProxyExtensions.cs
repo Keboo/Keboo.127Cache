@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public static class ProxyExtensions
 {

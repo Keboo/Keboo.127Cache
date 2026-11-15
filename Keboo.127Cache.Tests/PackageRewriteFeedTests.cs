@@ -2,7 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Xml.Linq;
-using Keboo._127Cache.Testing;
+using Keboo.LocalCache.Testing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
@@ -18,7 +18,7 @@ using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
 using NuGet.Versioning;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public class PackageRewriteFeedTests
 {

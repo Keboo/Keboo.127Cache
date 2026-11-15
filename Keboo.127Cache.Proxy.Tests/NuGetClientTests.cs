@@ -4,7 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
 
-using Keboo._127Cache.Testing;
+using Keboo.LocalCache.Testing;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
@@ -13,7 +13,7 @@ using Microsoft.Extensions.DependencyInjection;
 using NuGet.Packaging;
 using NuGet.Versioning;
 
-namespace Keboo._127Cache.Proxy.Tests;
+namespace Keboo.LocalCache.Proxy.Tests;
 
 public sealed class NuGetClientTests
 {

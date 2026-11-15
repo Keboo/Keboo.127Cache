@@ -5,7 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public sealed class ConfigurationTests : IDisposable
 {

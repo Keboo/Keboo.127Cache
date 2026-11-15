@@ -1,7 +1,7 @@
 using System.Net;
 using System.Runtime.ExceptionServices;
 
-namespace Keboo._127Cache.Testing;
+namespace Keboo.LocalCache.Testing;
 
 internal static class CatalogTestSynchronization
 {

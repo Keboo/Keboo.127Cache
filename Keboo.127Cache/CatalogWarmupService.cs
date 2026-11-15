@@ -1,4 +1,4 @@
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed class CatalogWarmupService(PackageCatalog catalog, ILogger<CatalogWarmupService> logger) : BackgroundService
 {

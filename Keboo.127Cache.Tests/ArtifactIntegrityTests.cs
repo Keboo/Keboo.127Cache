@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Keboo._127Cache.Testing;
+using Keboo.LocalCache.Testing;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -19,7 +19,7 @@ using Microsoft.Extensions.Logging;
 
 using NuGet.Packaging;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public sealed class ArtifactIntegrityTests
 {

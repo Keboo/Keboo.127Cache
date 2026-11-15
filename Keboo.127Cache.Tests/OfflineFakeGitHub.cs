@@ -3,9 +3,9 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
-using Keboo._127Cache;
+using Keboo.LocalCache;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
 {

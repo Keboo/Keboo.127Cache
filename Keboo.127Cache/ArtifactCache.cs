@@ -2,7 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging.Abstractions;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public sealed class ArtifactCache
 {

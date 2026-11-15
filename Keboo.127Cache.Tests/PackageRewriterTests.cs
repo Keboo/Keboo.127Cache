@@ -5,7 +5,7 @@ using System.Xml.Linq;
 using NuGet.Packaging;
 using NuGet.Versioning;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public class PackageRewriterTests
 {

@@ -4,6 +4,7 @@
     <OutputType>Exe</OutputType>
     <IsPackable>true</IsPackable>
     <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Keboo.LocalCache</RootNamespace>
     <Version>0.0.1</Version>
     <PackageId>Keboo.127Cache</PackageId>
     <Authors>Keboo</Authors>

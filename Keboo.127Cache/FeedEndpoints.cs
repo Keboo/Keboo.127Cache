@@ -2,7 +2,7 @@ using System.Globalization;
 using NuGet.Packaging;
 using NuGet.Versioning;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public static class FeedEndpoints
 {

@@ -1,10 +1,10 @@
-using Keboo._127Cache;
+using Keboo.LocalCache;
 
 using Microsoft.Extensions.Caching.Memory;
 
 using TUnit.Assertions.Exceptions;
 
-namespace Keboo._127Cache.Proxy.Tests;
+namespace Keboo.LocalCache.Proxy.Tests;
 
 public sealed class ProxyAssertionSemanticsTests
 {

@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 internal sealed class ArtifactIntegrityStore(ILogger<ArtifactCache> logger)
 {

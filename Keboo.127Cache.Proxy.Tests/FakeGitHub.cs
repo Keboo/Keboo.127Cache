@@ -2,7 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Keboo._127Cache.Proxy.Tests;
+namespace Keboo.LocalCache.Proxy.Tests;
 
 public sealed class FakeGitHub : IGitHubClient
 {

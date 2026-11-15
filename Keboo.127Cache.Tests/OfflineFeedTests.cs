@@ -9,9 +9,9 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Keboo._127Cache.Testing;
+using Keboo.LocalCache.Testing;
 
-using Keboo._127Cache;
+using Keboo.LocalCache;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -23,7 +23,7 @@ using Microsoft.Extensions.Logging;
 
 using NuGet.Packaging;
 
-namespace Keboo._127Cache.Tests;
+namespace Keboo.LocalCache.Tests;
 
 public sealed class OfflineFeedTests : IDisposable
 {
@@ -420,7 +420,7 @@ public sealed class OfflineFeedTests : IDisposable
         {
             version = await RetryVersionAsync(online.Client, "alpha");
             snapshot = await File.ReadAllBytesAsync(SnapshotPath);
-            var failureType = typeof(PackageCatalog).Assembly.GetType("Keboo._127Cache.PinnedRunWorkflowException")!;
+            var failureType = typeof(PackageCatalog).Assembly.GetType("Keboo.LocalCache.PinnedRunWorkflowException")!;
             _github.DiscoveryError = (Exception)Activator.CreateInstance(failureType, nonPublic: true)!;
             ExpireDiscovery(online);
             await WaitForHealthErrorAsync(online.Client, "workflow");

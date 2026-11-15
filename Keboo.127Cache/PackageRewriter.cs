@@ -5,7 +5,7 @@ using System.Xml.Linq;
 using NuGet.Packaging;
 using NuGet.Versioning;
 
-namespace Keboo._127Cache;
+namespace Keboo.LocalCache;
 
 public static class PackageRewriter
 {
