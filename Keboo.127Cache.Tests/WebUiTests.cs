@@ -316,6 +316,7 @@ public sealed class WebUiTests
         using var removed = await PostFormAsync(host, Url, "remove", token,
             ("scope", "build"), ("source", "main"), ("run", "100"), ("attempt", "1"));
         var html = await removed.Content.ReadAsStringAsync();
+        await Assert.That($"{(int)removed.StatusCode} {removed.Headers.Location} {html.Length}").IsEqualTo("200  " + html.Length);
         await Assert.That(html).Contains("Removed 1 build(s) and reclaimed");
         await Assert.That(html).Contains("removed (pull request is open: downloaded again on the next refresh)");
         var afterRemoval = await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync();
