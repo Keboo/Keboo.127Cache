@@ -392,7 +392,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await Assert.That(vpkVersions.RootElement.GetProperty("versions")[0].GetString()).IsEqualTo(version);
         var manifest = await client.GetStringAsync($"/flat/vpk/{version}/vpk.nuspec", CancellationToken.None);
         await Assert.That(manifest).Contains(version!);
-        var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(Path.Combine(cache, "catalog.json")),
+        var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(Path.Combine(cache, "sources", "example", "catalog.json")),
             JsonSettings.Options)!;
         await Assert.That(saved.Builds.Single().Version).IsEqualTo("");
         await Assert.That(saved.Builds.Single().OriginalVersion).IsEqualTo("");
