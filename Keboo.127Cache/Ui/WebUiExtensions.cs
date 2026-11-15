@@ -24,7 +24,9 @@ public static class WebUiExtensions
             var directory = new DirectoryInfo(Path.Combine(proxy.CacheDirectory, KeyRingDirectoryName));
             management.XmlRepository = new FileSystemXmlRepository(directory, loggers);
         });
-        // The key ring only protects loopback CSRF tokens, so the per-key 'unencrypted' warning is just noise.\r\n        services.AddLogging(logging => logging.AddFilter("Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager", LogLevel.Error));\r\n        services.AddSingleton<IBrowserLauncher, ProcessBrowserLauncher>();
+        // The key ring only protects loopback CSRF tokens, so the per-key 'unencrypted' warning is just noise.
+        services.AddLogging(logging => logging.AddFilter("Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager", LogLevel.Error));
+        services.AddSingleton<IBrowserLauncher, ProcessBrowserLauncher>();
         return services;
     }
 
