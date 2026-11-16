@@ -74,8 +74,9 @@ public sealed class RuntimeConfigurationTests : IDisposable
 
         await Assert.That(catalog.GetHealth().Repository).IsEqualTo("configured/repo");
         await Assert.That(Directory.Exists(originalCache)).IsFalse();
-        await Assert.That(File.Exists(Path.Combine(configuredCache, "artifacts", $"{github.Packages.Id}.zip"))).IsTrue();
-        await Assert.That(Directory.Exists(Path.Combine(configuredCache, "packages"))).IsTrue();
+        var sourceCache = Path.Combine(configuredCache, "sources", "example");
+        await Assert.That(File.Exists(Path.Combine(sourceCache, "artifacts", $"{github.Packages.Id}.zip"))).IsTrue();
+        await Assert.That(Directory.Exists(Path.Combine(sourceCache, "packages"))).IsTrue();
         await Assert.That(index.RootElement.GetProperty("resources")[0].GetProperty("@id").GetString())
             .IsEqualTo(advertisedUrl + "/flat/");
         await Assert.That(registration.RootElement.GetProperty("@id").GetString()).IsEqualTo(registrationUrl + "/index.json");

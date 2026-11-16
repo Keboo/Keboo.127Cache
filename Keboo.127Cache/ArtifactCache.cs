@@ -26,7 +26,7 @@ public sealed class ArtifactCache
     {
     }
 
-    public ArtifactCache(ProxyOptions options, IBuildSource source, ILogger? logger = null)
+    public ArtifactCache(IOptions<ProxyOptions> options, IBuildSource source, ILogger? logger = null)
     {
         _options = options;
         _source = source;

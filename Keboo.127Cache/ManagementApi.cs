@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.Extensions.Options;
 
 namespace Keboo.LocalCache;
 
@@ -76,7 +77,7 @@ internal static class ManagementEndpoints
 {
     public static void Map(WebApplication app)
     {
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         app.Use(async (context, next) =>
         {
             if (!context.Request.Path.StartsWithSegments("/api"))

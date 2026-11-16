@@ -61,13 +61,14 @@ public class CacheEvictionTests
                 EvictClosedPullRequestsAfterDays = evictAfterDays,
                 TimeProvider = clock
             };
-            var artifacts = new ArtifactCache(options, github);
-            var catalog = new PackageCatalog(options, github, new MemoryCache(new MemoryCacheOptions()), artifacts,
-                new PackageCache(options, artifacts));
+            var proxyOptions = Microsoft.Extensions.Options.Options.Create(options);
+            var artifacts = new ArtifactCache(proxyOptions, github);
+            var catalog = new PackageCatalog(proxyOptions, github, new MemoryCache(new MemoryCacheOptions()), artifacts,
+                new PackageCache(proxyOptions, artifacts));
             return new Harness
             {
                 Fixture = fixture, Inner = inner, GitHub = github, Options = options, Catalog = catalog, Clock = clock,
-                Service = new CacheEvictionService(catalog, options)
+                Service = new CacheEvictionService(catalog, proxyOptions)
             };
         }
 

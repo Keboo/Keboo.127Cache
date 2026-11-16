@@ -1,6 +1,6 @@
 @page "/remove"
 @inject ICacheEvictionService Eviction
-@inject ProxyOptions Options
+@inject IOptions<ProxyOptions> Options
 
 <PageTitle>Remove cached builds - 127Cache</PageTitle>
 
@@ -21,7 +21,7 @@
     {
         <p>
             This removes <strong>@result.Builds.Count cached build(s)</strong> and reclaims
-            <strong>@UiFormat.Size(result.BytesReclaimed)</strong> from <code>@Options.CacheDirectory</code>.
+            <strong>@UiFormat.Size(result.BytesReclaimed)</strong> from <code>@Options.Value.CacheDirectory</code>.
         </p>
         <ul>
             @foreach (var build in result.Builds)

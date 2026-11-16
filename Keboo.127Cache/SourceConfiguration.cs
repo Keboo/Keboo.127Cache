@@ -168,12 +168,12 @@ public sealed class SourceConfigurationService : ISourceConfigurationService, IH
     private string _appliedFingerprint;
 
     public SourceConfigurationService(IConfiguration configuration, SourceConfigurationLocations locations,
-        PackageCatalog catalog, ProxyOptions options, ICacheEvictionService eviction, ILogger<CacheConfiguration> logger)
+        PackageCatalog catalog, IOptions<ProxyOptions> options, ICacheEvictionService eviction, ILogger<CacheConfiguration> logger)
     {
         _configuration = configuration;
         _locations = locations;
         _catalog = catalog;
-        _options = options;
+        _options = options.Value;
         _eviction = eviction;
         _logger = logger;
         _appliedFingerprint = Fingerprint();

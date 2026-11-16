@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Options;
+
 namespace Keboo.LocalCache;
 
 public enum BuildCompletion { InProgress, Succeeded, Failed }
@@ -32,6 +34,6 @@ internal sealed class DefaultBuildSourceFactory(IServiceProvider services) : IBu
 {
     // A registered IGitHubClient replaces the gh-based client (used by tests and embedding hosts).
     public IBuildSource Create(ProxyOptions source) => new GitHubActionsBuildSource(
-        source, services.GetService<IGitHubClient>() ?? new GitHubClient(source),
+        source, services.GetService<IGitHubClient>() ?? new GitHubClient(Options.Create(source)),
         services.GetService<ILogger<GitHubActionsBuildSource>>());
 }

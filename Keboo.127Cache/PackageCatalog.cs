@@ -73,15 +73,17 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
         _createPlaceholder = createPlaceholder;
     }
 
-    internal static PackageCatalog Create(ProxyOptions root, IBuildSourceFactory factory, IMemoryCache memoryCache,
+    internal static PackageCatalog Create(IOptions<ProxyOptions> proxyOptions, IBuildSourceFactory factory, IMemoryCache memoryCache,
         ILogger<PackageCatalog> logger, ILogger<ArtifactCache>? artifactLogger = null, ILogger<PackageCache>? packageLogger = null,
         IHostApplicationLifetime? lifetime = null)
     {
+        var root = proxyOptions.Value;
         SourceCatalog CreateEngine(ProxyOptions options)
         {
             var source = factory.Create(options);
-            var artifacts = new ArtifactCache(options, source, artifactLogger);
-            var packages = new PackageCache(options, artifacts, packageLogger, independentArtifactCaches: true);
+            var sourceOptions = Options.Create(options);
+            var artifacts = new ArtifactCache(sourceOptions, source, artifactLogger);
+            var packages = new PackageCache(sourceOptions, artifacts, packageLogger, independentArtifactCaches: true);
             return new SourceCatalog(options, source, memoryCache, artifacts, packages, logger, lifetime);
         }
 
@@ -116,9 +118,10 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
         IHostApplicationLifetime? lifetime)
     {
         var empty = new ProxyOptions { HasSource = false, CacheDirectory = root.CacheDirectory, BaseUrl = root.BaseUrl };
-        var artifacts = new ArtifactCache(empty, new GitHubActionsBuildSource(empty, new NoGitHubClient()));
+        var emptyOptions = Options.Create(empty);
+        var artifacts = new ArtifactCache(emptyOptions, new GitHubActionsBuildSource(empty, new NoGitHubClient()));
         return new SourceCatalog(empty, new GitHubActionsBuildSource(empty, new NoGitHubClient()),
-            memoryCache, artifacts, new PackageCache(empty, artifacts), logger, lifetime);
+            memoryCache, artifacts, new PackageCache(emptyOptions, artifacts), logger, lifetime);
     }
 
     // Applies a new list of sources to the running catalog without a restart. Unchanged sources keep their engine (and

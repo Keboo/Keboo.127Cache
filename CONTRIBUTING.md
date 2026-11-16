@@ -58,8 +58,10 @@ namespace because it compiles source from a pinned, pre-rename revision.
 the existing configuration loader. Inject `IOptions<ProxyOptions>` and read
 `Value`; do not register `ProxyOptions` or an `Options.Create` wrapper in DI.
 Use `Configure<ProxyOptions>` / `PostConfigure<ProxyOptions>` for host overrides
-and `Options.Create` only when constructing services directly in tests.
-Runtime settings are loaded once; live configuration reload is not supported.
+and `Options.Create` for directly constructed test services or the catalog's
+per-source service graphs, never to replace the root options registration.
+Server settings are loaded once. Source edits and explicit reloads continue
+through `ISourceConfigurationService`, which updates the running catalog.
 
 ## Test conventions
 

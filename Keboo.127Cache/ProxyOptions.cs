@@ -52,17 +52,10 @@ public sealed class ProxyOptions
 
     internal void ConfigureFromConfiguration(CacheConfiguration configuration)
     {
-        var source = configuration.Sources.FirstOrDefault();
-        HasSource = source is not null;
-        Name = source?.Name ?? "";
-        Repository = source?.Repository ?? "";
-        Workflow = source?.Workflow ?? "";
-        PackagesArtifact = source?.Artifact ?? "";
-        VersionArtifact = source?.VersionArtifact;
+        ApplySources(configuration.Sources);
         BaseUrl = configuration.Server.BaseUrl;
         RefreshSeconds = configuration.Server.RefreshSeconds;
         EvictClosedPullRequestsAfterDays = configuration.Server.EvictClosedPullRequestsAfterDays;
-        ConfiguredSources = configuration.Sources.ToArray();
         if (configuration.Server.CacheDirectory is not null)
             CacheDirectory = configuration.Server.CacheDirectory;
     }
