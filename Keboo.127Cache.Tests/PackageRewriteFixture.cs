@@ -145,10 +145,15 @@ internal sealed class FixtureGitHub(string packagesPath, string versionPath) : I
     public Artifact Version { get; } = CreateArtifact(201, "build-version", versionPath);
     public bool FailDownloads { get; set; }
     public int Downloads { get; private set; }
+    public PullRequestInfo[] OpenPullRequests { get; set; } = [new(755)];
+    public Exception? DiscoveryError { get; set; }
     public WorkflowRun[] Runs { get; set; } = [new(100, 1, "head", "completed", "success", "pull_request", [new(755)])];
 
-    public Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<PullRequestInfo>>([new(755)]);
+    public Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken)
+    {
+        if (DiscoveryError is { } error) throw error;
+        return Task.FromResult<IReadOnlyList<PullRequestInfo>>(OpenPullRequests);
+    }
 
     public Task<IReadOnlyList<WorkflowRun>> GetRunsAsync(CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<WorkflowRun>>(Runs);

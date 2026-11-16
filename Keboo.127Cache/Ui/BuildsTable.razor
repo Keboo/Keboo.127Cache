@@ -25,17 +25,19 @@
             }
             @foreach (var pullRequest in builds.GroupBy(x => x.PullRequest).OrderBy(x => x.Key))
             {
+                var title = pullRequest.Select(x => x.PullRequestTitle).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+                var label = title is null ? $"#{pullRequest.Key}" : $"#{pullRequest.Key}: {title}";
                 <tbody>
                     <tr class="group-row">
                         <th scope="rowgroup" colspan="8">
                             Pull request
                             @if (UiFormat.PullRequestUrl(source.Repository, pullRequest.Key) is { } prUrl)
                             {
-                                <a href="@prUrl" rel="noopener noreferrer">#@pullRequest.Key</a>
+                                <a href="@prUrl" rel="noopener noreferrer">@label</a>
                             }
                             else
                             {
-                                <span>#@pullRequest.Key</span>
+                                <span>@label</span>
                             }
                             @if (pullRequest.Any(x => x.PullRequestClosedSinceUtc is not null))
                             {

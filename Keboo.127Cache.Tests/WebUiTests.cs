@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 
@@ -60,9 +61,10 @@ public sealed class WebUiTests
         public PackageCatalog Catalog => App.Services.GetRequiredService<PackageCatalog>();
 
         public static async Task<Host> StartAsync(PackageRewriteFixture fixture, bool shadowed = false,
-            Action<IServiceCollection>? configure = null, Func<IGitHubClient, IGitHubClient>? wrap = null)
+            Action<IServiceCollection>? configure = null, Func<IGitHubClient, IGitHubClient>? wrap = null,
+            FixtureGitHub? github = null)
         {
-            var github = await fixture.CreateGitHubAsync();
+            github ??= await fixture.CreateGitHubAsync();
             var cache = Path.Combine(fixture.DirectoryPath, "cache");
             var configFile = Path.Combine(fixture.DirectoryPath, "ui-config.json");
             await File.WriteAllTextAsync(configFile, """
@@ -185,6 +187,76 @@ public sealed class WebUiTests
         await Assert.That(html).Contains("1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.");
         await Assert.That(html).Contains("Downloaded");
         await Assert.That(html).Contains("scope=\"col\"");
+    }
+
+    [Test]
+    [Arguments(null, "#755")]
+    [Arguments("", "#755")]
+    [Arguments("  ", "#755")]
+    [Arguments("Fix <startup> & packages", "#755: Fix &lt;startup&gt; &amp; packages")]
+    public async Task OverviewShowsPullRequestTitleOrFallsBackToNumber(string? title, string expectedLabel)
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        github.OpenPullRequests = [new(755, Title: title)];
+        await using var host = await Host.StartAsync(fixture, github: github);
+        await host.PopulateAsync();
+
+        var html = await host.OverviewAsync();
+
+        await Assert.That(html).Contains($"href=\"https://github.com/org/main/pull/755\" rel=\"noopener noreferrer\">{expectedLabel}</a>");
+    }
+
+    [Test]
+    public async Task MetadataOnlyBuildsExposePullRequestTitleWithoutDownloadingArtifacts()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        github.OpenPullRequests = [new(755, Title: "Improve package discovery")];
+        await using var host = await Host.StartAsync(fixture, github: github);
+        var management = host.App.Services.GetRequiredService<IManagementService>();
+        await management.RefreshAsync("main");
+
+        using var response = await host.Client.GetAsync("api/builds");
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var build = json.RootElement.EnumerateArray().Single();
+
+        await Assert.That(build.GetProperty("pullRequestTitle").GetString()).IsEqualTo("Improve package discovery");
+        await Assert.That(build.GetProperty("cachedState").GetString()).IsEqualTo("notCached");
+        await Assert.That(github.Downloads).IsEqualTo(0);
+    }
+
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task RenamedPullRequestTitleIsRetainedAfterRestartWhenOfflineOrClosed(bool closed)
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        github.OpenPullRequests = [new(755, Title: "Original title")];
+        await using (var host = await Host.StartAsync(fixture, github: github))
+        {
+            await host.PopulateAsync();
+            github.OpenPullRequests = [new(755, Title: "Updated title")];
+            github.Runs = [];
+            var management = host.App.Services.GetRequiredService<IManagementService>();
+
+            await management.RefreshAsync("main");
+
+            var html = await host.OverviewAsync();
+            await Assert.That(html).Contains(">#755: Updated title</a>");
+            await Assert.That(html).DoesNotContain("Original title");
+        }
+
+        if (closed) github.OpenPullRequests = [];
+        else github.DiscoveryError = new IOException("GitHub is unavailable.");
+        await using var restarted = await Host.StartAsync(fixture, github: github);
+        await restarted.App.Services.GetRequiredService<IManagementService>().RefreshAsync("main");
+
+        var restoredHtml = await restarted.OverviewAsync();
+
+        await Assert.That(restoredHtml).Contains(">#755: Updated title</a>");
+        if (closed) await Assert.That(restoredHtml).Contains("(closed)");
     }
 
     [Test]

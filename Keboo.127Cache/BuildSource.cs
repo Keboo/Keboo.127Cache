@@ -11,7 +11,9 @@ public sealed record SourceBuild(
     string SourceName, int PullRequest, long RunId, int Attempt, string HeadSha, BuildCompletion State,
     IReadOnlyList<Artifact> Artifacts);
 
-public sealed record BuildDiscovery(IReadOnlySet<int> OpenPullRequests, IReadOnlyList<SourceBuild> Builds);
+public sealed record BuildDiscovery(
+    IReadOnlySet<int> OpenPullRequests, IReadOnlyList<SourceBuild> Builds,
+    IReadOnlyDictionary<int, string?>? PullRequestTitles = null);
 
 public interface IBuildSource
 {

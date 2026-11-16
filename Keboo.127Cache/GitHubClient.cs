@@ -10,7 +10,7 @@ public sealed record PullRequestHead(
     string? Sha,
     [property: JsonPropertyName("ref")] string? Branch,
     [property: JsonPropertyName("repo")] GitHubRepository? Repository);
-public sealed record PullRequestInfo(int Number, PullRequestHead? Head = null);
+public sealed record PullRequestInfo(int Number, PullRequestHead? Head = null, string? Title = null);
 public sealed record PullRequestCommit(string? Sha);
 public sealed record WorkflowRun(
     long Id,

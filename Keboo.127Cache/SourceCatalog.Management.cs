@@ -10,6 +10,10 @@ internal sealed partial class SourceCatalog
     // Builds recorded in the on-disk catalog; reading them never contacts the upstream pipeline.
     internal BuildEntry[] GetCachedBuilds() => Volatile.Read(ref _builds).ToArray();
 
+    internal string? GetPullRequestTitle(int pullRequest) =>
+        Volatile.Read(ref _runs).Concat(MatchingSnapshot()?.Runs ?? [])
+            .FirstOrDefault(x => x.PullRequest == pullRequest && !string.IsNullOrWhiteSpace(x.PullRequestTitle))?.PullRequestTitle;
+
     // The overview already runs off-request, so it must follow discovery/preparation to completion instead of
     // using the feed's bounded HTTP wait and mistaking a still-running operation for its final result.
     internal async Task<RunArtifacts[]> GetOverviewRunsAsync(CancellationToken token) =>

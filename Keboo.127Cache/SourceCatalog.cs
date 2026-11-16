@@ -15,7 +15,7 @@ public sealed record CatalogFile(string Repository, List<BuildEntry> Builds, int
 public sealed record PublishedPackage(string Id, BuildEntry Build);
 public sealed record RunArtifacts(
     long RunId, int Attempt, int PullRequest, string HeadSha, Artifact Packages, Artifact? VersionArtifact,
-    bool WorkflowVerified = false);
+    bool WorkflowVerified = false, string? PullRequestTitle = null);
 public sealed record RunArtifactsFile(string Repository, string Workflow, List<RunArtifacts> Runs, int SchemaVersion = 1);
 
 internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
@@ -765,6 +765,10 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
             next.RemoveAll(x => x.RunId == run.RunId && x.Attempt == run.Attempt && x.PullRequest == pr);
             next.Add(new RunArtifacts(run.RunId, run.Attempt, pr, run.HeadSha, packages!, version, WorkflowVerified: true));
         }
+        if (discovery.PullRequestTitles is { } titles)
+            for (var index = 0; index < next.Count; index++)
+                if (titles.TryGetValue(next[index].PullRequest, out var title) && !string.IsNullOrWhiteSpace(title))
+                    next[index] = next[index] with { PullRequestTitle = title };
         foreach (var id in _options.RunIds)
         {
             if (discovery.Builds.Any(x => x.RunId == id)

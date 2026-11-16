@@ -31,7 +31,7 @@ public sealed class GitHubActionsBuildSource(ProxyOptions options, IGitHubClient
                     run, pullRequests, commitHistory, pullRequestHistory, isVerified, cancellationToken);
             builds.AddRange(associated.Where(openPullRequests.Contains).Select(pr => ToBuild(run, pr)));
         }
-        return new BuildDiscovery(openPullRequests, builds);
+        return new BuildDiscovery(openPullRequests, builds, pullRequests.ToDictionary(x => x.Number, x => x.Title));
     }
 
     public async Task<SourceBuild> LoadArtifactsAsync(SourceBuild build, CancellationToken cancellationToken) =>
