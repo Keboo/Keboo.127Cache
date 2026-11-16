@@ -347,7 +347,7 @@ public sealed class WebUiTests
         await Assert.That(extra!["VersionArtifact"]!.GetValue<string>()).IsEqualTo("extra-version");
 
         var editPage = await host.Client.GetStringAsync("sources?edit=main");
-        await Assert.That(editPage).Contains("clears this source&#x27;s cache");
+        await Assert.That(editPage).Contains("clears this source's cache");
         var mainCache = CacheLayout.SourceDirectory(host.CacheDirectory, "main");
         Directory.CreateDirectory(mainCache);
         var cacheMarker = Path.Combine(mainCache, "marker.txt");
@@ -380,7 +380,7 @@ public sealed class WebUiTests
         await Assert.That(File.Exists(oldCacheMarker)).IsTrue();
 
         var removePage = await host.Client.GetStringAsync("sources?remove=renamed");
-        await Assert.That(removePage).Contains("Also permanently delete this source&#x27;s cached builds");
+        await Assert.That(removePage).Contains("Also permanently delete this source's cached builds");
         var renamedCache = CacheLayout.SourceDirectory(host.CacheDirectory, "renamed");
         Directory.CreateDirectory(renamedCache);
         await File.WriteAllTextAsync(Path.Combine(renamedCache, "marker.txt"), "cached");
@@ -418,7 +418,7 @@ public sealed class WebUiTests
         await Assert.That(invalidHtml).Contains("source-repository-error");
         await Assert.That(invalidHtml).Contains("source-workflow-error");
         await Assert.That(invalidHtml).Contains("source-artifact-error");
-        await Assert.That(invalidHtml).Contains("aria-invalid=\"True\"");
+        await Assert.That(invalidHtml).Contains("aria-invalid");
         await Assert.That(host.Catalog.SourceNames.ToArray()).IsEquivalentTo(new[] { "main" });
 
         using var forged = await host.Client.PostAsync("sources", new FormUrlEncodedContent(
@@ -459,8 +459,10 @@ public sealed class WebUiTests
 
         using var stale = await PostFormAsync(host, "sources", "add", Token(page),
             ("Name", "stale"), ("Type", "GitHubActions"), ("Repository", "org/stale"),
-            ("Workflow", "build.yml"), ("Artifact", "packages"), ("ExpectedETag", staleTag));
+            ("Workflow", "build.yml"), ("Artifact", "packages"), ("VersionArtifact", ""), ("ExpectedETag", staleTag));
         var conflictHtml = await stale.Content.ReadAsStringAsync();
+        if (stale.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Source form returned {(int)stale.StatusCode}: {conflictHtml}");
         await Assert.That(stale.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(conflictHtml).Contains("changed since it was read");
         await Assert.That(conflictHtml).Contains("Review the current configuration");

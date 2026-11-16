@@ -300,12 +300,12 @@
         <div class="field">
             <label for="@($"{prefix}-source-name")">Name</label>
             <input id="@($"{prefix}-source-name")" name="Name" @bind="Name" required maxlength="255" autocomplete="off"
-                   aria-invalid="@HasFieldError("Name")" aria-describedby="@ErrorId("Name", prefix)" />
+                   aria-invalid="@(HasFieldError("Name") ? "true" : "false")" aria-describedby="@ErrorId("Name", prefix)" />
             @FieldError("Name", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-type")">Type</label>
-            <select id="@($"{prefix}-source-type")" name="Type" @bind="Type" aria-invalid="@HasFieldError("Type")"
+            <select id="@($"{prefix}-source-type")" name="Type" @bind="Type" aria-invalid="@(HasFieldError("Type") ? "true" : "false")"
                     aria-describedby="@ErrorId("Type", prefix)">
                 <option value="GitHubActions">GitHub Actions</option>
             </select>
@@ -314,25 +314,25 @@
         <div class="field">
             <label for="@($"{prefix}-source-repository")">Repository (owner/repository)</label>
             <input id="@($"{prefix}-source-repository")" name="Repository" @bind="Repository" required autocomplete="off"
-                   aria-invalid="@HasFieldError("Repository")" aria-describedby="@ErrorId("Repository", prefix)" />
+                   aria-invalid="@(HasFieldError("Repository") ? "true" : "false")" aria-describedby="@ErrorId("Repository", prefix)" />
             @FieldError("Repository", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-workflow")">Workflow file</label>
             <input id="@($"{prefix}-source-workflow")" name="Workflow" @bind="Workflow" required autocomplete="off"
-                   aria-invalid="@HasFieldError("Workflow")" aria-describedby="@ErrorId("Workflow", prefix)" />
+                   aria-invalid="@(HasFieldError("Workflow") ? "true" : "false")" aria-describedby="@ErrorId("Workflow", prefix)" />
             @FieldError("Workflow", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-artifact")">Packages artifact</label>
             <input id="@($"{prefix}-source-artifact")" name="Artifact" @bind="Artifact" required autocomplete="off"
-                   aria-invalid="@HasFieldError("Artifact")" aria-describedby="@ErrorId("Artifact", prefix)" />
+                   aria-invalid="@(HasFieldError("Artifact") ? "true" : "false")" aria-describedby="@ErrorId("Artifact", prefix)" />
             @FieldError("Artifact", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-version-artifact")">Version artifact (optional)</label>
             <input id="@($"{prefix}-source-version-artifact")" name="VersionArtifact" @bind="VersionArtifact" autocomplete="off"
-                   aria-invalid="@HasFieldError("VersionArtifact")" aria-describedby="@ErrorId("VersionArtifact", prefix)" />
+                   aria-invalid="@(HasFieldError("VersionArtifact") ? "true" : "false")" aria-describedby="@ErrorId("VersionArtifact", prefix)" />
             @FieldError("VersionArtifact", prefix)
         </div>
     </div>;
