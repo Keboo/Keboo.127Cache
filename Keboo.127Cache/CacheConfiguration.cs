@@ -523,14 +523,14 @@ public static class CacheConfigurationLoader
         }
     }
 
-    private static bool IsValidRepository(string repository) =>
+    internal static bool IsValidRepository(string repository) =>
         Regex.IsMatch(repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
         && repository.Split('/').All(part => part is not ("." or ".."));
 
-    private static bool IsValidWorkflow(string workflow) =>
+    internal static bool IsValidWorkflow(string workflow) =>
         Regex.IsMatch(workflow, @"^[A-Za-z0-9_.-]+$") && workflow is not ("." or "..");
 
-    private static bool IsSafeName(string name) =>
+    internal static bool IsSafeName(string name) =>
         Regex.IsMatch(name, @"^[A-Za-z0-9._-]{1,255}$")
         && name is not ("." or "..")
         && !name.EndsWith('.')

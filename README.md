@@ -347,7 +347,12 @@ still serves the `Install-PrBuild.ps1` scripts.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/sources` | name, repository, workflow, artifact, status (`ok`/`degraded`/`failed`), `lastRefreshUtc`, `lastError` |
+| `GET /api/sources` | name, repository, workflow, artifact, status (`ok`/`degraded`/`failed`), `lastRefreshUtc`, `lastError`, `editable` |
+| `GET /api/sources/configuration` | where changes are saved, whether they can be, layers that override the file, `ETag`, current definitions |
+| `POST /api/sources` | add a source (201); body `{name, repository, workflow, artifact, versionArtifact?, type?}` |
+| `PUT /api/sources/{source}` | replace a source's definition (rename allowed) |
+| `DELETE /api/sources/{source}[?removeCache=true]` | remove a source from the configuration |
+| `POST /api/sources/reload` | re-read the configuration files and apply them |
 | `GET /api/builds[?source=]` | per source/PR/run: version, size, `cachedState` (`cached`/`partial`/`notCached`), `served`; never downloads |
 | `GET /api/packages[?source=]` | package id to versions, with source, PR, run, attempt (same content as the feed) |
 | `POST /api/refresh[?source=]` | force rediscovery, bypassing the memory cache; concurrent calls for a source share one discovery (`coalesced`) |
@@ -361,6 +366,27 @@ All `DELETE`s accept `?dryRun=true` and delegate to `ICacheEvictionService`; the
 build that is not cached succeeds with `removedCount` 0. The UI should call the injected
 `IManagementService` (`GetSourcesAsync`, `GetBuildsAsync`, `GetPackagesAsync`, `RefreshAsync`) and
 `ICacheEvictionService` directly rather than HTTP.
+
+### Managing sources
+
+Sources can be added, edited and removed while the server runs; changes are written to the
+configuration file and applied immediately, with no restart. The file written is the `--config` file
+if one was given, otherwise the per-user `config.json` (created if missing). Only the `Sources` array
+is rewritten (legacy `Proxy` source fields are migrated into it); other settings are kept, but
+**comments in the file are lost**. Writes are atomic.
+
+- A layer after the file (environment variables, or a `Sources` array in a later layer) overrides it. Then
+  `GET /api/sources/configuration` reports `isEditable: false` with the reason and `shadowingLayers`, and
+  changes return 409. Layers below the file are listed in `overriddenLayers` and do not block editing.
+- Invalid input returns 400 with field-level `errors` (`name`, `repository`, `workflow`, `artifact`,
+  `versionArtifact`, `type`); nothing is written.
+- Changes are serialized. Send `If-Match` with the `ETag` from the configuration endpoint to detect
+  edits made outside the UI (412); `hasExternalChanges` and `POST /api/sources/reload` resync.
+- Editing a source's repository, workflow or artifacts empties that source's cache; unchanged sources
+  keep their state. Removing (or renaming) a source keeps its cache on disk unless `removeCache=true`,
+  which uses `ICacheEvictionService.RemoveSourceAsync` and returns 409 when a build is in use.
+- The same CSRF rules as other management calls apply. The UI should call `ISourceConfigurationService`
+  (`GetConfigurationAsync`, `ValidateAsync`, `AddAsync`, `UpdateAsync`, `RemoveAsync`, `ReloadAsync`).
 
 ### Cross-site request protection
 
