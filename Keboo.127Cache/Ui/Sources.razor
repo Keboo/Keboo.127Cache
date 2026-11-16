@@ -49,14 +49,12 @@
         }
         @if (configuration.HasExternalChanges)
         {
-            <div class="notice">
-                <p>The configuration file changed outside this server. Reload it before continuing; stale edits are rejected.</p>
-                <form method="post" @formname="reload" @onsubmit="ReloadAsync">
-                    <AntiforgeryToken />
-                    <button type="submit">Reload configuration</button>
-                </form>
-            </div>
+            <p role="alert" class="warning">The configuration file changed outside this server. Reload it before continuing; stale edits are rejected.</p>
         }
+        <form method="post" @formname="reload" @onsubmit="ReloadAsync">
+            <AntiforgeryToken />
+            <button type="submit">Reload configuration</button>
+        </form>
         <p class="muted">Comments in the configuration file are not preserved when the Sources list is saved.</p>
     }
 </section>
@@ -75,25 +73,22 @@
             else
             {
                 <p>Remove <strong>@source.Name</strong> (@source.Repository, @source.Workflow, @source.Artifact) from the configuration?</p>
-                <p class="warning">
-                    By default the source's cache remains on disk. Choose the option below to permanently delete its cached builds.
-                    Cached builds may be in use; in that case deletion is refused and the source is not removed.
-                </p>
-                @if (current.IsEditable && !current.HasExternalChanges)
-                {
-                    <form method="post" @formname="remove" @onsubmit="RemoveAsync">
-                        <AntiforgeryToken />
-                        <input type="hidden" name="RemoveName" value="@source.Name" />
-                        <input type="hidden" name="ExpectedETag" value="@current.ETag" />
-                        <label class="check-field">
-                            <input type="checkbox" name="RemoveCache" value="true" />
-                            Also permanently delete this source's cached builds
-                        </label>
-                        <button type="submit">Confirm source removal</button>
-                        <a class="button" href="/sources">Cancel</a>
-                    </form>
-                }
             }
+            <p class="warning">
+                By default the source's cache remains on disk. Choose the option below to permanently delete its cached builds.
+                Cached builds may be in use; in that case deletion is refused and the source is not removed.
+            </p>
+            <form method="post" @formname="remove" @onsubmit="RemoveAsync">
+                <AntiforgeryToken />
+                <input type="hidden" name="RemoveName" value="@removeName" />
+                <input type="hidden" name="ExpectedETag" value="@current.ETag" />
+                <label class="check-field">
+                    <input type="checkbox" name="RemoveCache" value="true" disabled="@(!CanEdit)" />
+                    Also permanently delete this source's cached builds
+                </label>
+                <button type="submit" disabled="@(!CanEdit || source is null)">Confirm source removal</button>
+                <a class="button" href="/sources">Cancel</a>
+            </form>
         </section>
     }
     else if (QueryEdit is { Length: > 0 } editName)
@@ -105,30 +100,30 @@
             {
                 <p role="alert" class="error">Source '@editName' is no longer configured.</p>
             }
-            else if (!current.IsEditable || current.HasExternalChanges)
-            {
-                <p>Editing is unavailable until the effective configuration is editable and current.</p>
-            }
-            else
+            @if (source is not null)
             {
                 <p class="warning">
                     Saving changes to Repository, Workflow, Artifact, or VersionArtifact clears this source's cache to avoid serving stale builds.
                     A rename keeps the old source cache unless you select the option below.
                 </p>
-                <form method="post" action="@($"/sources?edit={Uri.EscapeDataString(source.Name)}")"
-                      @formname="edit" @onsubmit="SaveEditAsync">
-                    <AntiforgeryToken />
-                    <input type="hidden" name="OriginalName" value="@source.Name" />
-                    <input type="hidden" name="ExpectedETag" value="@current.ETag" />
-                    @SourceFields("edit")
-                    <label class="check-field">
-                        <input type="checkbox" name="RemoveCache" value="true" />
-                        Also delete the old source cache when renaming
-                    </label>
-                    <button type="submit">Save source</button>
-                    <a class="button" href="/sources">Cancel</a>
-                </form>
             }
+            @if (!CanEdit)
+            {
+                <p>Editing is unavailable until the effective configuration is editable and current.</p>
+            }
+            <form method="post" action="@($"/sources?edit={Uri.EscapeDataString(editName)}")"
+                  @formname="edit" @onsubmit="SaveEditAsync">
+                <AntiforgeryToken />
+                <input type="hidden" name="OriginalName" value="@(source?.Name ?? editName)" />
+                <input type="hidden" name="ExpectedETag" value="@current.ETag" />
+                @SourceFields("edit", !CanEdit)
+                <label class="check-field">
+                    <input type="checkbox" name="RemoveCache" value="true" disabled="@(!CanEdit)" />
+                    Also delete the old source cache when renaming
+                </label>
+                <button type="submit" disabled="@(!CanEdit)">Save source</button>
+                <a class="button" href="/sources">Cancel</a>
+            </form>
         </section>
     }
 
@@ -164,7 +159,7 @@
                             <td>@source.Artifact</td>
                             <td>@(source.VersionArtifact ?? "—")</td>
                             <td>
-                                @if (current.IsEditable && !current.HasExternalChanges)
+                                @if (CanEdit)
                                 {
                                     <a href="@($"/sources?edit={Uri.EscapeDataString(source.Name)}")">Edit @source.Name</a>
                                     <span aria-hidden="true"> · </span>
@@ -182,15 +177,15 @@
         </div>
     }
 
-    @if (current.IsEditable && !current.HasExternalChanges && QueryEdit is null && QueryRemove is null)
+    @if (QueryEdit is null && QueryRemove is null)
     {
         <section aria-labelledby="add-heading">
             <h3 id="add-heading">Add source</h3>
             <form method="post" @formname="add" @onsubmit="AddAsync">
                 <AntiforgeryToken />
                 <input type="hidden" name="ExpectedETag" value="@current.ETag" />
-                @SourceFields("add")
-                <button type="submit">Add source</button>
+                @SourceFields("add", !CanEdit)
+                <button type="submit" disabled="@(!CanEdit)">Add source</button>
             </form>
         </section>
     }
@@ -215,6 +210,7 @@
     private Dictionary<string, string[]> _errors = new(StringComparer.Ordinal);
     private string? _message;
     private string? _error;
+    private bool CanEdit => _configuration is { IsEditable: true, HasExternalChanges: false };
 
     protected override async Task OnInitializedAsync()
     {
@@ -296,17 +292,17 @@
 
     private static string ErrorId(string field, string prefix) => $"{prefix}-source-{field.ToLowerInvariant()}-error";
 
-    private RenderFragment SourceFields(string prefix) => @<div class="source-fields">
+    private RenderFragment SourceFields(string prefix, bool disabled) => @<div class="source-fields">
         <div class="field">
             <label for="@($"{prefix}-source-name")">Name</label>
             <input id="@($"{prefix}-source-name")" name="Name" @bind="Name" required maxlength="255" autocomplete="off"
-                   aria-invalid="@(HasFieldError("Name") ? "true" : "false")" aria-describedby="@ErrorId("Name", prefix)" />
+                   aria-invalid="@(HasFieldError("Name") ? "true" : "false")" aria-describedby="@ErrorId("Name", prefix)" disabled="@disabled" />
             @FieldError("Name", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-type")">Type</label>
             <select id="@($"{prefix}-source-type")" name="Type" @bind="Type" aria-invalid="@(HasFieldError("Type") ? "true" : "false")"
-                    aria-describedby="@ErrorId("Type", prefix)">
+                    aria-describedby="@ErrorId("Type", prefix)" disabled="@disabled">
                 <option value="GitHubActions">GitHub Actions</option>
             </select>
             @FieldError("Type", prefix)
@@ -314,25 +310,25 @@
         <div class="field">
             <label for="@($"{prefix}-source-repository")">Repository (owner/repository)</label>
             <input id="@($"{prefix}-source-repository")" name="Repository" @bind="Repository" required autocomplete="off"
-                   aria-invalid="@(HasFieldError("Repository") ? "true" : "false")" aria-describedby="@ErrorId("Repository", prefix)" />
+                   aria-invalid="@(HasFieldError("Repository") ? "true" : "false")" aria-describedby="@ErrorId("Repository", prefix)" disabled="@disabled" />
             @FieldError("Repository", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-workflow")">Workflow file</label>
             <input id="@($"{prefix}-source-workflow")" name="Workflow" @bind="Workflow" required autocomplete="off"
-                   aria-invalid="@(HasFieldError("Workflow") ? "true" : "false")" aria-describedby="@ErrorId("Workflow", prefix)" />
+                   aria-invalid="@(HasFieldError("Workflow") ? "true" : "false")" aria-describedby="@ErrorId("Workflow", prefix)" disabled="@disabled" />
             @FieldError("Workflow", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-artifact")">Packages artifact</label>
             <input id="@($"{prefix}-source-artifact")" name="Artifact" @bind="Artifact" required autocomplete="off"
-                   aria-invalid="@(HasFieldError("Artifact") ? "true" : "false")" aria-describedby="@ErrorId("Artifact", prefix)" />
+                   aria-invalid="@(HasFieldError("Artifact") ? "true" : "false")" aria-describedby="@ErrorId("Artifact", prefix)" disabled="@disabled" />
             @FieldError("Artifact", prefix)
         </div>
         <div class="field">
             <label for="@($"{prefix}-source-version-artifact")">Version artifact (optional)</label>
             <input id="@($"{prefix}-source-version-artifact")" name="VersionArtifact" @bind="VersionArtifact" autocomplete="off"
-                   aria-invalid="@(HasFieldError("VersionArtifact") ? "true" : "false")" aria-describedby="@ErrorId("VersionArtifact", prefix)" />
+                   aria-invalid="@(HasFieldError("VersionArtifact") ? "true" : "false")" aria-describedby="@ErrorId("VersionArtifact", prefix)" disabled="@disabled" />
             @FieldError("VersionArtifact", prefix)
         </div>
     </div>;
