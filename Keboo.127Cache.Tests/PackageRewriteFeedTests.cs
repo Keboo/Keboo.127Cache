@@ -9,6 +9,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NuGet.Configuration;
 using NuGet.Frameworks;
 using NuGet.Packaging;
@@ -171,9 +172,9 @@ public class PackageRewriteFeedTests
         var oldIndexContents = await File.ReadAllTextAsync(oldIndex);
 
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
-        var packages = new PackageCache(options, artifacts);
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
+        var packages = new PackageCache(Options.Create(options), artifacts);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, packages);
         var build = (await CatalogTestSynchronization.WhenSettledAsync(catalog,
             () => catalog.GetBuildsAsync(CancellationToken.None))).Single();
         const string expected = "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200";
@@ -197,8 +198,8 @@ public class PackageRewriteFeedTests
 
         var writtenAt = File.GetLastWriteTimeUtc(rewrittenPath);
         using var restartedMemory = new MemoryCache(new MemoryCacheOptions());
-        var restartedPackages = new PackageCache(options, new ArtifactCache(options, github));
-        await using var restartedCatalog = new PackageCatalog(options, github, restartedMemory, new ArtifactCache(options, github), restartedPackages);
+        var restartedPackages = new PackageCache(Options.Create(options), new ArtifactCache(Options.Create(options), github));
+        await using var restartedCatalog = new PackageCatalog(Options.Create(options), github, restartedMemory, new ArtifactCache(Options.Create(options), github), restartedPackages);
         var restartedBuild = (await restartedCatalog.GetBuildsAsync(CancellationToken.None)).Single();
         await Assert.That(await restartedPackages.GetAsync("Acme.Core", restartedBuild, CancellationToken.None)).IsEqualTo(rewrittenPath);
         await Assert.That(File.GetLastWriteTimeUtc(rewrittenPath)).IsEqualTo(writtenAt);
@@ -221,7 +222,7 @@ public class PackageRewriteFeedTests
             new[] { new CachedPackage("Acme.Core", "1.2.0-beta.3", legacyVersion) }, CancellationToken.None);
         var oldPackage = Path.Combine(oldDirectory, $"acme.core.{legacyVersion}.nupkg");
         await File.WriteAllTextAsync(oldPackage, "legacy bytes");
-        var packages = new PackageCache(options, new ArtifactCache(options, github));
+        var packages = new PackageCache(Options.Create(options), new ArtifactCache(Options.Create(options), github));
 
         await Assert.That(async () => await packages.GetAsync("Acme.Core", build, CancellationToken.None)).ThrowsExactly<IOException>();
         await Assert.That(await File.ReadAllTextAsync(oldPackage)).IsEqualTo("legacy bytes");
@@ -332,9 +333,9 @@ public class PackageRewriteFeedTests
         await JsonSettings.WriteAtomicAsync(catalogPath, new { options.Repository, Builds = new[] { open, closed } }, CancellationToken.None);
         var originalCatalog = await File.ReadAllTextAsync(catalogPath);
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
         var logger = new CollectingLogger<PackageCatalog>();
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, new PackageCache(Options.Create(options), artifacts), logger);
 
         var visible = await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetPackagesAsync(CancellationToken.None));
         await Assert.That(visible.Length).IsEqualTo(3);
@@ -416,9 +417,9 @@ public class PackageRewriteFeedTests
                 "1.2.0-beta.3.pr.755.run.r0000000000000000100.attempt.1.artifact.200") }, CancellationToken.None);
         var inventory = await File.ReadAllTextAsync(inventoryPath);
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
         var logger = new CollectingLogger<PackageCatalog>();
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, new PackageCache(Options.Create(options), artifacts), logger);
 
         var available = await catalog.GetPackagesAsync(CancellationToken.None);
 
@@ -472,9 +473,9 @@ public class PackageRewriteFeedTests
         else File.Copy(fixture.CreatePackage("Acme.Other", "9.0.0"), packagePath);
         var originalBytes = await File.ReadAllBytesAsync(packagePath);
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
         var logger = new CollectingLogger<PackageCatalog>();
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, new PackageCache(Options.Create(options), artifacts), logger);
 
         var available = await catalog.GetPackagesAsync(CancellationToken.None);
 
@@ -497,9 +498,9 @@ public class PackageRewriteFeedTests
         github.SeedRawCache(options.CacheDirectory);
         github.FailDownloads = true;
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
-        var packages = new PackageCache(options, artifacts);
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, packages);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
+        var packages = new PackageCache(Options.Create(options), artifacts);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, packages);
         var build = (await catalog.GetBuildsAsync(CancellationToken.None)).Single();
         var inventory = await packages.GetPackagesAsync(build, CancellationToken.None);
         foreach (var package in inventory)
@@ -510,7 +511,7 @@ public class PackageRewriteFeedTests
         }
         File.Delete(Path.Combine(options.CacheDirectory, "artifacts", "200.zip"));
 
-        var restarted = new PackageCache(options, new ArtifactCache(options, github));
+        var restarted = new PackageCache(Options.Create(options), new ArtifactCache(Options.Create(options), github));
         foreach (var package in inventory)
         {
             var path = await restarted.GetAsync(package.Id, build, CancellationToken.None);
@@ -538,9 +539,9 @@ public class PackageRewriteFeedTests
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "runs.json"),
             new RunArtifactsFile(options.Repository, options.Workflow, runs, SchemaVersion: 2), CancellationToken.None);
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
         var logger = new CollectingLogger<PackageCatalog>();
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts), logger);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, new PackageCache(Options.Create(options), artifacts), logger);
 
         var healthy = await CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetPackagesAsync(CancellationToken.None));
         await Assert.That(healthy.Length).IsEqualTo(3);
@@ -625,10 +626,10 @@ public class PackageRewriteFeedTests
         await JsonSettings.WriteAtomicAsync(catalogPath, new CatalogFile(options.Repository, [], CacheSchema.Version + 1), CancellationToken.None);
         var contents = await File.ReadAllTextAsync(catalogPath);
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
-        var packages = new PackageCache(options, artifacts);
+        var artifacts = new ArtifactCache(Options.Create(options), github);
+        var packages = new PackageCache(Options.Create(options), artifacts);
 
-        await Assert.That(() => new PackageCatalog(options, github, memory, artifacts, packages)).ThrowsExactly<InvalidDataException>();
+        await Assert.That(() => new PackageCatalog(Options.Create(options), github, memory, artifacts, packages)).ThrowsExactly<InvalidDataException>();
         await Assert.That(await File.ReadAllTextAsync(catalogPath)).IsEqualTo(contents);
     }
 
@@ -760,8 +761,8 @@ public class PackageRewriteFeedTests
         await JsonSettings.WriteAtomicAsync(Path.Combine(options.CacheDirectory, "catalog.json"),
             new CatalogFile(options.Repository, builds, CacheSchema.Version), CancellationToken.None);
         using var memory = new MemoryCache(new MemoryCacheOptions());
-        var artifacts = new ArtifactCache(options, github);
-        await using var catalog = new PackageCatalog(options, github, memory, artifacts, new PackageCache(options, artifacts));
+        var artifacts = new ArtifactCache(Options.Create(options), github);
+        await using var catalog = new PackageCatalog(Options.Create(options), github, memory, artifacts, new PackageCache(Options.Create(options), artifacts));
 
         var actual = (await CatalogTestSynchronization.WhenSettledAsync(
             catalog, () => catalog.GetBuildsAsync(CancellationToken.None))).Select(x => x.OriginalVersion).ToArray();
@@ -832,11 +833,11 @@ public class PackageRewriteFeedTests
         builder.Services.AddSingleton<ILogger<PackageCache>>(logger);
         if (catalogLogger is not null) builder.Services.AddSingleton<ILogger<PackageCatalog>>(catalogLogger);
         var app = builder.Build();
-        app.Services.GetRequiredService<ProxyOptions>().RunIds = runIds ?? [99];
+        app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds = runIds ?? [99];
         app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync();
-        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = app.Urls.Single();
+        app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl = app.Urls.Single();
         return app;
     }
 }

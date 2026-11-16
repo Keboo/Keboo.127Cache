@@ -25,6 +25,56 @@ public sealed class ConfigurationTests : IDisposable
     }
 
     [Test]
+    public async Task RuntimeOptionsApplyConfigurationThenConfigureAndPostConfigure()
+    {
+        var config = Json("""
+            {
+              "Server": { "BaseUrl": "http://localhost:55633", "RefreshSeconds": 45 },
+              "Sources": [
+                { "Name": "one", "Repository": "org/one", "Workflow": "ci.yml", "Artifact": "nupkgs" }
+              ]
+            }
+            """);
+        var services = new ServiceCollection().AddProxy(config);
+        services.Configure<ProxyOptions>(options => options.Workflow += ".configured");
+        services.PostConfigure<ProxyOptions>(options =>
+        {
+            options.Workflow += ".postconfigured";
+            options.RefreshSeconds = 60;
+        });
+        using var provider = services.BuildServiceProvider();
+
+        var options = provider.GetRequiredService<IOptions<ProxyOptions>>().Value;
+
+        await Assert.That(options.HasSource).IsTrue();
+        await Assert.That(options.Repository).IsEqualTo("org/one");
+        await Assert.That(options.Workflow).IsEqualTo("ci.yml.configured.postconfigured");
+        await Assert.That(options.PackagesArtifact).IsEqualTo("nupkgs");
+        await Assert.That(options.VersionArtifact).IsNull();
+        await Assert.That(options.BaseUrl).IsEqualTo("http://localhost:55633");
+        await Assert.That(options.RefreshSeconds).IsEqualTo(60);
+        await Assert.That(provider.GetService<ProxyOptions>()).IsNull();
+    }
+
+    [Test]
+    public async Task RuntimeOptionsValidationRejectsInvalidPostConfiguredValues()
+    {
+        var services = new ServiceCollection().AddProxy(new ConfigurationBuilder().Build());
+        services.PostConfigure<ProxyOptions>(options => options.RefreshSeconds = 1);
+        services.AddOptions<ProxyOptions>()
+            .Validate(options => options.RefreshSeconds >= 10, "RefreshSeconds must be at least 10.");
+        using var provider = services.BuildServiceProvider();
+
+        var error = await Assert.That(() => provider.GetRequiredService<IOptions<ProxyOptions>>().Value)
+            .ThrowsExactly<OptionsValidationException>();
+
+        await Assert.That(error).IsNotNull();
+        await Assert.That(error!.Failures).Contains("RefreshSeconds must be at least 10.");
+        await Assert.That(() => provider.GetRequiredService<PackageCatalog>())
+            .ThrowsExactly<OptionsValidationException>();
+    }
+
+    [Test]
     public async Task LoadsIndependentSourcesWithoutRepositoryDefaults()
     {
         var config = Json("""
@@ -70,7 +120,7 @@ public sealed class ConfigurationTests : IDisposable
 
         var options = services.GetRequiredService<CacheConfiguration>();
         await Assert.That(options.Sources.Count).IsEqualTo(2);
-        var sources = services.GetRequiredService<ProxyOptions>().CreateSourceOptions();
+        var sources = services.GetRequiredService<IOptions<ProxyOptions>>().Value.CreateSourceOptions();
         await Assert.That(sources.Select(x => x.Repository).ToArray()).IsEquivalentTo(new[] { "org/one", "org/two" });
         await Assert.That(sources.Select(x => x.CacheDirectory).ToArray()).IsEquivalentTo(
             new[] { Path.Combine("root-cache", "sources", "one"), Path.Combine("root-cache", "sources", "two") });
@@ -548,7 +598,7 @@ public sealed class ConfigurationTests : IDisposable
         using var services = new ServiceCollection().AddProxy(config).BuildServiceProvider();
 
         var source = services.GetRequiredService<CacheConfiguration>().Sources.Single();
-        var runtime = services.GetRequiredService<ProxyOptions>();
+        var runtime = services.GetRequiredService<IOptions<ProxyOptions>>().Value;
 
         await Assert.That(source.Name).IsEqualTo(previousSource == "modern" ? "user-source" : "new");
         await Assert.That(source.Repository).IsEqualTo("env/new");

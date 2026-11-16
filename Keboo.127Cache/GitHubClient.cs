@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Options;
 
 namespace Keboo.LocalCache;
 
@@ -38,15 +39,17 @@ public interface IGitHubClient
     Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken);
 }
 
-public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
+public sealed class GitHubClient(IOptions<ProxyOptions> proxyOptions) : IGitHubClient
 {
+    private readonly ProxyOptions _options = proxyOptions.Value;
+
     public async Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken)
     {
         var pullRequests = new List<PullRequestInfo>();
         for (var page = 1; ; page++)
         {
             var response = await GetAsync<PullRequestInfo[]>(
-                $"repos/{options.Repository}/pulls?state=open&per_page=100&page={page}", cancellationToken);
+                $"repos/{_options.Repository}/pulls?state=open&per_page=100&page={page}", cancellationToken);
             pullRequests.AddRange(response);
             if (response.Length < 100) return pullRequests;
         }
@@ -58,7 +61,7 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
         for (var page = 1; ; page++)
         {
             var response = await GetAsync<PullRequestCommit[]>(
-                $"repos/{options.Repository}/pulls/{pullRequest}/commits?per_page=100&page={page}", cancellationToken);
+                $"repos/{_options.Repository}/pulls/{pullRequest}/commits?per_page=100&page={page}", cancellationToken);
             foreach (var commit in response)
             {
                 if (string.IsNullOrWhiteSpace(commit.Sha))
@@ -80,7 +83,7 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
         for (var page = 1; ; page++)
         {
             var response = await GetAsync<PullRequestInfo[]>(
-                $"repos/{options.Repository}/pulls?state=all&head={head}&per_page=100&page={page}", cancellationToken);
+                $"repos/{_options.Repository}/pulls?state=all&head={head}&per_page=100&page={page}", cancellationToken);
             pullRequests.AddRange(response);
             if (response.Length < 100) return pullRequests;
         }
@@ -92,19 +95,19 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
         for (var page = 1; runs.Count < ProxyOptions.RunLimit; page++)
         {
             var response = await GetAsync<RunsResponse>(
-                $"repos/{options.Repository}/actions/workflows/{options.Workflow}/runs?event=pull_request&status=success&per_page=100&page={page}",
+                $"repos/{_options.Repository}/actions/workflows/{_options.Workflow}/runs?event=pull_request&status=success&per_page=100&page={page}",
                 cancellationToken);
             runs.AddRange(response.Runs.Take(ProxyOptions.RunLimit - runs.Count));
             if (response.Runs.Length < 100) break;
         }
         WorkflowInfo? workflow = null;
-        foreach (var id in options.RunIds)
+        foreach (var id in _options.RunIds)
         {
             if (runs.Any(x => x.Id == id)) continue;
             workflow ??= await GetAsync<WorkflowInfo>(
-                $"repos/{options.Repository}/actions/workflows/{options.Workflow}", cancellationToken);
+                $"repos/{_options.Repository}/actions/workflows/{_options.Workflow}", cancellationToken);
             if (workflow.Id <= 0) throw new PinnedRunWorkflowException();
-            var run = await GetAsync<WorkflowRun>($"repos/{options.Repository}/actions/runs/{id}", cancellationToken);
+            var run = await GetAsync<WorkflowRun>($"repos/{_options.Repository}/actions/runs/{id}", cancellationToken);
             if (run.Id != id || run.WorkflowId != workflow.Id) throw new PinnedRunWorkflowException();
             runs.Add(run);
         }
@@ -117,7 +120,7 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
         for (var page = 1; ; page++)
         {
             var response = await GetAsync<ArtifactsResponse>(
-                $"repos/{options.Repository}/actions/runs/{runId}/artifacts?per_page=100&page={page}", cancellationToken);
+                $"repos/{_options.Repository}/actions/runs/{runId}/artifacts?per_page=100&page={page}", cancellationToken);
             artifacts.AddRange(response.Artifacts);
             if (response.Artifacts.Length < 100) return artifacts;
         }
@@ -135,7 +138,7 @@ public sealed class GitHubClient(ProxyOptions options) : IGitHubClient
     public async Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken)
     {
         await using var output = File.Create(destination);
-        await ExecuteAsync(["api", $"repos/{options.Repository}/actions/artifacts/{artifact.Id}/zip"], output, cancellationToken);
+        await ExecuteAsync(["api", $"repos/{_options.Repository}/actions/artifacts/{artifact.Id}/zip"], output, cancellationToken);
     }
 
     private static async Task ExecuteAsync(string[] arguments, Stream output, CancellationToken cancellationToken)

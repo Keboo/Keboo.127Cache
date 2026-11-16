@@ -124,7 +124,7 @@ public sealed class WebUiTests
 
         await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(response.Content.Headers.ContentType?.MediaType).IsEqualTo("text/html");
-        var feedUrl = host.App.Services.GetRequiredService<ProxyOptions>().BaseUrl.TrimEnd('/') + "/v3/index.json";
+        var feedUrl = host.App.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl.TrimEnd('/') + "/v3/index.json";
         await Assert.That(html).Contains($"value=\"{feedUrl}\"");
         await Assert.That(html).Contains("readonly");
         // Source status: name, repository, workflow, artifact, status and last refresh.
@@ -233,7 +233,7 @@ public sealed class WebUiTests
     [Test]
     public async Task StartupLogsTheUiUrlAndOpensTheBrowserOnlyWhenRequested()
     {
-        var options = new ProxyOptions { BaseUrl = "http://localhost:55631/" };
+        var options = Options.Create(new ProxyOptions { BaseUrl = "http://localhost:55631/" });
         var lifetime = new Mock<IHostApplicationLifetime>().Object;
         var quiet = new RecordingLauncher();
         var quietLog = new RecordingLogger<WebUiStartup>();

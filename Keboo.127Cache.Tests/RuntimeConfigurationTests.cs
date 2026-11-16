@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+using Keboo.LocalCache.Testing;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -14,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 using NuGet.Packaging;
 
@@ -23,6 +26,66 @@ public sealed class RuntimeConfigurationTests : IDisposable
 {
     private readonly string _directory = Path.GetFullPath(Path.Combine(
         "artifacts", "runtime-configuration-tests", Guid.NewGuid().ToString("N")));
+
+    [Test]
+    public async Task PostConfiguredOptionsReachCacheServicesAndFeedEndpoints()
+    {
+        var cancellationToken = TestContext.Current!.Execution.CancellationToken;
+        var github = new PackageGitHub(_directory) { OpenPullRequests = [new(42)] };
+        var originalCache = Path.Combine(_directory, "original-cache");
+        var configuredCache = Path.Combine(_directory, "configured-cache");
+        const string advertisedUrl = "http://localhost:55639";
+        var builder = CreateBuilder(originalCache, new Dictionary<string, string?>
+        {
+            ["Sources:0:Name"] = "example",
+            ["Sources:0:Repository"] = "owner/repo",
+            ["Sources:0:Workflow"] = "ci.yml",
+            ["Sources:0:Artifact"] = "packages"
+        });
+        builder.Services.PostConfigure<ProxyOptions>(options =>
+        {
+            options.Repository = "configured/repo";
+            options.BaseUrl = advertisedUrl;
+            options.CacheDirectory = configuredCache;
+        });
+        builder.Services.AddSingleton<IGitHubClient>(github);
+        await using var app = builder.Build();
+        app.UseExceptionHandler();
+        app.MapProxy();
+        await app.StartAsync(cancellationToken);
+        await WaitForWarmupAsync(app);
+
+        using var client = Client(app);
+        var catalog = app.Services.GetRequiredService<PackageCatalog>();
+        using var versions = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
+            client, catalog, "/flat/example.package/index.json"));
+        var version = versions.RootElement.GetProperty("versions")[0].GetString()!;
+        var registrationUrl = $"{advertisedUrl}/registration/example.package";
+        var contentUrl = $"{advertisedUrl}/flat/example.package/{version}/example.package.{version}.nupkg";
+        using var index = JsonDocument.Parse(await client.GetStringAsync("/v3/index.json", cancellationToken));
+        using var registration = JsonDocument.Parse(await client.GetStringAsync(
+            "/registration/example.package/index.json", cancellationToken));
+        using var page = JsonDocument.Parse(await client.GetStringAsync(
+            $"/registration/example.package/page/{version}.json", cancellationToken));
+        using var leaf = JsonDocument.Parse(await client.GetStringAsync(
+            $"/registration/example.package/{version}.json", cancellationToken));
+        using var search = JsonDocument.Parse(await client.GetStringAsync(
+            "/query?q=example.package&prerelease=true&semVerLevel=2.0.0", cancellationToken));
+
+        await Assert.That(catalog.GetHealth().Repository).IsEqualTo("configured/repo");
+        await Assert.That(Directory.Exists(originalCache)).IsFalse();
+        var sourceCache = Path.Combine(configuredCache, "sources", "example");
+        await Assert.That(File.Exists(Path.Combine(sourceCache, "artifacts", $"{github.Packages.Id}.zip"))).IsTrue();
+        await Assert.That(Directory.Exists(Path.Combine(sourceCache, "packages"))).IsTrue();
+        await Assert.That(index.RootElement.GetProperty("resources")[0].GetProperty("@id").GetString())
+            .IsEqualTo(advertisedUrl + "/flat/");
+        await Assert.That(registration.RootElement.GetProperty("@id").GetString()).IsEqualTo(registrationUrl + "/index.json");
+        await Assert.That(page.RootElement.GetProperty("items")[0].GetProperty("packageContent").GetString()).IsEqualTo(contentUrl);
+        await Assert.That(leaf.RootElement.GetProperty("packageContent").GetString()).IsEqualTo(contentUrl);
+        await Assert.That(search.RootElement.GetProperty("data")[0].GetProperty("registration").GetString())
+            .IsEqualTo(registrationUrl + "/index.json");
+        await app.StopAsync(cancellationToken);
+    }
 
     [Test]
     public async Task EmptySourcesStartAndServeAnEmptyFeedWithoutContactingGitHub()
@@ -99,7 +162,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await WaitForWarmupAsync(app);
         using var client = Client(app);
         using var health = JsonDocument.Parse(await client.GetStringAsync("/health", CancellationToken.None));
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         await Assert.That(health.RootElement.GetProperty("repository").GetString()).IsEqualTo("env/new");
         await Assert.That(options.Repository).IsEqualTo("env/new");
         await Assert.That(options.Workflow).IsEqualTo(legacyJson ? "user.yml" : "build.yml");
@@ -127,7 +190,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
         var baseUrl = app.Urls.Single();
-        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = baseUrl;
+        app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl = baseUrl;
 
         await WaitForWarmupAsync(app);
         await app.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(CancellationToken.None);
@@ -224,7 +287,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         services.AddSingleton<IGitHubClient>(github);
         using var provider = services.BuildServiceProvider();
         var catalog = provider.GetRequiredService<PackageCatalog>();
-        await Assert.That(provider.GetRequiredService<ProxyOptions>().RunIds).IsEmpty();
+        await Assert.That(provider.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds).IsEmpty();
 
         var initial = await catalog.GetPackagesAsync(CancellationToken.None);
         await Assert.That(initial.Any(x => x.Id == "Example.Package" && x.Build.RunId == 100)).IsTrue();
@@ -377,7 +440,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         app.MapProxy();
         await app.StartAsync(CancellationToken.None);
         var baseUrl = app.Urls.Single();
-        app.Services.GetRequiredService<ProxyOptions>().BaseUrl = baseUrl;
+        app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl = baseUrl;
 
         var (exitCode, output, commands) = await RunVpkInstallerAsync(baseUrl);
         if (exitCode != 0) throw new InvalidOperationException($"The existing installer failed:\n{output}");

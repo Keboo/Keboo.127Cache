@@ -1,12 +1,12 @@
 @page "/"
 @inject IManagementService Management
 @inject ICacheEvictionService Eviction
-@inject ProxyOptions Options
+@inject IOptions<ProxyOptions> Options
 
 <PageTitle>127Cache</PageTitle>
 
 <h2>Overview</h2>
-<FeedUrl Url="@UiFormat.FeedUrl(Options)" />
+<FeedUrl Url="@UiFormat.FeedUrl(Options.Value)" />
 
 @if (_refreshError is not null)
 {
@@ -42,7 +42,7 @@ else if (_refreshSummary is not null)
 }
 else
 {
-    <p>Cache size on disk: <strong>@UiFormat.Size(_diskBytes)</strong> in <code>@Options.CacheDirectory</code></p>
+    <p>Cache size on disk: <strong>@UiFormat.Size(_diskBytes)</strong> in <code>@Options.Value.CacheDirectory</code></p>
 
     <h2>Sources</h2>
     @if (_sources.Count == 0)
@@ -100,7 +100,7 @@ else
 
     private async Task LoadAsync()
     {
-        _now = Options.TimeProvider.GetUtcNow();
+        _now = Options.Value.TimeProvider.GetUtcNow();
         _loadError = null;
         _packagesUnavailable = null;
         try

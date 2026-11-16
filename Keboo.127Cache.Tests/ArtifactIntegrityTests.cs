@@ -16,6 +16,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 using NuGet.Packaging;
 
@@ -79,7 +80,7 @@ public sealed class ArtifactIntegrityTests
         await Assert.That(fixture.Log.HashCount(fixture.GitHub.Packages.Id)).IsEqualTo(2);
 
         var restartLog = new RecordingLogger();
-        var restarted = new ArtifactCache(fixture.Options, fixture.GitHub, restartLog);
+        var restarted = new ArtifactCache(Options.Create(fixture.Options), fixture.GitHub, restartLog);
         fixture.GitHub.FailDownloads = true;
         await restarted.GetAsync(fixture.GitHub.Packages, Cancellation);
         await restarted.GetAsync(fixture.GitHub.Packages, Cancellation);
@@ -125,7 +126,7 @@ public sealed class ArtifactIntegrityTests
 
         File.Delete(sidecar);
         await ExpectFailureAsync<InvalidDataException>(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation));
-        var restarted = new ArtifactCache(fixture.Options, fixture.GitHub);
+        var restarted = new ArtifactCache(Options.Create(fixture.Options), fixture.GitHub);
         await ExpectFailureAsync<InvalidDataException>(() => restarted.GetAsync(fixture.GitHub.Packages, Cancellation));
         foreach (var invalid in new[] { "", digest[..63], new string('G', 64), (digest[0] == 'A' ? "B" : "A") + digest[1..] })
         {
@@ -167,7 +168,7 @@ public sealed class ArtifactIntegrityTests
         var digest = Digest(fixture.GitHub.PackageBytes);
         await File.WriteAllTextAsync(path + ".sha256", digest, Cancellation);
 
-        var restarted = new ArtifactCache(fixture.Options, fixture.GitHub, fixture.Log);
+        var restarted = new ArtifactCache(Options.Create(fixture.Options), fixture.GitHub, fixture.Log);
         await Assert.That(await restarted.GetAsync(fixture.GitHub.Packages, Cancellation)).IsEqualTo(path);
         await Assert.That((await File.ReadAllBytesAsync(path, Cancellation))
             .SequenceEqual(fixture.GitHub.PackageBytes)).IsTrue();
@@ -238,7 +239,7 @@ public sealed class ArtifactIntegrityTests
         await Assert.That(await File.ReadAllTextAsync(record, Cancellation)).IsEqualTo(digest);
 
         using var lockedZip = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
-        var restarted = new ArtifactCache(fixture.Options, fixture.GitHub);
+        var restarted = new ArtifactCache(Options.Create(fixture.Options), fixture.GitHub);
         var pendingZip = restarted.GetAsync(fixture.GitHub.Packages, deadline.Token);
         await Task.Delay(50);
         await Assert.That(pendingZip.IsCompleted).IsFalse();
@@ -275,7 +276,7 @@ public sealed class ArtifactIntegrityTests
 
         await File.WriteAllTextAsync(path + ".sha256", "corrupt", Cancellation);
         await Assert.That(await fixture.Cache.GetAsync(correct, Cancellation)).IsEqualTo(path);
-        var restarted = new ArtifactCache(fixture.Options, fixture.GitHub);
+        var restarted = new ArtifactCache(Options.Create(fixture.Options), fixture.GitHub);
         fixture.GitHub.FailDownloads = true;
         await Assert.That(await restarted.GetAsync(correct, Cancellation)).IsEqualTo(path);
         await ExpectFailureAsync<InvalidDataException>(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation));
@@ -293,7 +294,7 @@ public sealed class ArtifactIntegrityTests
             var otherGitHub = new FakeGitHub("different bytes");
             fixture.GitHub.Rendezvous = rendezvous;
             otherGitHub.Rendezvous = rendezvous;
-            var otherCache = new ArtifactCache(fixture.Options, otherGitHub, new RecordingLogger());
+            var otherCache = new ArtifactCache(Options.Create(fixture.Options), otherGitHub, new RecordingLogger());
 
             var first = CaptureAsync(() => fixture.Cache.GetAsync(fixture.GitHub.Packages, Cancellation));
             var second = CaptureAsync(() => otherCache.GetAsync(otherGitHub.Packages, Cancellation));
@@ -335,7 +336,7 @@ public sealed class ArtifactIntegrityTests
         var otherGitHub = new FakeGitHub("same", fixture.GitHub.PackageBytes);
         var otherHash = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var otherLog = new RecordingLogger { OnHash = () => otherHash.TrySetResult() };
-        var otherCache = new ArtifactCache(fixture.Options, otherGitHub, otherLog);
+        var otherCache = new ArtifactCache(Options.Create(fixture.Options), otherGitHub, otherLog);
         using var otherCancellation = new CancellationTokenSource();
         var queued = otherCache.GetAsync(otherGitHub.Packages, otherCancellation.Token);
         await otherHash.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
@@ -369,7 +370,7 @@ public sealed class ArtifactIntegrityTests
         await hashed.Task.WaitAsync(deadline.Token);
 
         var otherArtifact = new Artifact(3, "other-packages", false, null);
-        var otherCache = new ArtifactCache(fixture.Options, fixture.GitHub);
+        var otherCache = new ArtifactCache(Options.Create(fixture.Options), fixture.GitHub);
         var otherPath = await otherCache.GetAsync(otherArtifact, deadline.Token);
         await Assert.That(otherPath).IsEqualTo(fixture.PathFor(otherArtifact));
         await Assert.That(await File.ReadAllTextAsync(otherPath + ".sha256", deadline.Token))
@@ -638,7 +639,7 @@ public sealed class ArtifactIntegrityTests
                 OnHash = () => File.WriteAllText(Path.Combine(childDirectory, $"hashed-{index}"), "hashed")
             };
             var cache = new ArtifactCache(
-                new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache", "sources", "project") }, github, log);
+                Options.Create(new ProxyOptions { CacheDirectory = Path.Combine(childDirectory, "cache", "sources", "project") }), github, log);
             var pending = CaptureAsync(() => cache.GetAsync(github.Packages, cancellation.Token));
             if (index == 0)
             {
@@ -710,7 +711,7 @@ public sealed class ArtifactIntegrityTests
             var otherGitHub = new FakeGitHub("unused", fixture.GitHub.PackageBytes);
             fixture.GitHub.Rendezvous = rendezvous;
             otherGitHub.Rendezvous = rendezvous;
-            var otherCache = new ArtifactCache(fixture.Options, otherGitHub, new RecordingLogger());
+            var otherCache = new ArtifactCache(Options.Create(fixture.Options), otherGitHub, new RecordingLogger());
             var supplied = otherGitHub.Packages with { Digest = "sha256:" + Digest(otherGitHub.PackageBytes) };
 
             var first = Enumerable.Range(0, 8)
@@ -840,7 +841,7 @@ public sealed class ArtifactIntegrityTests
         {
             OnHash = () => File.WriteAllText(Path.Combine(directory, $"hashed-{index}"), "hashed")
         };
-        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache", "sources", "project") }, github, log);
+        var cache = new ArtifactCache(Options.Create(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache", "sources", "project") }), github, log);
         var artifact = index == 2
             ? github.Packages with { Digest = "sha256:" + Digest(payload).ToLowerInvariant() }
             : github.Packages;
@@ -857,7 +858,7 @@ public sealed class ArtifactIntegrityTests
             (name, _, _) => name == "libc" ? shim : IntPtr.Zero);
 
         var github = new FakeGitHub("faulted writer");
-        var cache = new ArtifactCache(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache", "sources", "project") }, github);
+        var cache = new ArtifactCache(Options.Create(new ProxyOptions { CacheDirectory = Path.Combine(directory, "cache", "sources", "project") }), github);
         var result = await CaptureAsync(() => cache.GetAsync(github.Packages, deadline.Token));
         var status = result.Error switch
         {
@@ -935,7 +936,7 @@ public sealed class ArtifactIntegrityTests
     {
         await WaitForFileAsync(path, cancellationToken);
         var github = new FakeGitHub("reader") { FailDownloads = true };
-        var reader = new ArtifactCache(fixture.Options, github);
+        var reader = new ArtifactCache(Options.Create(fixture.Options), github);
         for (var i = 0; i < 32; i++)
         {
             await reader.GetAsync(github.Packages, cancellationToken);
@@ -1055,7 +1056,7 @@ public sealed class ArtifactIntegrityTests
         {
             System.IO.Directory.CreateDirectory(Directory);
             Options = new ProxyOptions { CacheDirectory = Path.Combine(Directory, "cache", "sources", "project"), PullRequests = [755] };
-            Cache = new ArtifactCache(Options, GitHub, Log);
+            Cache = new ArtifactCache(Microsoft.Extensions.Options.Options.Create(Options), GitHub, Log);
         }
 
         public string PathFor(Artifact artifact) => Path.Combine(Options.CacheDirectory, "artifacts", $"{artifact.Id}.zip");

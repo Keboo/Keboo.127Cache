@@ -13,12 +13,12 @@ public static class ProxyExtensions
         services.TryAddSingleton(locations ?? SourceConfigurationLocations.None);
         services.AddSingleton(provider =>
             CacheConfigurationLoader.Load(configuration, provider.GetRequiredService<ILogger<CacheConfiguration>>()));
-        services.AddSingleton(provider => ProxyOptions.FromConfiguration(provider.GetRequiredService<CacheConfiguration>()));
-        services.AddSingleton<IOptions<ProxyOptions>>(provider => Options.Create(provider.GetRequiredService<ProxyOptions>()));
+        services.AddOptions<ProxyOptions>()
+            .Configure<CacheConfiguration>((options, configuration) => options.ConfigureFromConfiguration(configuration));
         services.AddMemoryCache();
         services.AddSingleton<IBuildSourceFactory, DefaultBuildSourceFactory>();
         services.AddSingleton(provider => PackageCatalog.Create(
-            provider.GetRequiredService<ProxyOptions>(), provider.GetRequiredService<IBuildSourceFactory>(),
+            provider.GetRequiredService<IOptions<ProxyOptions>>(), provider.GetRequiredService<IBuildSourceFactory>(),
             provider.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
             provider.GetRequiredService<ILogger<PackageCatalog>>(), provider.GetService<ILogger<ArtifactCache>>(),
             provider.GetService<ILogger<PackageCache>>(),
@@ -28,7 +28,7 @@ public static class ProxyExtensions
         services.AddSingleton<IManagementService, ManagementService>();
         services.AddSingleton(provider => new SourceConfigurationService(configuration,
             provider.GetRequiredService<SourceConfigurationLocations>(), provider.GetRequiredService<PackageCatalog>(),
-            provider.GetRequiredService<ProxyOptions>(), provider.GetRequiredService<ICacheEvictionService>(),
+            provider.GetRequiredService<IOptions<ProxyOptions>>(), provider.GetRequiredService<ICacheEvictionService>(),
             provider.GetRequiredService<ILogger<CacheConfiguration>>()));
         services.AddSingleton<ISourceConfigurationService>(provider => provider.GetRequiredService<SourceConfigurationService>());
         services.AddHostedService(provider => provider.GetRequiredService<SourceConfigurationService>());
@@ -41,7 +41,7 @@ public static class ProxyExtensions
 
     public static void MapProxy(this WebApplication app)
     {
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         app.Use(async (context, next) =>
         {
             if (!IsFeedPath(context.Request.Path))

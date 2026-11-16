@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace Keboo.LocalCache;
 
@@ -80,9 +81,11 @@ public interface ICacheEvictionService
     Task<RemovalResult> ApplyRetentionPolicyAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed class CacheEvictionService(PackageCatalog catalog, ProxyOptions options, ILogger<CacheEvictionService>? logger = null)
+public sealed class CacheEvictionService(PackageCatalog catalog, IOptions<ProxyOptions> proxyOptions,
+    ILogger<CacheEvictionService>? logger = null)
     : ICacheEvictionService
 {
+    private readonly ProxyOptions _options = proxyOptions.Value;
     private readonly ILogger _logger = (ILogger?)logger ?? NullLogger.Instance;
 
     public async Task<CacheDiskUsage> GetDiskUsageAsync(CancellationToken cancellationToken = default)
@@ -121,12 +124,12 @@ public sealed class CacheEvictionService(PackageCatalog catalog, ProxyOptions op
 
     public async Task<RemovalResult> ApplyRetentionPolicyAsync(CancellationToken cancellationToken = default)
     {
-        if (options.EvictClosedPullRequestsAfterDays is not > 0) return RemovalResult.Empty;
+        if (_options.EvictClosedPullRequestsAfterDays is not > 0) return RemovalResult.Empty;
         var result = await RemoveClosedPullRequestsAsync(
-            closedFor: TimeSpan.FromDays(options.EvictClosedPullRequestsAfterDays.Value), cancellationToken: cancellationToken);
+            closedFor: TimeSpan.FromDays(_options.EvictClosedPullRequestsAfterDays.Value), cancellationToken: cancellationToken);
         if (result.RemovedCount > 0)
             _logger.LogInformation("Removed {Count} cached builds of pull requests closed for more than {Days} days, reclaiming {Bytes} bytes.",
-                result.RemovedCount, options.EvictClosedPullRequestsAfterDays, result.BytesReclaimed);
+                result.RemovedCount, _options.EvictClosedPullRequestsAfterDays, result.BytesReclaimed);
         return result;
     }
 
@@ -150,14 +153,15 @@ public sealed class CacheEvictionService(PackageCatalog catalog, ProxyOptions op
 }
 
 // Runs the optional retention policy shortly after startup and then hourly.
-internal sealed class CacheRetentionService(ICacheEvictionService eviction, ProxyOptions options, ILogger<CacheRetentionService> logger)
+internal sealed class CacheRetentionService(ICacheEvictionService eviction, IOptions<ProxyOptions> proxyOptions,
+    ILogger<CacheRetentionService> logger)
     : BackgroundService
 {
     internal static readonly TimeSpan Interval = TimeSpan.FromHours(1);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (options.EvictClosedPullRequestsAfterDays is not > 0) return;
+        if (proxyOptions.Value.EvictClosedPullRequestsAfterDays is not > 0) return;
         using var timer = new PeriodicTimer(Interval);
         try
         {

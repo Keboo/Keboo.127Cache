@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace Keboo.LocalCache;
 
@@ -8,24 +9,24 @@ public sealed class ArtifactCache
 {
     private static readonly Dictionary<string, PublicationGate> PublicationGates = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-    private readonly ProxyOptions _options;
+    private readonly IOptions<ProxyOptions> _options;
     private readonly IBuildSource _source;
     private readonly ILogger _logger;
     private readonly ArtifactIntegrityStore _integrity;
     private readonly SemaphoreSlim _gate = new(1);
     private readonly HashSet<long> _warned = [];
 
-    public ArtifactCache(ProxyOptions options, IGitHubClient github)
-        : this(options, new GitHubActionsBuildSource(options, github), NullLogger.Instance)
+    public ArtifactCache(IOptions<ProxyOptions> options, IGitHubClient github)
+        : this(options, new GitHubActionsBuildSource(options.Value, github), NullLogger.Instance)
     {
     }
 
-    public ArtifactCache(ProxyOptions options, IGitHubClient github, ILogger<ArtifactCache> logger)
-        : this(options, new GitHubActionsBuildSource(options, github), logger)
+    public ArtifactCache(IOptions<ProxyOptions> options, IGitHubClient github, ILogger<ArtifactCache> logger)
+        : this(options, new GitHubActionsBuildSource(options.Value, github), logger)
     {
     }
 
-    public ArtifactCache(ProxyOptions options, IBuildSource source, ILogger? logger = null)
+    public ArtifactCache(IOptions<ProxyOptions> options, IBuildSource source, ILogger? logger = null)
     {
         _options = options;
         _source = source;
@@ -46,7 +47,7 @@ public sealed class ArtifactCache
     // Callers hold the gate from LockAsync.
     internal void Forget(long artifactId) => _integrity.Forget(GetPath(new Artifact(artifactId, "", false, null)));
 
-    private string GetPath(Artifact artifact) => Path.Combine(_options.CacheDirectory, "artifacts", $"{artifact.Id}.zip");
+    private string GetPath(Artifact artifact) => Path.Combine(_options.Value.CacheDirectory, "artifacts", $"{artifact.Id}.zip");
 
     public async Task<string> GetAsync(Artifact artifact, CancellationToken cancellationToken)
     {

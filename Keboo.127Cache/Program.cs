@@ -2,6 +2,7 @@ using System.CommandLine;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Keboo.LocalCache.Ui;
+using Microsoft.Extensions.Options;
 
 namespace Keboo.LocalCache;
 
@@ -46,7 +47,7 @@ public sealed class Program
             new SourceConfigurationLocations(ConfigurationFiles.UserConfigPath(), configFile?.FullName));
         builder.Services.AddWebUiStartup(openBrowser);
         var app = builder.Build();
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         app.Urls.Clear();
         app.Urls.Add(options.BaseUrl);
         Directory.CreateDirectory(options.CacheDirectory);

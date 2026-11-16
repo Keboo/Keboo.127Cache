@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Options;
 
 namespace Keboo.LocalCache.Ui;
 
@@ -18,7 +19,7 @@ internal sealed class ProcessBrowserLauncher : IBrowserLauncher
 
 // Logs where the UI lives once the server is listening and optionally opens it in the default browser.
 public sealed class WebUiStartup(
-    ProxyOptions options, IHostApplicationLifetime lifetime, IBrowserLauncher launcher, ILogger<WebUiStartup> logger,
+    IOptions<ProxyOptions> options, IHostApplicationLifetime lifetime, IBrowserLauncher launcher, ILogger<WebUiStartup> logger,
     WebUiStartupOptions startup) : IHostedService
 {
     public static string UiUrl(ProxyOptions options) => options.BaseUrl.TrimEnd('/') + "/";
@@ -33,7 +34,7 @@ public sealed class WebUiStartup(
 
     internal void OnStarted()
     {
-        var url = UiUrl(options);
+        var url = UiUrl(options.Value);
         logger.LogInformation("Web UI available at {Url}", url);
         if (!startup.OpenBrowser) return;
         try

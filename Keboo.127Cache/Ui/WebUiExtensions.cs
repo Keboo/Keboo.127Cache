@@ -19,9 +19,9 @@ public static class WebUiExtensions
         // Antiforgery tokens need a key ring, which ASP.NET Core would otherwise place under %LOCALAPPDATA% (or the
         // user's home directory). Keep it inside the cache directory so the app never writes outside its own data.
         services.AddDataProtection().SetApplicationName("Keboo.127Cache");
-        services.AddOptions<KeyManagementOptions>().Configure<ProxyOptions, ILoggerFactory>((management, proxy, loggers) =>
+        services.AddOptions<KeyManagementOptions>().Configure<IOptions<ProxyOptions>, ILoggerFactory>((management, proxy, loggers) =>
         {
-            var directory = new DirectoryInfo(Path.Combine(proxy.CacheDirectory, KeyRingDirectoryName));
+            var directory = new DirectoryInfo(Path.Combine(proxy.Value.CacheDirectory, KeyRingDirectoryName));
             management.XmlRepository = new FileSystemXmlRepository(directory, loggers);
         });
         // The key ring only protects loopback CSRF tokens, so the per-key 'unencrypted' warning is just noise.
@@ -41,7 +41,7 @@ public static class WebUiExtensions
     // /health and the script-compatible /builds endpoint keep their routes; the UI never claims those paths.
     public static void MapWebUi(this WebApplication app)
     {
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         // DNS-rebinding and cross-origin protection for every UI request. Form posts additionally need the antiforgery
         // token that UseAntiforgery validates for endpoints that accept forms.
         app.Use(async (context, next) =>
