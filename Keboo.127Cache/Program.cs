@@ -42,7 +42,8 @@ public sealed class Program
             ContentRootPath = AppContext.BaseDirectory
         });
         ConfigurationFiles.AddUserAndExplicitConfiguration(builder.Configuration, configFile);
-        builder.Services.AddProxy(builder.Configuration);
+        builder.Services.AddProxy(builder.Configuration,
+            new SourceConfigurationLocations(ConfigurationFiles.UserConfigPath(), configFile?.FullName));
         builder.Services.AddWebUiStartup(openBrowser);
         var app = builder.Build();
         var options = app.Services.GetRequiredService<ProxyOptions>();

@@ -5,6 +5,17 @@ using NuGet.Versioning;
 
 namespace Keboo.LocalCache;
 
+public sealed record SourceStartFailure(string Name, string Error);
+
+// What a reconciliation did: names of sources added, updated (cache purged), removed, and whose cache directory was
+// purged (changed sources plus removed sources the caller asked to purge); Failed lists sources that could not start.
+public sealed record SourceReconciliation(
+    IReadOnlyList<string> Added, IReadOnlyList<string> Updated, IReadOnlyList<string> Removed,
+    IReadOnlyList<string> CachePurged, IReadOnlyList<SourceStartFailure> Failed)
+{
+    public static SourceReconciliation None { get; } = new([], [], [], [], []);
+}
+
 // Aggregates one SourceCatalog per configured build source. With a single healthy source every call is delegated unchanged.
 // With several sources a failing source never takes down the others, but its absence is never served as a complete feed.
 public sealed class PackageCatalog : IDisposable, IAsyncDisposable
@@ -26,12 +37,19 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
     }
 
     private readonly ProxyOptions _options;
-    private readonly List<SourceCatalog> _engines;
-    private readonly List<FailedSource> _failed;
+    private sealed record State(IReadOnlyList<SourceCatalog> Engines, IReadOnlyList<FailedSource> Failed);
+
+    // Replaced as a whole when sources are reconciled, so a request always sees a consistent set of sources.
+    private State _state;
+    private IReadOnlyList<SourceCatalog> _engines => Volatile.Read(ref _state).Engines;
+    private IReadOnlyList<FailedSource> _failed => Volatile.Read(ref _state).Failed;
+    private readonly Func<ProxyOptions, SourceCatalog>? _createEngine;
+    private readonly Func<SourceCatalog>? _createPlaceholder;
+    private readonly SemaphoreSlim _reconcileGate = new(1);
     private readonly ILogger _logger;
     private readonly AsyncLocal<AggregateScope?> _scope = new();
     private readonly HashSet<string> _loggedCollisions = [];
-    private bool Single => _engines.Count == 1 && _failed.Count == 0;
+    private bool Single => Volatile.Read(ref _state) is { Engines.Count: 1, Failed.Count: 0 };
 
     // Wraps one GitHub Actions source that owns the cache directory of `options` directly.
     public PackageCatalog(ProxyOptions options, IGitHubClient github, IMemoryCache memoryCache, ArtifactCache artifacts,
@@ -39,31 +57,36 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
     {
         _options = options;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
-        _failed = [];
-        _engines = [new SourceCatalog(options, new GitHubActionsBuildSource(options, github), memoryCache, artifacts, packages,
-            _logger, lifetime)];
+        _state = new State([new SourceCatalog(options, new GitHubActionsBuildSource(options, github), memoryCache, artifacts, packages,
+            _logger, lifetime)], []);
     }
 
-    private PackageCatalog(ProxyOptions options, List<SourceCatalog> engines, List<FailedSource> failed, ILogger logger)
+    private PackageCatalog(ProxyOptions options, List<SourceCatalog> engines, List<FailedSource> failed, ILogger logger,
+        Func<ProxyOptions, SourceCatalog>? createEngine = null, Func<SourceCatalog>? createPlaceholder = null)
     {
         _options = options;
-        _engines = engines;
-        _failed = failed;
+        _state = new State(engines, failed);
         _logger = logger;
+        _createEngine = createEngine;
+        _createPlaceholder = createPlaceholder;
     }
 
     internal static PackageCatalog Create(ProxyOptions root, IBuildSourceFactory factory, IMemoryCache memoryCache,
         ILogger<PackageCatalog> logger, ILogger<ArtifactCache>? artifactLogger = null, ILogger<PackageCache>? packageLogger = null,
         IHostApplicationLifetime? lifetime = null)
     {
+        SourceCatalog CreateEngine(ProxyOptions options)
+        {
+            var source = factory.Create(options);
+            var artifacts = new ArtifactCache(options, source, artifactLogger);
+            var packages = new PackageCache(options, artifacts, packageLogger, independentArtifactCaches: true);
+            return new SourceCatalog(options, source, memoryCache, artifacts, packages, logger, lifetime);
+        }
+
+        SourceCatalog Placeholder() => CreatePlaceholder(root, memoryCache, logger, lifetime);
         var sources = root.CreateSourceOptions();
         if (sources.Count == 0)
-        {
-            var empty = new ProxyOptions { HasSource = false, CacheDirectory = root.CacheDirectory, BaseUrl = root.BaseUrl };
-            var artifacts = new ArtifactCache(empty, new GitHubActionsBuildSource(empty, new NoGitHubClient()));
-            return new PackageCatalog(root, [new SourceCatalog(empty, new GitHubActionsBuildSource(empty, new NoGitHubClient()),
-                memoryCache, artifacts, new PackageCache(empty, artifacts), logger, lifetime)], [], logger);
-        }
+            return new PackageCatalog(root, [Placeholder()], [], logger, CreateEngine, Placeholder);
 
         CacheLayout.MigrateLegacy(root.CacheDirectory, sources, logger);
         var engines = new List<SourceCatalog>();
@@ -72,11 +95,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
         {
             try
             {
-                var source = factory.Create(options);
-                var artifacts = new ArtifactCache(options, source, artifactLogger);
-                var packages = new PackageCache(options, artifacts, packageLogger,
-                    independentArtifactCaches: true);
-                engines.Add(new SourceCatalog(options, source, memoryCache, artifacts, packages, logger, lifetime));
+                engines.Add(CreateEngine(options));
             }
             catch (Exception exception) when (sources.Count > 1)
             {
@@ -87,7 +106,98 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
         }
         if (engines.Count == 0)
             ExceptionDispatchInfo.Capture(failed[0].Error).Throw();
-        return new PackageCatalog(root, engines, failed, logger);
+        return new PackageCatalog(root, engines, failed, logger, CreateEngine, Placeholder);
+    }
+
+    // The catalog of an empty configuration: it never contacts GitHub and serves an empty feed.
+    private static SourceCatalog CreatePlaceholder(ProxyOptions root, IMemoryCache memoryCache, ILogger logger,
+        IHostApplicationLifetime? lifetime)
+    {
+        var empty = new ProxyOptions { HasSource = false, CacheDirectory = root.CacheDirectory, BaseUrl = root.BaseUrl };
+        var artifacts = new ArtifactCache(empty, new GitHubActionsBuildSource(empty, new NoGitHubClient()));
+        return new SourceCatalog(empty, new GitHubActionsBuildSource(empty, new NoGitHubClient()),
+            memoryCache, artifacts, new PackageCache(empty, artifacts), logger, lifetime);
+    }
+
+    // Applies a new list of sources to the running catalog without a restart. Unchanged sources keep their engine (and
+    // their in-memory state); removed and changed sources are disposed. A changed source (repository, workflow or
+    // artifacts) has its cache directory purged because every cached run, package and rewritten version belongs to the
+    // old definition. A removed source keeps its cache directory unless purgeRemoved names it; that is the caller's choice.
+    internal async Task<SourceReconciliation> ReconcileAsync(IReadOnlyList<SourceOptions> sources,
+        IReadOnlyCollection<string> purgeRemoved, CancellationToken cancellationToken = default)
+    {
+        if (_createEngine is null || _createPlaceholder is null)
+            throw new NotSupportedException("This catalog was not created from configuration and cannot reconcile sources.");
+        await _reconcileGate.WaitAsync(cancellationToken);
+        try
+        {
+            var previous = Volatile.Read(ref _state);
+            _options.ApplySources(sources);
+            var desired = _options.CreateSourceOptions();
+            var kept = new Dictionary<string, SourceCatalog>(StringComparer.Ordinal);
+            var added = new List<string>();
+            var updated = new List<string>();
+            var purged = new List<string>();
+            var retired = new List<SourceCatalog>();
+            foreach (var engine in previous.Engines.Where(x => x.Options.HasSource))
+            {
+                var next = desired.FirstOrDefault(x => x.Name == engine.Name);
+                if (next is null)
+                {
+                    retired.Add(engine);
+                    if (purgeRemoved.Contains(engine.Name, StringComparer.OrdinalIgnoreCase)) purged.Add(engine.Name);
+                }
+                else if (engine.Options.Repository == next.Repository && engine.Options.Workflow == next.Workflow
+                    && engine.Options.PackagesArtifact == next.PackagesArtifact
+                    && engine.Options.VersionArtifact == next.VersionArtifact)
+                    kept[engine.Name] = engine;
+                else
+                {
+                    retired.Add(engine);
+                    updated.Add(engine.Name);
+                    purged.Add(engine.Name);
+                }
+            }
+            foreach (var engine in retired) await engine.DisposeAsync();
+            foreach (var name in purged)
+                await Task.Run(() => CacheDisk.Purge(CacheLayout.SourceDirectory(_options.CacheDirectory, name)), CancellationToken.None);
+
+            var engines = new List<SourceCatalog>();
+            var failed = new List<FailedSource>();
+            var started = new List<SourceCatalog>();
+            foreach (var options in desired)
+            {
+                if (kept.TryGetValue(options.Name, out var existing))
+                {
+                    engines.Add(existing);
+                    continue;
+                }
+                if (!updated.Contains(options.Name)) added.Add(options.Name);
+                try
+                {
+                    var engine = _createEngine(options);
+                    engines.Add(engine);
+                    started.Add(engine);
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(exception, "Source '{Source}' could not be started and will be unavailable: {Error}",
+                        options.Name, exception.Message);
+                    failed.Add(new FailedSource(options.Name, options.Repository, exception));
+                }
+            }
+            if (engines.Count == 0) engines.Add(_createPlaceholder());
+            Volatile.Write(ref _state, new State(engines, failed));
+            lock (_loggedCollisions) _loggedCollisions.Clear();
+            foreach (var engine in started) engine.StartForcedRefresh();
+            return new SourceReconciliation(added, updated,
+                retired.Select(x => x.Name).Where(x => !updated.Contains(x)).ToArray(), purged,
+                failed.Select(x => new SourceStartFailure(x.Name, x.Error.Message)).ToArray());
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
     }
 
     // Lets the empty-configuration catalog exist without ever contacting GitHub.
@@ -104,7 +214,11 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     public async Task<PublishedPackage[]> GetPackagesAsync(CancellationToken cancellationToken)
     {
-        if (Single) return Stamp(_engines[0], await _engines[0].GetPackagesAsync(cancellationToken));
+        if (Single)
+        {
+            var only = _engines[0];
+            return Stamp(only, await only.GetPackagesAsync(cancellationToken));
+        }
         var results = await RunAsync(engine => engine.GetPackagesAsync(cancellationToken), cancellationToken);
         var merged = new List<PublishedPackage>();
         var seen = new Dictionary<string, string>();
@@ -128,7 +242,11 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     public async Task<BuildEntry[]> GetBuildsAsync(CancellationToken cancellationToken)
     {
-        if (Single) return Stamp(_engines[0], await _engines[0].GetBuildsAsync(cancellationToken));
+        if (Single)
+        {
+            var only = _engines[0];
+            return Stamp(only, await only.GetBuildsAsync(cancellationToken));
+        }
         var results = await RunAsync(engine => engine.GetBuildsAsync(cancellationToken), cancellationToken);
         return results.SelectMany(x => Stamp(x.Engine, x.Result))
             .OrderBy(x => SourceCatalog.BuildVersion(x), PackageRewriter.VersionOrder).ToArray();

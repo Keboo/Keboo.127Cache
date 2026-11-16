@@ -4,7 +4,7 @@ namespace Keboo.LocalCache;
 
 public sealed record SourceInfo(
     string Name, string Repository, string Workflow, string Artifact, string? VersionArtifact, string Status,
-    DateTimeOffset? LastRefreshUtc, string? LastError, string Membership);
+    DateTimeOffset? LastRefreshUtc, string? LastError, string Membership, bool? Editable = null);
 
 // CachedState is "cached" (packages complete on disk), "partial" (some files present) or "notCached".
 // Served is true when the build is part of the current feed; Version is only known once the build was materialized.

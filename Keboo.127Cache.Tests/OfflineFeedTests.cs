@@ -706,7 +706,7 @@ public sealed class OfflineFeedTests : IDisposable
         if (offlineMode) await WaitForHealthErrorAsync(offline.Client, "gh auth status");
         else await RetryUntilHealthyAsync(offline.Client, validateContent: true);
         var catalog = offline.App.Services.GetRequiredService<PackageCatalog>();
-        var engine = ((List<SourceCatalog>)typeof(PackageCatalog).GetField("_engines", BindingFlags.Instance | BindingFlags.NonPublic)!
+        var engine = ((IReadOnlyList<SourceCatalog>)typeof(PackageCatalog).GetProperty("_engines", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(catalog)!).Single();
         var gate = (SemaphoreSlim)typeof(SourceCatalog).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(engine)!;

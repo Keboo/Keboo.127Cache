@@ -118,8 +118,32 @@ internal static class ManagementEndpoints
             }
         });
 
-        api.MapGet("/sources", async (IManagementService management, CancellationToken ct) =>
-            Results.Ok(await management.GetSourcesAsync(ct)));
+        api.MapGet("/sources", async (IManagementService management, ISourceConfigurationService configuration,
+            CancellationToken ct) =>
+        {
+            var editable = (await configuration.GetConfigurationAsync(ct)).IsEditable;
+            return Results.Ok((await management.GetSourcesAsync(ct)).Select(x => x with { Editable = editable }).ToArray());
+        });
+        api.MapGet("/sources/configuration", async (ISourceConfigurationService configuration, HttpContext context,
+            CancellationToken ct) =>
+        {
+            var info = await configuration.GetConfigurationAsync(ct);
+            SetETag(context, info);
+            return Results.Ok(info);
+        });
+        api.MapPost("/sources", async (ISourceConfigurationService configuration, HttpContext context,
+            SourceDefinition? source, CancellationToken ct) =>
+            source is null ? BodyRequired()
+                : SourceChange(context, await configuration.AddAsync(source, ChangeOptions(context), ct), StatusCodes.Status201Created));
+        api.MapPut("/sources/{name}", async (ISourceConfigurationService configuration, HttpContext context, string name,
+            SourceDefinition? source, CancellationToken ct) =>
+            source is null ? BodyRequired()
+                : SourceChange(context, await configuration.UpdateAsync(name, source, ChangeOptions(context), ct)));
+        api.MapDelete("/sources/{name}", async (ISourceConfigurationService configuration, HttpContext context, string name,
+            bool? removeCache, CancellationToken ct) =>
+            SourceChange(context, await configuration.RemoveAsync(name, ChangeOptions(context, removeCache == true), ct)));
+        api.MapPost("/sources/reload", async (ISourceConfigurationService configuration, HttpContext context,
+            CancellationToken ct) => SourceChange(context, await configuration.ReloadAsync(ct)));
         api.MapGet("/builds", async (IManagementService management, string? source, CancellationToken ct) =>
             Results.Ok(await management.GetBuildsAsync(source, ct)));
         api.MapGet("/packages", async (IManagementService management, string? source, CancellationToken ct) =>
@@ -147,6 +171,52 @@ internal static class ManagementEndpoints
 
         api.Map("/{**path}", () => Results.Problem(title: "Not found", detail: "No such management API endpoint.",
             statusCode: StatusCodes.Status404NotFound));
+    }
+
+    private static IResult BodyRequired() => Results.ValidationProblem(
+        new Dictionary<string, string[]> { ["body"] = ["A JSON source definition is required."] });
+
+    private static SourceChangeOptions ChangeOptions(HttpContext context, bool removeCache = false) =>
+        new(context.Request.Headers.IfMatch.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) is { } etag
+            ? SourceConfigurationService.Unquote(etag) : null, removeCache);
+
+    private static void SetETag(HttpContext context, SourceConfigurationInfo info)
+    {
+        if (info.ETag is not null) context.Response.Headers.ETag = "\"" + info.ETag + "\"";
+    }
+
+    // Maps a service result to HTTP: validation errors are field-level (camelCase keys) in a validation problem.
+    private static IResult SourceChange(HttpContext context, SourceChangeResult result, int successStatus = StatusCodes.Status200OK)
+    {
+        SetETag(context, result.Configuration);
+        if (result.Succeeded) return Results.Json(result, JsonSettings.Options, statusCode: successStatus);
+        var extensions = new Dictionary<string, object?> { ["configuration"] = result.Configuration };
+        if (result.CacheRemoval is not null) extensions["removal"] = RemovalResponse.From(result.CacheRemoval);
+        switch (result.Status)
+        {
+            case SourceChangeStatus.Invalid:
+                return Results.ValidationProblem(
+                    result.Errors.ToDictionary(x => char.ToLowerInvariant(x.Key[0]) + x.Key[1..], x => x.Value),
+                    detail: result.Message, title: "The source definition is not valid", extensions: extensions);
+            case SourceChangeStatus.NotFound:
+                return Results.Problem(title: "Not found", detail: result.Message, statusCode: StatusCodes.Status404NotFound,
+                    extensions: extensions);
+            case SourceChangeStatus.Conflict:
+                return Results.Problem(title: "The configuration changed", detail: result.Message,
+                    statusCode: StatusCodes.Status412PreconditionFailed, extensions: extensions);
+            case SourceChangeStatus.Blocked:
+                return Results.Problem(title: "Sources cannot be edited", detail: result.Message,
+                    statusCode: StatusCodes.Status409Conflict, extensions: extensions);
+            case SourceChangeStatus.CacheInUse:
+                return Results.Problem(title: "The cache is in use", detail: result.Message,
+                    statusCode: StatusCodes.Status409Conflict, extensions: extensions);
+            case SourceChangeStatus.ConfigurationError:
+                return Results.Problem(title: "The configuration is invalid", detail: result.Message,
+                    statusCode: StatusCodes.Status409Conflict, extensions: extensions);
+            default:
+                return Results.Problem(title: "The configuration could not be saved", detail: result.Message,
+                    statusCode: StatusCodes.Status500InternalServerError, extensions: extensions);
+        }
     }
 
     private static IResult Removal(RemovalResult result)

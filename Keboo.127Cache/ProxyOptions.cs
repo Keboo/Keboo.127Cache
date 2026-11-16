@@ -51,6 +51,19 @@ public sealed class ProxyOptions
         return options;
     }
 
+    // Re-points the options (and the live mirror used by the first source) at a new list of sources.
+    internal void ApplySources(IReadOnlyList<SourceOptions> sources)
+    {
+        var first = sources.FirstOrDefault();
+        HasSource = first is not null;
+        Name = first?.Name ?? "";
+        Repository = first?.Repository ?? "";
+        Workflow = first?.Workflow ?? "";
+        PackagesArtifact = first?.Artifact ?? "";
+        VersionArtifact = first?.VersionArtifact;
+        ConfiguredSources = sources.ToArray();
+    }
+
     // One options instance per configured source, each rooted at {CacheDirectory}/sources/{Name}.
     internal IReadOnlyList<ProxyOptions> CreateSourceOptions()
     {

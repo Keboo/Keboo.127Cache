@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Keboo.LocalCache.Ui;
 
@@ -5,9 +6,11 @@ namespace Keboo.LocalCache;
 
 public static class ProxyExtensions
 {
-    public static IServiceCollection AddProxy(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddProxy(this IServiceCollection services, IConfiguration configuration,
+        SourceConfigurationLocations? locations = null)
     {
         services.AddLogging();
+        services.TryAddSingleton(locations ?? SourceConfigurationLocations.None);
         services.AddSingleton(provider =>
             CacheConfigurationLoader.Load(configuration, provider.GetRequiredService<ILogger<CacheConfiguration>>()));
         services.AddSingleton(provider => ProxyOptions.FromConfiguration(provider.GetRequiredService<CacheConfiguration>()));
@@ -23,6 +26,12 @@ public static class ProxyExtensions
         services.AddHostedService<CatalogWarmupService>();
         services.AddSingleton<ICacheEvictionService, CacheEvictionService>();
         services.AddSingleton<IManagementService, ManagementService>();
+        services.AddSingleton(provider => new SourceConfigurationService(configuration,
+            provider.GetRequiredService<SourceConfigurationLocations>(), provider.GetRequiredService<PackageCatalog>(),
+            provider.GetRequiredService<ProxyOptions>(), provider.GetRequiredService<ICacheEvictionService>(),
+            provider.GetRequiredService<ILogger<CacheConfiguration>>()));
+        services.AddSingleton<ISourceConfigurationService>(provider => provider.GetRequiredService<SourceConfigurationService>());
+        services.AddHostedService(provider => provider.GetRequiredService<SourceConfigurationService>());
         services.AddHostedService<CacheRetentionService>();
         services.AddExceptionHandler<DiscoveryExceptionHandler>();
         services.AddProblemDetails();
