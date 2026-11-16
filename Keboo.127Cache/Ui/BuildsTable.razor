@@ -20,7 +20,7 @@
             @if (builds.Length == 0)
             {
                 <tbody>
-                    <tr><td colspan="8" class="muted">No builds.</td></tr>
+                    <tr><td colspan="8" class="muted">@(source.Status == "ok" ? "No builds." : "Build discovery is unavailable; no cached builds to show.")</td></tr>
                 </tbody>
             }
             @foreach (var pullRequest in builds.GroupBy(x => x.PullRequest).OrderBy(x => x.Key))

@@ -14,6 +14,8 @@ public static class WebUiExtensions
     public static IServiceCollection AddWebUi(this IServiceCollection services)
     {
         services.AddRazorComponents();
+        services.AddSingleton<OverviewLoader>();
+        services.AddHostedService(provider => provider.GetRequiredService<OverviewLoader>());
         services.AddAntiforgery(options => options.Cookie.Name = ".Keboo.127Cache.Antiforgery");
 
         // Antiforgery tokens need a key ring, which ASP.NET Core would otherwise place under %LOCALAPPDATA% (or the

@@ -34,6 +34,13 @@ public interface IManagementService
     // when the feed cannot currently be enumerated.
     Task<IReadOnlyList<PackageInfo>> GetPackagesAsync(string? source = null, CancellationToken cancellationToken = default);
 
+    // Verified local inventory only: never discovers, downloads or repairs package content.
+    Task<IReadOnlyList<PackageInfo>> GetCachedPackagesAsync(CancellationToken cancellationToken = default);
+
+    // Overview-only background operations await the actual shared work, not the feed's bounded request budget.
+    Task<IReadOnlyList<BuildInfo>> GetOverviewBuildsAsync(CancellationToken cancellationToken = default);
+    Task PrepareOverviewPackagesAsync(string? source = null, CancellationToken cancellationToken = default);
+
     // Rediscovers one source (or all) ignoring the memory cache. Concurrent calls for a source share one discovery.
     Task<RefreshSummary> RefreshAsync(string? source = null, CancellationToken cancellationToken = default);
 }
@@ -55,7 +62,17 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
         return Task.FromResult<IReadOnlyList<SourceInfo>>(result.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    public async Task<IReadOnlyList<BuildInfo>> GetBuildsAsync(string? source = null, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<BuildInfo>> GetBuildsAsync(string? source = null, CancellationToken cancellationToken = default) =>
+        GetBuildsCoreAsync(source, waitForDiscovery: false, cancellationToken);
+
+    public Task<IReadOnlyList<BuildInfo>> GetOverviewBuildsAsync(CancellationToken cancellationToken = default) =>
+        GetBuildsCoreAsync(null, waitForDiscovery: true, cancellationToken);
+
+    public Task PrepareOverviewPackagesAsync(string? source = null, CancellationToken cancellationToken = default) =>
+        Task.WhenAll(Select(source).Select(target => target.PrepareOverviewPackagesAsync(cancellationToken)));
+
+    private async Task<IReadOnlyList<BuildInfo>> GetBuildsCoreAsync(string? source, bool waitForDiscovery,
+        CancellationToken cancellationToken)
     {
         var result = new List<BuildInfo>();
         foreach (var target in Select(source))
@@ -65,7 +82,9 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
             var served = new HashSet<(int, long, int)>();
             try
             {
-                foreach (var run in await target.GetRunArtifactsAsync(cancellationToken))
+                var runs = waitForDiscovery ? await target.GetOverviewRunsAsync(cancellationToken)
+                    : await target.GetRunArtifactsAsync(cancellationToken);
+                foreach (var run in runs)
                     served.Add((run.PullRequest, run.RunId, run.Attempt));
             }
             catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException
@@ -88,7 +107,7 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
                     // Without a version artifact the version comes from the packages, which are read from the cache.
                     try
                     {
-                        var versions = (await target.Packages.GetPackagesAsync(entry, cancellationToken))
+                        var versions = (await target.Packages.GetAvailableOfflineAsync(entry, cancellationToken, allowRepair: false)).Packages
                             .Select(x => (x.Version, x.OriginalVersion)).Distinct().ToArray();
                         if (versions.Length == 1) (version, original) = versions[0];
                     }
@@ -120,6 +139,22 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
                 .Select(x => new PackageVersionInfo(x.Build.Version, x.Build.OriginalVersion, x.Build.SourceName,
                     x.Build.PullRequest, x.Build.RunId, x.Build.Attempt)).ToArray()))
             .ToArray();
+    }
+
+    public async Task<IReadOnlyList<PackageInfo>> GetCachedPackagesAsync(CancellationToken cancellationToken = default)
+    {
+        var packages = new List<(string Id, PackageVersionInfo Version)>();
+        foreach (var target in catalog.Sources)
+            foreach (var build in target.GetCachedBuilds())
+            {
+                var available = await target.Packages.GetAvailableOfflineAsync(build, cancellationToken, allowRepair: false);
+                packages.AddRange(available.Packages.Select(package => (package.Id,
+                    new PackageVersionInfo(package.Version, package.OriginalVersion, target.Name,
+                        build.PullRequest, build.RunId, build.Attempt))));
+            }
+        return packages.GroupBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new PackageInfo(group.First().Id, group.Select(x => x.Version).ToArray())).ToArray();
     }
 
     public async Task<RefreshSummary> RefreshAsync(string? source = null, CancellationToken cancellationToken = default)

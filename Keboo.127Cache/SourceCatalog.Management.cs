@@ -10,6 +10,29 @@ internal sealed partial class SourceCatalog
     // Builds recorded in the on-disk catalog; reading them never contacts the upstream pipeline.
     internal BuildEntry[] GetCachedBuilds() => Volatile.Read(ref _builds).ToArray();
 
+    // The overview already runs off-request, so it must follow discovery/preparation to completion instead of
+    // using the feed's bounded HTTP wait and mistaking a still-running operation for its final result.
+    internal async Task<RunArtifacts[]> GetOverviewRunsAsync(CancellationToken token) =>
+        (await StartRefresh().WaitAsync(token)).Runs;
+
+    internal async Task PrepareOverviewPackagesAsync(CancellationToken token)
+    {
+        var discovery = await StartRefresh().WaitAsync(token);
+        if (discovery.IsStale)
+        {
+            await RequireOfflinePackagesAsync(discovery, token);
+            return;
+        }
+        Task<OnlinePackages>? work;
+        while ((work = StartContentRefresh(discovery)) is null)
+            await WaitForBackgroundWorkAsync(token);
+        var result = await work.WaitAsync(token);
+        if (result.Failure is not null)
+            await RecoverFromContentFailureAsync(result.Failure, discovery, token);
+        else
+            MarkContentHealthy(discovery);
+    }
+
     // Starts a rediscovery that ignores the memory cache. Callers that arrive while one is running share it.
     internal (Task<SourceRefreshOutcome> Work, bool Coalesced) StartForcedRefresh()
     {

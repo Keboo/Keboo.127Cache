@@ -64,7 +64,9 @@ keboo-127cache serve --open
 - **Overview** (`/`): the copyable feed URL, per-source status (repository, workflow, artifact, last
   refresh, error), cache size, and a builds table grouped source, pull request, run with package ids,
   rewritten and original versions, cache state (downloaded, partially downloaded, metadata only), size
-  and age, plus links to the pull request and run on GitHub.
+  and age, plus links to the pull request and run on GitHub. The shell and feed URL load immediately;
+  source discovery, cache inventories and disk usage load in the background with accessible loading states.
+  Opening the overview does not download uncached packages; unknown package ids and versions stay unknown.
 - **Packages** (`/packages`): every package id with its served versions.
 - **Sources** (`/sources`): view the effective source list and writable configuration file, and add, edit, or remove
   sources without restarting the server. Changes are validated, persisted to the writable config layer and hot-applied
@@ -74,8 +76,9 @@ keboo-127cache serve --open
   explicitly removed. Removing a source keeps its cache unless permanent cache deletion is selected. The optional
   VersionArtifact can be cleared by leaving it empty. JSON comments are not preserved when the source list is saved.
 - **Refresh**: a "Refresh all sources" button and a per-source Refresh button rediscover builds from
-  GitHub (same as `POST /api/refresh`). The page shows a busy state while it runs, then the result per
-  source (builds found, or the error) and the updated tables.
+  GitHub, then prepare their packages in the background (the API's `POST /api/refresh` only rediscovers).
+  Existing results stay visible, with discovering/preparing indicators, then the result per source
+  (builds found, or the error) and updated tables. Concurrent overview clients share one operation.
 - **Remove** (`/remove`): each cached build has a Remove link, and "Remove closed-PR builds" removes the
   builds of closed pull requests. Both first show a confirmation (a dry run) with the number of bytes that
   will be reclaimed and, per build, whether it comes back. Removal deletes the cache only: a build of an
@@ -83,10 +86,11 @@ keboo-127cache serve --open
   expired artifacts cannot be restored. The result page lists what was removed.
 
 It is a Blazor Web App (Razor Components) in the same process using static server-side rendering:
-pages work without JavaScript (a small script only adds the Copy button and the refresh busy state; actions are
-plain POST forms protected by ASP.NET Core antiforgery tokens), there is no WebAssembly,
+the bundled script polls overview snapshots while shared, host-owned background work runs, and stops when it finishes.
+Without JavaScript, refresh still starts background work; follow the reload link to see its results.
+Other pages remain static SSR. Actions are plain POST forms protected by ASP.NET Core antiforgery tokens; there is no WebAssembly,
 no Node toolchain and no CDN. The stylesheet and script are embedded in the tool and served from
-`/_ui/`, so the browser makes no external requests. Components call `IManagementService` and
+`/_ui/`, so the browser makes no external requests. Components and the overview worker call `IManagementService` and
 `ICacheEvictionService` directly. The UI owns `/`, `/packages` and `/remove`; the feed, `/api`, `/health` and
 `/builds` keep their routes. UI requests get the same Host (DNS rebinding) and Origin checks as `/api`,
 and the antiforgery key ring is stored in `{CacheDirectory}/.data-protection`, never in the user profile.

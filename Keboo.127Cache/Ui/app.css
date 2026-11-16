@@ -38,3 +38,6 @@ button, a.button { font: inherit; padding: .25rem .7rem; }
 a.button { display: inline-block; margin-left: .5rem; }
 button[disabled] { cursor: progress; }
 form[data-busy] { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+.loading::before { content: ""; display: inline-block; width: .85em; height: .85em; margin-right: .5em; border: 2px solid #8886; border-top-color: currentColor; border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .loading::before { animation: none; } }

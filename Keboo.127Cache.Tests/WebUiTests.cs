@@ -1,8 +1,10 @@
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
+
 using Keboo.LocalCache.Testing;
 using Keboo.LocalCache.Ui;
+
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
@@ -24,6 +26,30 @@ public sealed class WebUiTests
         public IBuildSource Create(ProxyOptions source) => new GitHubActionsBuildSource(source, github);
     }
 
+    private sealed class GatedGitHub(IGitHubClient inner) : IGitHubClient
+    {
+        public TaskCompletionSource DiscoveryEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource DiscoveryRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource DownloadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource DownloadRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken token) =>
+            inner.GetOpenPullRequestsAsync(token);
+        public async Task<IReadOnlyList<WorkflowRun>> GetRunsAsync(CancellationToken token)
+        {
+            DiscoveryEntered.TrySetResult();
+            await DiscoveryRelease.Task.WaitAsync(token);
+            return await inner.GetRunsAsync(token);
+        }
+        public Task<IReadOnlyList<Artifact>> GetArtifactsAsync(long run, CancellationToken token) =>
+            inner.GetArtifactsAsync(run, token);
+        public async Task DownloadAsync(Artifact artifact, string destination, CancellationToken token)
+        {
+            DownloadEntered.TrySetResult();
+            await DownloadRelease.Task.WaitAsync(token);
+            await inner.DownloadAsync(artifact, destination, token);
+        }
+    }
+
     private sealed class Host : IAsyncDisposable
     {
         public required WebApplication App { get; init; }
@@ -33,7 +59,8 @@ public sealed class WebUiTests
         public required FixtureGitHub GitHub { get; init; }
         public PackageCatalog Catalog => App.Services.GetRequiredService<PackageCatalog>();
 
-        public static async Task<Host> StartAsync(PackageRewriteFixture fixture, bool shadowed = false)
+        public static async Task<Host> StartAsync(PackageRewriteFixture fixture, bool shadowed = false,
+            Action<IServiceCollection>? configure = null, Func<IGitHubClient, IGitHubClient>? wrap = null)
         {
             var github = await fixture.CreateGitHubAsync();
             var cache = Path.Combine(fixture.DirectoryPath, "cache");
@@ -64,13 +91,16 @@ public sealed class WebUiTests
             if (shadowed)
                 builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {
-                    ["Sources:0:Name"] = "main", ["Sources:0:Repository"] = "org/shadow",
-                    ["Sources:0:Workflow"] = "build.yml", ["Sources:0:Artifact"] = "packages",
+                    ["Sources:0:Name"] = "main",
+                    ["Sources:0:Repository"] = "org/shadow",
+                    ["Sources:0:Workflow"] = "build.yml",
+                    ["Sources:0:Artifact"] = "packages",
                     ["Sources:0:VersionArtifact"] = "build-version"
                 });
             builder.Services.AddProxy(builder.Configuration,
                 new SourceConfigurationLocations(Path.Combine(fixture.DirectoryPath, "user-config.json"), configFile));
-            builder.Services.AddSingleton<IBuildSourceFactory>(new SharedFactory(github));
+            builder.Services.AddSingleton<IBuildSourceFactory>(new SharedFactory(wrap?.Invoke(github) ?? github));
+            configure?.Invoke(builder.Services);
             var app = builder.Build();
             app.UseExceptionHandler();
             app.MapProxy();
@@ -83,6 +113,18 @@ public sealed class WebUiTests
         {
             using var response = await CatalogTestSynchronization.GetWhenSettledAsync(Client, Catalog, "flat/acme.core/index.json");
             response.EnsureSuccessStatusCode();
+        }
+
+        public async Task<string> OverviewAsync()
+        {
+            await Client.GetStringAsync("");
+            return await SettledOverviewAsync();
+        }
+
+        public async Task<string> SettledOverviewAsync()
+        {
+            await App.Services.GetRequiredService<OverviewLoader>().Completion.WaitAsync(TimeSpan.FromSeconds(15));
+            return await Client.GetStringAsync("_ui/overview");
         }
 
         public async ValueTask DisposeAsync()
@@ -119,7 +161,8 @@ public sealed class WebUiTests
         await using var host = await Host.StartAsync(fixture);
         await host.PopulateAsync();
 
-        using var response = await host.Client.GetAsync("");
+        await host.OverviewAsync();
+        using var response = await host.Client.GetAsync("_ui/overview");
         var html = await response.Content.ReadAsStringAsync();
 
         await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
@@ -275,13 +318,254 @@ public sealed class WebUiTests
         host.Client.PostAsync(url, new FormUrlEncodedContent(new[] { ("_handler", handler), ("__RequestVerificationToken", token) }
             .Concat(fields).Select(x => new KeyValuePair<string, string>(x.Item1, x.Item2))));
 
+    private static SourceInfo OverviewSource => new("main", "org/main", "build.yml", "packages", null,
+        "ok", null, null, "current");
+
+    private static BuildInfo OverviewBuild(long run, string state = "notCached") =>
+        new("main", 755, run, 1, null, null, null, 0, state, true, null);
+
+    private static Mock<IManagementService> OverviewManagement()
+    {
+        var management = new Mock<IManagementService>(MockBehavior.Strict);
+        management.Setup(x => x.GetSourcesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync([OverviewSource]);
+        management.Setup(x => x.GetCachedPackagesAsync(It.IsAny<CancellationToken>())).ReturnsAsync([]);
+        return management;
+    }
+
+    [Test]
+    public async Task RealOverviewWorkOutlivesFeedRequestBudgetsAndOnlyExplicitRefreshDownloadsArtifacts()
+    {
+        using var fixture = new PackageRewriteFixture();
+        GatedGitHub upstream = null!;
+        await using var host = await Host.StartAsync(fixture, wrap: inner => upstream = new GatedGitHub(inner));
+        var management = host.App.Services.GetRequiredService<IManagementService>();
+        var loader = host.App.Services.GetRequiredService<OverviewLoader>();
+        await upstream.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var initial = await host.Client.GetStringAsync("").WaitAsync(TimeSpan.FromSeconds(15));
+        await Assert.That(initial).Contains("data-busy=\"true\"");
+        await Assert.That(upstream.DiscoveryRelease.Task.IsCompleted).IsFalse();
+
+        // The script/API read uses its existing one-second feed budget; the overview must still be following discovery.
+        await management.GetBuildsAsync();
+        await Assert.That(loader.Completion.IsCompleted).IsFalse();
+        upstream.DiscoveryRelease.SetResult();
+        var discovered = await host.SettledOverviewAsync();
+        await Assert.That(discovered).Contains("Run 100");
+        await Assert.That(discovered).Contains("Metadata only");
+        await Assert.That(discovered).Contains("unknown");
+        await Assert.That(host.GitHub.Downloads).IsEqualTo(0);
+        await Assert.That(upstream.DownloadEntered.Task.IsCompleted).IsFalse();
+
+        using var refresh = await PostFormAsync(host, "", "refresh", Token(discovered), ("source", "main"))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        refresh.EnsureSuccessStatusCode();
+        await upstream.DownloadEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var preparing = await host.Client.GetStringAsync("_ui/overview");
+        await Assert.That(preparing).Contains("Preparing packages");
+        try { await management.GetPackagesAsync(); }
+        catch (DiscoveryUnavailableException) { }
+        await Assert.That(loader.Completion.IsCompleted).IsFalse();
+        await Assert.That(upstream.DownloadRelease.Task.IsCompleted).IsFalse();
+
+        upstream.DownloadRelease.SetResult();
+        var ready = await host.SettledOverviewAsync();
+        await Assert.That(ready).Contains("Downloaded");
+        await Assert.That(ready).Contains("<li>acme.core</li>", StringComparison.OrdinalIgnoreCase);
+        await Assert.That(ready).Contains("1.2.0-beta.3.pr.755.run.");
+        await Assert.That(ready).Contains("Refresh finished.");
+        await Assert.That(host.GitHub.Downloads).IsEqualTo(2);
+        await host.OverviewAsync();
+        await Assert.That(host.GitHub.Downloads).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task OverviewCompletesItsResponseBeforeDiscoveryAndDiskWorkAndPollsProgressWithoutDownloading()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var discovery = new TaskCompletionSource<IReadOnlyList<BuildInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var discoveryEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inventoryRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disk = new TaskCompletionSource<CacheDiskUsage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var management = OverviewManagement();
+        management.Setup(x => x.GetOverviewBuildsAsync(It.IsAny<CancellationToken>())).Returns((CancellationToken token) =>
+        {
+            discoveryEntered.TrySetResult();
+            return discovery.Task.WaitAsync(token);
+        });
+        management.Setup(x => x.GetCachedPackagesAsync(It.IsAny<CancellationToken>())).ReturnsAsync(() =>
+        {
+            inventoryRead.TrySetResult();
+            return [];
+        });
+        var eviction = new Mock<ICacheEvictionService>(MockBehavior.Strict);
+        eviction.Setup(x => x.GetDiskUsageAsync(It.IsAny<CancellationToken>()))
+            .Returns((CancellationToken token) => disk.Task.WaitAsync(token));
+        await using var host = await Host.StartAsync(fixture, configure: services =>
+        {
+            services.AddSingleton(management.Object);
+            services.AddSingleton(eviction.Object);
+        });
+
+        // GetStringAsync buffers the ENTIRE response, not just headers or the first streamed chunk.
+        var initial = await host.Client.GetStringAsync("").WaitAsync(TimeSpan.FromSeconds(15));
+        await discoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await Assert.That(discovery.Task.IsCompleted).IsFalse();
+        await Assert.That(disk.Task.IsCompleted).IsFalse();
+        await Assert.That(initial).Contains("id=\"feed-url\"");
+        await Assert.That(initial).Contains("href=\"/packages\"");
+        await Assert.That(initial).Contains("data-busy=\"true\"");
+        await Assert.That(initial).Contains("aria-busy=\"true\"");
+        await Assert.That(initial).DoesNotContain("No builds.");
+
+        var pending = await host.Client.GetStringAsync("_ui/overview");
+        await Assert.That(pending).Contains("<th scope=\"row\">main</th>");
+        await Assert.That(pending).Contains("Scanning");
+        await Assert.That(pending).Contains("Discovering completed builds");
+        await host.Client.GetStringAsync(""); // Another client/navigation joins, rather than starting duplicate work.
+        management.Verify(x => x.GetOverviewBuildsAsync(It.IsAny<CancellationToken>()), Times.Once);
+
+        discovery.SetResult([OverviewBuild(101)]);
+        await inventoryRead.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var partial = await host.Client.GetStringAsync("_ui/overview");
+        await Assert.That(partial).Contains("Run 101");
+        await Assert.That(partial).Contains("Metadata only");
+        await Assert.That(partial).Contains("data-busy=\"true\"");
+        await Assert.That(partial).Contains("Scanning");
+
+        disk.SetResult(new CacheDiskUsage(123, []));
+        var complete = await host.SettledOverviewAsync();
+        await Assert.That(complete).Contains("Overview ready.");
+        await Assert.That(complete).Contains("data-busy=\"false\"");
+        await Assert.That(complete).Contains("123 B");
+        management.Verify(x => x.GetPackagesAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Test]
+    public async Task OverviewDisplaysBackgroundFailureAndRetryCanFinishWithAnAuthoritativeEmptyResult()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var discovery = new TaskCompletionSource<IReadOnlyList<BuildInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var management = OverviewManagement();
+        management.SetupSequence(x => x.GetOverviewBuildsAsync(It.IsAny<CancellationToken>()))
+            .Returns(discovery.Task).ReturnsAsync([]).ReturnsAsync([]);
+        management.Setup(x => x.RefreshAsync(null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RefreshSummary(true, []));
+        management.Setup(x => x.PrepareOverviewPackagesAsync(null, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        await using var host = await Host.StartAsync(fixture, configure: services => services.AddSingleton(management.Object));
+
+        var loading = await host.Client.GetStringAsync("").WaitAsync(TimeSpan.FromSeconds(15));
+        await Assert.That(loading).Contains("data-busy=\"true\"");
+        discovery.SetException(new IOException("discovery is offline"));
+        var failed = await host.SettledOverviewAsync();
+        await Assert.That(failed).Contains("role=\"alert\"");
+        await Assert.That(failed).Contains("discovery is offline");
+        await Assert.That(failed).Contains("Builds unavailable.");
+        await Assert.That(failed).DoesNotContain("No builds.");
+        using var retry = await PostFormAsync(host, "", "refresh", Token(failed), ("source", ""));
+        retry.EnsureSuccessStatusCode();
+        var empty = await host.SettledOverviewAsync();
+        await Assert.That(empty).Contains("Refresh finished.");
+        await Assert.That(empty).Contains("No builds.");
+        await Assert.That(empty).DoesNotContain("discovery is offline");
+    }
+
+    [Test]
+    public async Task RefreshReturnsBeforeDiscoveryAndPreparationRetainsResultsAndCoalescesAcrossClients()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var discovery = new TaskCompletionSource<RefreshSummary>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var discoveryEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var preparation = new TaskCompletionSource<IReadOnlyList<PackageInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var preparationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var management = OverviewManagement();
+        management.SetupSequence(x => x.GetOverviewBuildsAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync([OverviewBuild(100, "cached")])
+            .ReturnsAsync([OverviewBuild(100, "cached"), OverviewBuild(101)])
+            .ReturnsAsync([OverviewBuild(100, "cached"), OverviewBuild(101, "cached")]);
+        management.Setup(x => x.RefreshAsync(null, It.IsAny<CancellationToken>())).Returns((string? _, CancellationToken token) =>
+        {
+            discoveryEntered.TrySetResult();
+            return discovery.Task.WaitAsync(token);
+        });
+        management.Setup(x => x.PrepareOverviewPackagesAsync(null, It.IsAny<CancellationToken>())).Returns((string? _, CancellationToken token) =>
+        {
+            preparationEntered.TrySetResult();
+            return preparation.Task.WaitAsync(token);
+        });
+        await using var host = await Host.StartAsync(fixture, configure: services => services.AddSingleton(management.Object));
+        var before = await host.OverviewAsync();
+        await Assert.That(before).Contains("Run 100");
+        await Assert.That(before).Contains("Downloaded");
+
+        using var refresh = await PostFormAsync(host, "", "refresh", Token(before), ("source", ""))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        refresh.EnsureSuccessStatusCode();
+        var refreshing = await refresh.Content.ReadAsStringAsync();
+        await discoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await Assert.That(discovery.Task.IsCompleted).IsFalse();
+        await Assert.That(refreshing).Contains("Run 100");
+        await Assert.That(refreshing).Contains("Downloaded");
+        await Assert.That(refreshing).Contains("Discovering completed builds");
+        await Assert.That(refreshing).Contains("disabled");
+
+        using var duplicate = await PostFormAsync(host, "", "refresh", Token(refreshing), ("source", ""));
+        duplicate.EnsureSuccessStatusCode();
+        await host.Client.GetStringAsync("");
+        management.Verify(x => x.RefreshAsync(null, It.IsAny<CancellationToken>()), Times.Once);
+        discovery.SetResult(new RefreshSummary(true, [new SourceRefreshResult("main", true, 2, null, null, false)]));
+        await preparationEntered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var preparing = await host.Client.GetStringAsync("_ui/overview");
+        await Assert.That(preparation.Task.IsCompleted).IsFalse();
+        await Assert.That(preparing).Contains("Preparing packages");
+        await Assert.That(preparing).Contains("Run 100");
+        await Assert.That(preparing).Contains("Run 101");
+        await Assert.That(preparing).Contains("Metadata only");
+        await Assert.That(preparing).Contains("data-busy=\"true\"");
+        preparation.SetResult([]);
+        var finished = await host.SettledOverviewAsync();
+        await Assert.That(finished).Contains("Refresh finished.");
+        await Assert.That(finished).Contains("2 build(s) found");
+        await Assert.That(finished).Contains("Run 101");
+        await Assert.That(finished).DoesNotContain("Metadata only");
+        management.Verify(x => x.PrepareOverviewPackagesAsync(null, It.IsAny<CancellationToken>()), Times.Once);
+        management.Verify(x => x.GetOverviewBuildsAsync(It.IsAny<CancellationToken>()), Times.Exactly(3));
+    }
+
+    [Test]
+    public async Task HostShutdownCancelsAndDrainsOverviewWork()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var management = OverviewManagement();
+        management.Setup(x => x.GetOverviewBuildsAsync(It.IsAny<CancellationToken>()))
+            .Returns(async (CancellationToken token) =>
+            {
+                entered.SetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    cancelled.SetResult();
+                    throw;
+                }
+                return Array.Empty<BuildInfo>();
+            });
+        await using var host = await Host.StartAsync(fixture, configure: services => services.AddSingleton(management.Object));
+        await host.Client.GetStringAsync("");
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await host.App.StopAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await Assert.That(host.App.Services.GetRequiredService<OverviewLoader>().Completion.IsCompletedSuccessfully).IsTrue();
+    }
+
     [Test]
     public async Task RefreshButtonsPostWithAntiforgeryAndShowTheResultPerSource()
     {
         using var fixture = new PackageRewriteFixture();
         await using var host = await Host.StartAsync(fixture);
         await host.PopulateAsync();
-        var page = await host.Client.GetStringAsync("");
+        var page = await host.OverviewAsync();
 
         await Assert.That(page).Contains("Refresh all sources");
         await Assert.That(page).Contains("name=\"source\" value=\"main\"");
@@ -290,7 +574,7 @@ public sealed class WebUiTests
         var token = Token(page);
 
         using var one = await PostFormAsync(host, "", "refresh", token, ("source", "main"));
-        var oneHtml = await one.Content.ReadAsStringAsync();
+        var oneHtml = await host.SettledOverviewAsync();
         await Assert.That(one.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(oneHtml).Contains("Refresh finished.");
         await Assert.That(oneHtml).Contains("<strong>main</strong>");
@@ -298,7 +582,7 @@ public sealed class WebUiTests
         await Assert.That(oneHtml).Contains("Downloaded");
 
         using var all = await PostFormAsync(host, "", "refresh", token, ("source", ""));
-        await Assert.That(await all.Content.ReadAsStringAsync()).Contains("Refresh finished.");
+        await Assert.That(await host.SettledOverviewAsync()).Contains("Refresh finished.");
 
         using var forged = await host.Client.PostAsync("", new FormUrlEncodedContent([new("_handler", "refresh"), new("source", "main")]));
         await Assert.That(forged.StatusCode).IsEqualTo(HttpStatusCode.BadRequest);
@@ -310,14 +594,14 @@ public sealed class WebUiTests
         using var fixture = new PackageRewriteFixture();
         await using var host = await Host.StartAsync(fixture);
         await host.PopulateAsync();
-        var token = Token(await host.Client.GetStringAsync(""));
+        var token = Token(await host.OverviewAsync());
 
         using var response = await PostFormAsync(host, "", "refresh", token, ("source", "nope"));
-        var html = await response.Content.ReadAsStringAsync();
+        var html = await host.SettledOverviewAsync();
 
         await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(html).Contains("role=\"alert\"");
-        await Assert.That(html).Contains("Refresh failed:");
+        await Assert.That(html).Contains("Could not update the overview:");
         await Assert.That(html).Contains("Source &#x27;nope&#x27; is not configured");
     }
 
@@ -485,7 +769,7 @@ public sealed class WebUiTests
         await using var host = await Host.StartAsync(fixture);
         await host.PopulateAsync();
         const string Url = "remove?scope=build&source=main&run=100&attempt=1";
-        var overview = await host.Client.GetStringAsync("");
+        var overview = await host.OverviewAsync();
         await Assert.That(overview).Contains("href=\"/remove?scope=build&amp;source=main&amp;run=100&amp;attempt=1\"");
         await Assert.That(overview).Contains("Remove closed-PR builds");
         var expected = UiFormat.Size((await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync()).Single().SizeBytes);
@@ -509,8 +793,8 @@ public sealed class WebUiTests
         var afterRemoval = await host.App.Services.GetRequiredService<IManagementService>().GetBuildsAsync();
         await Assert.That(afterRemoval.Single().CachedState).IsEqualTo("notCached");
 
-        using var refreshed = await PostFormAsync(host, "", "refresh", Token(await host.Client.GetStringAsync("")), ("source", "main"));
-        var after = await refreshed.Content.ReadAsStringAsync();
+        using var refreshed = await PostFormAsync(host, "", "refresh", Token(await host.OverviewAsync()), ("source", "main"));
+        var after = await host.SettledOverviewAsync();
         await Assert.That(after).Contains("Refresh finished.");
         await Assert.That(after).Contains("Downloaded");
         await Assert.That(after).DoesNotContain("Metadata only");
