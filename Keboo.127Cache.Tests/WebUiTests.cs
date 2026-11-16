@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.RegularExpressions;
+using System.Text.Json.Nodes;
 using Keboo.LocalCache.Testing;
 using Keboo.LocalCache.Ui;
 using Microsoft.AspNetCore.Antiforgery;
@@ -28,31 +29,54 @@ public sealed class WebUiTests
         public required WebApplication App { get; init; }
         public required HttpClient Client { get; init; }
         public required string CacheDirectory { get; init; }
+        public required string ConfigFile { get; init; }
         public required FixtureGitHub GitHub { get; init; }
         public PackageCatalog Catalog => App.Services.GetRequiredService<PackageCatalog>();
 
-        public static async Task<Host> StartAsync(PackageRewriteFixture fixture)
+        public static async Task<Host> StartAsync(PackageRewriteFixture fixture, bool shadowed = false)
         {
             var github = await fixture.CreateGitHubAsync();
             var cache = Path.Combine(fixture.DirectoryPath, "cache");
+            var configFile = Path.Combine(fixture.DirectoryPath, "ui-config.json");
+            await File.WriteAllTextAsync(configFile, """
+                {
+                  "Sources": [
+                    {
+                      "Name": "main",
+                      "Type": "GitHubActions",
+                      "Repository": "org/main",
+                      "Workflow": "build.yml",
+                      "Artifact": "packages",
+                      "VersionArtifact": "build-version"
+                    }
+                  ]
+                }
+                """);
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = fixture.DirectoryPath });
             builder.WebHost.UseUrls("http://127.0.0.1:0");
+            ConfigurationFiles.AddUserAndExplicitConfiguration(builder.Configuration,
+                new FileInfo(configFile), Path.Combine(fixture.DirectoryPath, "user-config.json"));
             builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Server:CacheDirectory"] = cache,
-                ["Sources:0:Name"] = "main", ["Sources:0:Repository"] = "org/main",
-                ["Sources:0:Workflow"] = "build.yml", ["Sources:0:Artifact"] = "packages",
-                ["Sources:0:VersionArtifact"] = "build-version"
+                ["Server:CacheDirectory"] = cache
             });
             builder.Logging.ClearProviders();
-            builder.Services.AddProxy(builder.Configuration);
+            if (shadowed)
+                builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Sources:0:Name"] = "main", ["Sources:0:Repository"] = "org/shadow",
+                    ["Sources:0:Workflow"] = "build.yml", ["Sources:0:Artifact"] = "packages",
+                    ["Sources:0:VersionArtifact"] = "build-version"
+                });
+            builder.Services.AddProxy(builder.Configuration,
+                new SourceConfigurationLocations(Path.Combine(fixture.DirectoryPath, "user-config.json"), configFile));
             builder.Services.AddSingleton<IBuildSourceFactory>(new SharedFactory(github));
             var app = builder.Build();
             app.UseExceptionHandler();
             app.MapProxy();
             await app.StartAsync();
             var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
-            return new Host { App = app, Client = client, CacheDirectory = cache, GitHub = github };
+            return new Host { App = app, Client = client, CacheDirectory = cache, ConfigFile = configFile, GitHub = github };
         }
 
         public async Task PopulateAsync()
@@ -241,6 +265,12 @@ public sealed class WebUiTests
         return match.Success ? System.Net.WebUtility.HtmlDecode(match.Groups[1].Value) : throw new InvalidOperationException("No antiforgery token in the page.");
     }
 
+    private static string HiddenValue(string html, string name)
+    {
+        var match = Regex.Match(html, $"name=\"{Regex.Escape(name)}\"[^>]*value=\"([^\"]*)\"");
+        return match.Success ? System.Net.WebUtility.HtmlDecode(match.Groups[1].Value) : throw new InvalidOperationException($"No {name} field in the page.");
+    }
+
     private static Task<HttpResponseMessage> PostFormAsync(Host host, string url, string handler, string token, params (string, string)[] fields) =>
         host.Client.PostAsync(url, new FormUrlEncodedContent(new[] { ("_handler", handler), ("__RequestVerificationToken", token) }
             .Concat(fields).Select(x => new KeyValuePair<string, string>(x.Item1, x.Item2))));
@@ -289,6 +319,161 @@ public sealed class WebUiTests
         await Assert.That(html).Contains("role=\"alert\"");
         await Assert.That(html).Contains("Refresh failed:");
         await Assert.That(html).Contains("Source &#x27;nope&#x27; is not configured");
+    }
+
+    [Test]
+    public async Task SourcesPageAddsEditsAndRemovesPersistedSourcesAndHotAppliesChanges()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+
+        var page = await host.Client.GetStringAsync("sources");
+        await Assert.That(page).Contains("Manage sources");
+        await Assert.That(page).Contains("ui-config.json");
+        await Assert.That(page).Contains("main");
+        await Assert.That(page).Contains("Version artifact (optional)");
+        await Assert.That(page).Contains("Add source");
+
+        using var add = await PostFormAsync(host, "sources", "add", Token(page),
+            ("Name", "extra"), ("Type", "GitHubActions"), ("Repository", "org/extra"),
+            ("Workflow", "ci.yml"), ("Artifact", "pkgs"), ("VersionArtifact", "extra-version"),
+            ("ExpectedETag", HiddenValue(page, "ExpectedETag")));
+        var addedHtml = await add.Content.ReadAsStringAsync();
+        await Assert.That(add.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(addedHtml).Contains("Source added and applied to the running feed.");
+        await Assert.That(host.Catalog.SourceNames.ToArray()).IsEquivalentTo(new[] { "main", "extra" });
+        var addedConfig = JsonNode.Parse(await File.ReadAllTextAsync(host.ConfigFile))!.AsObject();
+        var extra = addedConfig["Sources"]!.AsArray().Single(x => x!["Name"]!.GetValue<string>() == "extra");
+        await Assert.That(extra!["VersionArtifact"]!.GetValue<string>()).IsEqualTo("extra-version");
+
+        var editPage = await host.Client.GetStringAsync("sources?edit=main");
+        await Assert.That(editPage).Contains("clears this source&#x27;s cache");
+        var mainCache = CacheLayout.SourceDirectory(host.CacheDirectory, "main");
+        Directory.CreateDirectory(mainCache);
+        var cacheMarker = Path.Combine(mainCache, "marker.txt");
+        await File.WriteAllTextAsync(cacheMarker, "cached");
+        using var edit = await PostFormAsync(host, "sources?edit=main", "edit", Token(editPage),
+            ("OriginalName", "main"), ("Name", "main"), ("Type", "GitHubActions"),
+            ("Repository", "org/changed"), ("Workflow", "build.yml"), ("Artifact", "packages"),
+            ("VersionArtifact", ""), ("ExpectedETag", HiddenValue(editPage, "ExpectedETag")));
+        var editedHtml = await edit.Content.ReadAsStringAsync();
+        await Assert.That(edit.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(editedHtml).Contains("Source saved and applied to the running feed.");
+        await Assert.That(File.Exists(cacheMarker)).IsFalse();
+        await Assert.That(host.Catalog.Sources.Single(x => x.Name == "main").Options.Repository).IsEqualTo("org/changed");
+        var editedConfig = JsonNode.Parse(await File.ReadAllTextAsync(host.ConfigFile))!.AsObject();
+        var main = editedConfig["Sources"]!.AsArray().Single(x => x!["Name"]!.GetValue<string>() == "main");
+        await Assert.That(main!["VersionArtifact"]).IsNull();
+
+        var extraCache = CacheLayout.SourceDirectory(host.CacheDirectory, "extra");
+        Directory.CreateDirectory(extraCache);
+        var oldCacheMarker = Path.Combine(extraCache, "marker.txt");
+        await File.WriteAllTextAsync(oldCacheMarker, "old cached builds");
+        var renamePage = await host.Client.GetStringAsync("sources?edit=extra");
+        using var rename = await PostFormAsync(host, "sources?edit=extra", "edit", Token(renamePage),
+            ("OriginalName", "extra"), ("Name", "renamed"), ("Type", "GitHubActions"),
+            ("Repository", "org/extra"), ("Workflow", "ci.yml"), ("Artifact", "pkgs"),
+            ("VersionArtifact", "extra-version"), ("ExpectedETag", HiddenValue(renamePage, "ExpectedETag")));
+        await Assert.That(rename.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That((await rename.Content.ReadAsStringAsync())).Contains("Source saved and applied to the running feed.");
+        await Assert.That(host.Catalog.SourceNames.ToArray()).IsEquivalentTo(new[] { "main", "renamed" });
+        await Assert.That(File.Exists(oldCacheMarker)).IsTrue();
+
+        var removePage = await host.Client.GetStringAsync("sources?remove=renamed");
+        await Assert.That(removePage).Contains("Also permanently delete this source&#x27;s cached builds");
+        var renamedCache = CacheLayout.SourceDirectory(host.CacheDirectory, "renamed");
+        Directory.CreateDirectory(renamedCache);
+        await File.WriteAllTextAsync(Path.Combine(renamedCache, "marker.txt"), "cached");
+        using var remove = await PostFormAsync(host, "sources?remove=renamed", "remove", Token(removePage),
+            ("RemoveName", "renamed"), ("ExpectedETag", HiddenValue(removePage, "ExpectedETag")), ("RemoveCache", "true"));
+        var removedHtml = await remove.Content.ReadAsStringAsync();
+        await Assert.That(remove.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(removedHtml).Contains("Source removed from the configuration and running feed.");
+        await Assert.That(host.Catalog.SourceNames.ToArray()).IsEquivalentTo(new[] { "main" });
+        await Assert.That(Directory.Exists(renamedCache)).IsFalse();
+        await Assert.That(File.Exists(oldCacheMarker)).IsTrue();
+        var removedConfig = JsonNode.Parse(await File.ReadAllTextAsync(host.ConfigFile))!.AsObject();
+        await Assert.That(removedConfig["Sources"]!.AsArray().Select(x => x!["Name"]!.GetValue<string>()).ToArray())
+            .IsEquivalentTo(new[] { "main" });
+    }
+
+    [Test]
+    public async Task SourcesPageShowsFieldValidationAndRejectsMissingAntiforgeryToken()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+        var page = await host.Client.GetStringAsync("sources");
+        var fields = new[]
+        {
+            ("Name", "CON"), ("Type", "AzureDevOps"), ("Repository", "not-a-repo"),
+            ("Workflow", "dir/build.yml"), ("Artifact", " "), ("VersionArtifact", ""),
+            ("ExpectedETag", HiddenValue(page, "ExpectedETag"))
+        };
+
+        using var invalid = await PostFormAsync(host, "sources", "add", Token(page), fields);
+        var invalidHtml = await invalid.Content.ReadAsStringAsync();
+        await Assert.That(invalid.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(invalidHtml).Contains("source-name-error");
+        await Assert.That(invalidHtml).Contains("source-type-error");
+        await Assert.That(invalidHtml).Contains("source-repository-error");
+        await Assert.That(invalidHtml).Contains("source-workflow-error");
+        await Assert.That(invalidHtml).Contains("source-artifact-error");
+        await Assert.That(invalidHtml).Contains("aria-invalid=\"True\"");
+        await Assert.That(host.Catalog.SourceNames.ToArray()).IsEquivalentTo(new[] { "main" });
+
+        using var forged = await host.Client.PostAsync("sources", new FormUrlEncodedContent(
+            [new("_handler", "add"), new("Name", "forged"), new("Type", "GitHubActions")]));
+        await Assert.That(forged.StatusCode).IsEqualTo(HttpStatusCode.BadRequest);
+    }
+
+    [Test]
+    public async Task SourcesPageWarnsWhenConfigurationIsShadowed()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture, shadowed: true);
+
+        var html = await host.Client.GetStringAsync("sources");
+
+        await Assert.That(html).Contains("higher-precedence configuration layer shadows this file");
+        await Assert.That(html).Contains("MemoryConfigurationProvider");
+        await Assert.That(html).Contains("org/shadow");
+        await Assert.That(html).Contains("Read only");
+        await Assert.That(html).DoesNotContain("href=\"/sources?edit=main\"");
+    }
+
+    [Test]
+    public async Task SourcesPageRejectsStaleEtagsAndCanReloadExternalChanges()
+    {
+        using var fixture = new PackageRewriteFixture();
+        await using var host = await Host.StartAsync(fixture);
+        var page = await host.Client.GetStringAsync("sources");
+        var staleTag = HiddenValue(page, "ExpectedETag");
+        await File.WriteAllTextAsync(host.ConfigFile, """
+            {
+              "Sources": [
+                { "Name": "main", "Repository": "org/main", "Workflow": "build.yml", "Artifact": "packages" },
+                { "Name": "external", "Repository": "org/external", "Workflow": "build.yml", "Artifact": "packages" }
+              ]
+            }
+            """);
+
+        using var stale = await PostFormAsync(host, "sources", "add", Token(page),
+            ("Name", "stale"), ("Type", "GitHubActions"), ("Repository", "org/stale"),
+            ("Workflow", "build.yml"), ("Artifact", "packages"), ("ExpectedETag", staleTag));
+        var conflictHtml = await stale.Content.ReadAsStringAsync();
+        await Assert.That(stale.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(conflictHtml).Contains("changed since it was read");
+        await Assert.That(conflictHtml).Contains("Review the current configuration");
+        await Assert.That(JsonNode.Parse(await File.ReadAllTextAsync(host.ConfigFile))!["Sources"]!.AsArray().Count)
+            .IsEqualTo(2);
+
+        var reloadPage = await host.Client.GetStringAsync("sources");
+        await Assert.That(reloadPage).Contains("The configuration file changed outside this server.");
+        using var reload = await PostFormAsync(host, "sources", "reload", Token(reloadPage));
+        var reloadedHtml = await reload.Content.ReadAsStringAsync();
+        await Assert.That(reload.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(reloadedHtml).Contains("Configuration reloaded and applied to the running feed.");
+        await Assert.That(host.Catalog.SourceNames.ToArray()).IsEquivalentTo(new[] { "main", "external" });
     }
 
     [Test]

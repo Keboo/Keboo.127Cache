@@ -37,8 +37,8 @@ public static class WebUiExtensions
         return services;
     }
 
-    // Pages live at / and /packages. The feed (/v3, /flat, /registration, /query, /autocomplete), /api, /health and the
-    // script-compatible /builds endpoint keep their routes; the UI never claims those paths.
+    // Pages live at /, /packages and /sources. The feed (/v3, /flat, /registration, /query, /autocomplete), /api,
+    // /health and the script-compatible /builds endpoint keep their routes; the UI never claims those paths.
     public static void MapWebUi(this WebApplication app)
     {
         var options = app.Services.GetRequiredService<ProxyOptions>();
