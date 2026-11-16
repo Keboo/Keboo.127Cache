@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 using NuGet.Common;
 using NuGet.Configuration;
@@ -33,11 +34,11 @@ public sealed class ProxyTests : IAsyncDisposable
     private readonly List<PackageCatalog> _catalogs = [];
     private PackageCatalog CreateCatalog()
     {
-        var catalog = new PackageCatalog(_options, _github, _memoryCache, _artifacts, CreatePackageCache());
+        var catalog = new PackageCatalog(Options.Create(_options), _github, _memoryCache, _artifacts, CreatePackageCache());
         _catalogs.Add(catalog);
         return catalog;
     }
-    private PackageCache CreatePackageCache() => new(_options, _artifacts);
+    private PackageCache CreatePackageCache() => new(Options.Create(_options), _artifacts);
     private static Task<BuildEntry[]> GetSettledBuildsAsync(PackageCatalog catalog) =>
         CatalogTestSynchronization.WhenSettledAsync(catalog, () => catalog.GetBuildsAsync(Cancellation));
     private static Task<PublishedPackage[]> GetSettledPackagesAsync(PackageCatalog catalog) =>
@@ -55,7 +56,7 @@ public sealed class ProxyTests : IAsyncDisposable
             CacheDirectory = Path.Combine(_directory, "cache"),
             PullRequests = [755]
         };
-        _artifacts = new ArtifactCache(_options, _github);
+        _artifacts = new ArtifactCache(Options.Create(_options), _github);
     }
 
     [Test]
@@ -362,7 +363,7 @@ public sealed class ProxyTests : IAsyncDisposable
         app.MapProxy();
         await app.StartAsync(Cancellation);
         var baseUrl = await Assert.That(app.Urls).HasSingleItem();
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         options.BaseUrl = baseUrl;
         await Assert.That(options.RunIds).IsEmpty();
 
@@ -727,7 +728,7 @@ public sealed class ProxyTests : IAsyncDisposable
         using var client = CreateHttpClient(app);
         await GetOnlyVersionAsync(app, client, "velopack");
         await GetOnlyVersionAsync(app, client, "example.plugin");
-        app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
+        app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds = [99];
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
         var catalog = app.Services.GetRequiredService<PackageCatalog>();
@@ -751,7 +752,7 @@ public sealed class ProxyTests : IAsyncDisposable
         await using var app = await StartHttpFeedAsync();
         using var client = CreateHttpClient(app);
         var version = await GetOnlyVersionAsync(app, client, "velopack");
-        app.Services.GetRequiredService<ProxyOptions>().RunIds = [99];
+        app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds = [99];
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
         using var versions = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
@@ -800,7 +801,7 @@ public sealed class ProxyTests : IAsyncDisposable
             app.MapProxy();
             await app.StartAsync(Cancellation);
             _options.BaseUrl = await Assert.That(app.Urls).HasSingleItem();
-            app.Services.GetRequiredService<ProxyOptions>().BaseUrl = _options.BaseUrl;
+            app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl = _options.BaseUrl;
             if (prepareContent)
                 await WaitForPackageAsync(app.Services.GetRequiredService<PackageCatalog>(), "Velopack");
             started = true;

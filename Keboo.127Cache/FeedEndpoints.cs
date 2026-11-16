@@ -1,4 +1,5 @@
 using System.Globalization;
+using Microsoft.Extensions.Options;
 using NuGet.Packaging;
 using NuGet.Versioning;
 
@@ -35,8 +36,9 @@ public static class FeedEndpoints
                     : Results.File(path, "application/octet-stream", enableRangeProcessing: true);
             });
         app.MapMethods("/registration/{id}/index.json", ["GET", "HEAD"],
-            async (string id, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
+            async (string id, IOptions<ProxyOptions> proxyOptions, PackageCatalog catalog, CancellationToken ct) =>
             {
+                var options = proxyOptions.Value;
                 var numericBuilds = BuildsFor(await catalog.GetPackagesAsync(ct), id);
                 var builds = numericBuilds
                     .OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
@@ -63,8 +65,9 @@ public static class FeedEndpoints
                 });
             });
         app.MapMethods("/registration/{id}/page/{version}.json", ["GET", "HEAD"],
-            async (string id, string version, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
+            async (string id, string version, IOptions<ProxyOptions> proxyOptions, PackageCatalog catalog, CancellationToken ct) =>
             {
+                var options = proxyOptions.Value;
                 var build = await FindAsync(catalog, id, version, ct);
                 if (build is null) return Results.NotFound();
                 var prefix = options.BaseUrl + "/registration/" + id.ToLowerInvariant();
@@ -72,8 +75,9 @@ public static class FeedEndpoints
                     prefix + "/page/" + build.Version + ".json", [build], ct));
             });
         app.MapMethods("/registration/{id}/{version}.json", ["GET", "HEAD"],
-            async (string id, string version, ProxyOptions options, PackageCatalog catalog, CancellationToken ct) =>
+            async (string id, string version, IOptions<ProxyOptions> proxyOptions, PackageCatalog catalog, CancellationToken ct) =>
             {
+                var options = proxyOptions.Value;
                 var build = await FindAsync(catalog, id, version, ct);
                 if (build is null)
                 {
@@ -89,9 +93,10 @@ public static class FeedEndpoints
                     ["registration"] = $"{options.BaseUrl}/registration/{id}/index.json"
                 });
             });
-        app.MapMethods("/query", ["GET", "HEAD"], async (HttpRequest request, ProxyOptions options, PackageCatalog catalog,
+        app.MapMethods("/query", ["GET", "HEAD"], async (HttpRequest request, IOptions<ProxyOptions> proxyOptions, PackageCatalog catalog,
             CancellationToken ct) =>
         {
+            var options = proxyOptions.Value;
             var packages = IncludesBuilds(request) ? await catalog.GetPackagesAsync(ct) : [];
             catalog.EnsureAggregateComplete();
             var query = request.Query["q"].ToString();

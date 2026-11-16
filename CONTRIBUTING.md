@@ -52,6 +52,15 @@ are disabled in `.editorconfig`.
 The released-cache fixture generator intentionally retains the historical
 namespace because it compiles source from a pinned, pre-rename revision.
 
+## Runtime options
+
+`AddProxy` registers runtime settings through `AddOptions<ProxyOptions>()` and
+the existing configuration loader. Inject `IOptions<ProxyOptions>` and read
+`Value`; do not register `ProxyOptions` or an `Options.Create` wrapper in DI.
+Use `Configure<ProxyOptions>` / `PostConfigure<ProxyOptions>` for host overrides
+and `Options.Create` only when constructing services directly in tests.
+Runtime settings are loaded once; live configuration reload is not supported.
+
 ## Test conventions
 
 Both test projects use the centrally versioned TUnit packages and the

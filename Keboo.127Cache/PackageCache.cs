@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NuGet.Packaging;
 using NuGet.Packaging.Core;
 using NuGet.Versioning;
@@ -18,9 +19,11 @@ internal sealed record CachedPackageAvailability(CachedPackage[] Packages, strin
     public int MissingPackages => MissingPackageIds.Length;
 }
 
-public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
+public sealed class PackageCache(IOptions<ProxyOptions> proxyOptions, ArtifactCache artifacts,
     ILogger<PackageCache>? logger = null, bool independentArtifactCaches = false)
 {
+    private readonly ProxyOptions _options = proxyOptions.Value;
+
     private sealed record InventoryData(
         string Repository, string Workflow, long RunId, int Attempt, int PullRequest, string HeadSha,
         long PackagesId, string PackagesName, long VersionId, string VersionName, CachedPackage[] Packages);
@@ -42,10 +45,10 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     private string DirectoryFor(BuildEntry build) => DirectoryFor(build.PullRequest, build.RunId, build.Attempt, build.Packages.Id);
 
     private string DirectoryFor(int pullRequest, long runId, int attempt, long packagesId) =>
-        Path.Combine(options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}",
+        Path.Combine(_options.CacheDirectory, "packages", "discovered", $"v{CacheSchema.Version}",
             $"{pullRequest}.{runId}.{attempt}.{packagesId}");
 
-    private string InventoryPath(BuildEntry build) => Path.Combine(options.CacheDirectory, "inventories",
+    private string InventoryPath(BuildEntry build) => Path.Combine(_options.CacheDirectory, "inventories",
         $"{build.PullRequest}.{build.RunId}.{build.Attempt}.{build.Packages.Id}.json");
 
     private SemaphoreSlim GateFor(BuildEntry build) => _gates.GetOrAdd(DirectoryFor(build), _ => new SemaphoreSlim(1));
@@ -268,7 +271,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     {
         var packages = await GetPackagesAsync(build, cancellationToken);
         var archivePath = await GetPackageArtifactAsync(build.Packages, cancellationToken);
-        var staging = Path.Combine(options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
+        var staging = Path.Combine(_options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging);
         try
         {
@@ -306,7 +309,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
                 await SaveRetainedInventoryAsync(build, packages, cancellationToken);
                 return packages;
             }
-            var staging = Path.Combine(options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
+            var staging = Path.Combine(_options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
             try
             {
                 var packages = await CreateStagingAsync(build, staging, cancellationToken);
@@ -436,7 +439,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
             await File.ReadAllTextAsync(path, cancellationToken), JsonSettings.Options);
         var data = record?.Inventory;
         if (record is null || record.SchemaVersion != InventorySchemaVersion || data is null
-            || data.Repository != options.Repository || data.Workflow != options.Workflow
+            || data.Repository != _options.Repository || data.Workflow != _options.Workflow
             || data.RunId != build.RunId || data.Attempt != build.Attempt || data.PullRequest != build.PullRequest
             || data.HeadSha != build.HeadSha || data.PackagesId != build.Packages.Id || data.PackagesName != build.Packages.Name
             || data.VersionId != (build.VersionArtifact?.Id ?? 0) || data.VersionName != (build.VersionArtifact?.Name ?? "")
@@ -454,7 +457,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
                 throw new InvalidDataException("Cached package inventory does not agree with the retained inventory.");
             return;
         }
-        var data = new InventoryData(options.Repository, options.Workflow, build.RunId, build.Attempt, build.PullRequest,
+        var data = new InventoryData(_options.Repository, _options.Workflow, build.RunId, build.Attempt, build.PullRequest,
             build.HeadSha, build.Packages.Id, build.Packages.Name, build.VersionArtifact?.Id ?? 0, build.VersionArtifact?.Name ?? "", packages);
         var path = InventoryPath(build);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -580,7 +583,7 @@ public sealed class PackageCache(ProxyOptions options, ArtifactCache artifacts,
     private async Task<CachedPackage[]?> RestoreFromArtifactAsync(
         BuildEntry build, string directory, CachedPackage[]? existing, CancellationToken cancellationToken)
     {
-        var staging = Path.Combine(options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
+        var staging = Path.Combine(_options.CacheDirectory, "staging-" + Guid.NewGuid().ToString("N"));
         try
         {
             var generated = await CreateStagingAsync(build, staging, cancellationToken);

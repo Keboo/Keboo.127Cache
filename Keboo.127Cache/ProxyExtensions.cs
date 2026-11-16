@@ -13,8 +13,8 @@ public static class ProxyExtensions
         services.TryAddSingleton(locations ?? SourceConfigurationLocations.None);
         services.AddSingleton(provider =>
             CacheConfigurationLoader.Load(configuration, provider.GetRequiredService<ILogger<CacheConfiguration>>()));
-        services.AddSingleton(provider => ProxyOptions.FromConfiguration(provider.GetRequiredService<CacheConfiguration>()));
-        services.AddSingleton<IOptions<ProxyOptions>>(provider => Options.Create(provider.GetRequiredService<ProxyOptions>()));
+        services.AddOptions<ProxyOptions>()
+            .Configure<CacheConfiguration>((options, configuration) => options.ConfigureFromConfiguration(configuration));
         services.AddMemoryCache();
         services.AddSingleton<IBuildSourceFactory, DefaultBuildSourceFactory>();
         services.AddSingleton(provider => PackageCatalog.Create(
@@ -41,7 +41,7 @@ public static class ProxyExtensions
 
     public static void MapProxy(this WebApplication app)
     {
-        var options = app.Services.GetRequiredService<ProxyOptions>();
+        var options = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         app.Use(async (context, next) =>
         {
             if (!IsFeedPath(context.Request.Path))

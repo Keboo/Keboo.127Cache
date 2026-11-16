@@ -1,6 +1,7 @@
 using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NuGet.Versioning;
 
 namespace Keboo.LocalCache;
@@ -52,9 +53,10 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
     private bool Single => Volatile.Read(ref _state) is { Engines.Count: 1, Failed.Count: 0 };
 
     // Wraps one GitHub Actions source that owns the cache directory of `options` directly.
-    public PackageCatalog(ProxyOptions options, IGitHubClient github, IMemoryCache memoryCache, ArtifactCache artifacts,
+    public PackageCatalog(IOptions<ProxyOptions> proxyOptions, IGitHubClient github, IMemoryCache memoryCache, ArtifactCache artifacts,
         PackageCache packages, ILogger<PackageCatalog>? logger = null, IHostApplicationLifetime? lifetime = null)
     {
+        var options = proxyOptions.Value;
         _options = options;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
         _state = new State([new SourceCatalog(options, new GitHubActionsBuildSource(options, github), memoryCache, artifacts, packages,

@@ -9,6 +9,7 @@ using Keboo.LocalCache.Testing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 using NuGet.Packaging;
 using NuGet.Versioning;
@@ -103,7 +104,7 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
         _app.MapProxy();
         await _app.StartAsync(cancellationToken);
         var address = _app.Urls.Single();
-        _app.Services.GetRequiredService<ProxyOptions>().BaseUrl = address;
+        _app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl = address;
 
         _configFile = Path.Combine(_root, "NuGet.config");
         new XDocument(

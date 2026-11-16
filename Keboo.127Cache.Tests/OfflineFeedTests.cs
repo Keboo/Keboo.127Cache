@@ -20,6 +20,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 using NuGet.Packaging;
 
@@ -778,7 +779,7 @@ public sealed class OfflineFeedTests : IDisposable
             var caches = (ConcurrentDictionary<long, ArtifactCache>)typeof(PackageCache)
                 .GetField("_versionArtifactCaches", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(packageCache)!;
             blockedCache = caches.GetOrAdd(_github.VersionArtifact(200).Id,
-                _ => new ArtifactCache(offline.App.Services.GetRequiredService<ProxyOptions>(), _github));
+                _ => new ArtifactCache(offline.App.Services.GetRequiredService<IOptions<ProxyOptions>>(), _github));
         }
         else
             blockedCache = offline.App.Services.GetRequiredService<PackageCatalog>().GetArtifactCache();
@@ -1527,7 +1528,7 @@ public sealed class OfflineFeedTests : IDisposable
         builder.Services.AddProxy(builder.Configuration);
         builder.Services.AddSingleton<IGitHubClient>(_github);
         var app = builder.Build();
-        var proxyOptions = app.Services.GetRequiredService<ProxyOptions>();
+        var proxyOptions = app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value;
         if (pullRequests is not null) proxyOptions.PullRequests = pullRequests;
         if (runIds is not null) proxyOptions.RunIds = runIds;
         var requests = new ConcurrentQueue<string>();
@@ -1545,7 +1546,7 @@ public sealed class OfflineFeedTests : IDisposable
             await app.StartAsync();
             var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses;
             var address = addresses.Single();
-            app.Services.GetRequiredService<ProxyOptions>().BaseUrl = address;
+            app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.BaseUrl = address;
             return new TestServer(app, new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(10) }, logs, requests);
         }
         catch
