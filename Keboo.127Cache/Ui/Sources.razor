@@ -1,0 +1,361 @@
+@page "/sources"
+@inject ISourceConfigurationService ConfigurationService
+
+<PageTitle>Sources - 127Cache</PageTitle>
+
+<h2>Manage sources</h2>
+
+@if (_message is not null)
+{
+    <p role="status" class="notice">@_message</p>
+}
+@if (_error is not null)
+{
+    <p role="alert" class="error">@_error</p>
+}
+
+<section aria-labelledby="configuration-heading">
+    <h3 id="configuration-heading">Configuration file</h3>
+    @if (_configuration is { } configuration)
+    {
+        <p>
+            @if (configuration.WritableFilePath is { } path)
+            {
+                <code>@path</code>
+                <span class="muted">(@configuration.WritableLayer layer; @(configuration.FileExists ? "exists" : "will be created on save"))</span>
+            }
+            else
+            {
+                <span>No writable configuration file is available.</span>
+            }
+        </p>
+        @if (!configuration.IsEditable)
+        {
+            <p role="alert" class="error">@configuration.ReadOnlyReason</p>
+        }
+        @if (configuration.ShadowingLayers.Count > 0)
+        {
+            <p role="note" class="warning">
+                A higher-precedence configuration layer shadows this file. Changes here would not take effect:
+                @string.Join("; ", configuration.ShadowingLayers.Select(x => x.Description)).
+            </p>
+        }
+        @if (configuration.OverriddenLayers.Count > 0)
+        {
+            <p class="muted">
+                Saving replaces the complete Sources list from lower-precedence layers:
+                @string.Join("; ", configuration.OverriddenLayers.Select(x => x.Description)).
+            </p>
+        }
+        @if (configuration.HasExternalChanges)
+        {
+            <p role="alert" class="warning">The configuration file changed outside this server. Reload it before continuing; stale edits are rejected.</p>
+        }
+        <form method="post" @formname="reload" @onsubmit="ReloadAsync">
+            <AntiforgeryToken />
+            <button type="submit">Reload configuration</button>
+        </form>
+        <p class="muted">Comments in the configuration file are not preserved when the Sources list is saved.</p>
+    }
+</section>
+
+@if (_configuration is { } current)
+{
+    @if (QueryRemove is { Length: > 0 } removeName)
+    {
+        var source = current.Sources.FirstOrDefault(x => x.Name.Equals(removeName, StringComparison.OrdinalIgnoreCase));
+        <section aria-labelledby="remove-heading">
+            <h3 id="remove-heading">Remove source</h3>
+            @if (source is null)
+            {
+                <p role="alert" class="error">Source '@removeName' is no longer configured.</p>
+            }
+            else
+            {
+                <p>Remove <strong>@source.Name</strong> (@source.Repository, @source.Workflow, @source.Artifact) from the configuration?</p>
+            }
+            <p class="warning">
+                By default the source's cache remains on disk. Choose the option below to permanently delete its cached builds.
+                Cached builds may be in use; in that case deletion is refused and the source is not removed.
+            </p>
+            <form method="post" @formname="remove" @onsubmit="RemoveAsync">
+                <AntiforgeryToken />
+                <input type="hidden" name="RemoveName" value="@removeName" />
+                <input type="hidden" name="ExpectedETag" value="@current.ETag" />
+                <label class="check-field">
+                    <input type="checkbox" name="RemoveCache" value="true" disabled="@(!CanEdit)" />
+                    Also permanently delete this source's cached builds
+                </label>
+                <button type="submit" disabled="@(!CanEdit || source is null)">Confirm source removal</button>
+                <a class="button" href="/sources">Cancel</a>
+            </form>
+        </section>
+    }
+    else if (QueryEdit is { Length: > 0 } editName)
+    {
+        var source = current.Sources.FirstOrDefault(x => x.Name.Equals(editName, StringComparison.OrdinalIgnoreCase));
+        <section aria-labelledby="edit-heading">
+            <h3 id="edit-heading">Edit source</h3>
+            @if (source is null)
+            {
+                <p role="alert" class="error">Source '@editName' is no longer configured.</p>
+            }
+            @if (source is not null)
+            {
+                <p class="warning">
+                    Saving changes to Repository, Workflow, Artifact, or VersionArtifact clears this source's cache to avoid serving stale builds.
+                    A rename keeps the old source cache unless you select the option below.
+                </p>
+            }
+            @if (!CanEdit)
+            {
+                <p>Editing is unavailable until the effective configuration is editable and current.</p>
+            }
+            <form method="post" action="@($"/sources?edit={Uri.EscapeDataString(editName)}")"
+                  @formname="edit" @onsubmit="SaveEditAsync">
+                <AntiforgeryToken />
+                <input type="hidden" name="OriginalName" value="@(source?.Name ?? editName)" />
+                <input type="hidden" name="ExpectedETag" value="@current.ETag" />
+                @SourceFields("edit", !CanEdit)
+                <label class="check-field">
+                    <input type="checkbox" name="RemoveCache" value="true" disabled="@(!CanEdit)" />
+                    Also delete the old source cache when renaming
+                </label>
+                <button type="submit" disabled="@(!CanEdit)">Save source</button>
+                <a class="button" href="/sources">Cancel</a>
+            </form>
+        </section>
+    }
+
+    <h3>Configured sources</h3>
+    @if (current.Sources.Count == 0)
+    {
+        <p>No sources are configured yet.</p>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table>
+                <caption>Sources currently used by the running feed</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col">Type</th>
+                        <th scope="col">Repository</th>
+                        <th scope="col">Workflow</th>
+                        <th scope="col">Artifact</th>
+                        <th scope="col">Version artifact</th>
+                        <th scope="col">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var source in current.Sources)
+                    {
+                        <tr>
+                            <th scope="row">@source.Name</th>
+                            <td>@source.Type</td>
+                            <td>@source.Repository</td>
+                            <td>@source.Workflow</td>
+                            <td>@source.Artifact</td>
+                            <td>@(source.VersionArtifact ?? "—")</td>
+                            <td>
+                                @if (CanEdit)
+                                {
+                                    <a href="@($"/sources?edit={Uri.EscapeDataString(source.Name)}")">Edit @source.Name</a>
+                                    <span aria-hidden="true"> · </span>
+                                    <a href="@($"/sources?remove={Uri.EscapeDataString(source.Name)}")">Remove @source.Name</a>
+                                }
+                                else
+                                {
+                                    <span class="muted">Read only</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (QueryEdit is null && QueryRemove is null)
+    {
+        <section aria-labelledby="add-heading">
+            <h3 id="add-heading">Add source</h3>
+            <form method="post" @formname="add" @onsubmit="AddAsync">
+                <AntiforgeryToken />
+                <input type="hidden" name="ExpectedETag" value="@current.ETag" />
+                @SourceFields("add", !CanEdit)
+                <button type="submit" disabled="@(!CanEdit)">Add source</button>
+            </form>
+        </section>
+    }
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "edit")] private string? QueryEdit { get; set; }
+    [SupplyParameterFromQuery(Name = "remove")] private string? QueryRemove { get; set; }
+    [SupplyParameterFromForm(Name = "Name")] private string? Name { get; set; }
+    [SupplyParameterFromForm(Name = "Type")] private string? Type { get; set; }
+    [SupplyParameterFromForm(Name = "Repository")] private string? Repository { get; set; }
+    [SupplyParameterFromForm(Name = "Workflow")] private string? Workflow { get; set; }
+    [SupplyParameterFromForm(Name = "Artifact")] private string? Artifact { get; set; }
+    [SupplyParameterFromForm(Name = "VersionArtifact")] private string? VersionArtifact { get; set; }
+    [SupplyParameterFromForm(Name = "OriginalName")] private string? OriginalName { get; set; }
+    [SupplyParameterFromForm(Name = "RemoveName")] private string? RemoveName { get; set; }
+    [SupplyParameterFromForm(Name = "ExpectedETag")] private string? ExpectedETag { get; set; }
+    [SupplyParameterFromForm(Name = "RemoveCache")] private bool RemoveCache { get; set; }
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private SourceConfigurationInfo? _configuration;
+    private Dictionary<string, string[]> _errors = new(StringComparer.Ordinal);
+    private string? _message;
+    private string? _error;
+    private bool CanEdit => _configuration is { IsEditable: true, HasExternalChanges: false };
+
+    protected override async Task OnInitializedAsync()
+    {
+        _configuration = await ConfigurationService.GetConfigurationAsync();
+        if (HttpContext is not { Request.Method: "POST" } && QueryEdit is { Length: > 0 })
+        {
+            var source = _configuration.Sources.FirstOrDefault(x => x.Name.Equals(QueryEdit, StringComparison.OrdinalIgnoreCase));
+            if (source is not null)
+                (Name, Type, Repository, Workflow, Artifact, VersionArtifact) =
+                    (source.Name, source.Type, source.Repository, source.Workflow, source.Artifact, source.VersionArtifact);
+        }
+    }
+
+    private SourceDefinition Definition() =>
+        new(Name ?? "", Repository ?? "", Workflow ?? "", Artifact ?? "", VersionArtifact, Type ?? "GitHubActions");
+
+    private async Task AddAsync()
+    {
+        var result = await ConfigurationService.AddAsync(Definition(), new SourceChangeOptions(ExpectedETag));
+        Show(result, "Source added and applied to the running feed.");
+    }
+
+    private async Task SaveEditAsync()
+    {
+        if (string.IsNullOrWhiteSpace(OriginalName))
+        {
+            _error = "The source being edited was not specified.";
+            return;
+        }
+        var result = await ConfigurationService.UpdateAsync(OriginalName, Definition(),
+            new SourceChangeOptions(ExpectedETag, RemoveCache));
+        if (result.Succeeded) QueryEdit = null;
+        Show(result, "Source saved and applied to the running feed.");
+    }
+
+    private async Task RemoveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(RemoveName))
+        {
+            _error = "The source to remove was not specified.";
+            return;
+        }
+        var result = await ConfigurationService.RemoveAsync(RemoveName,
+            new SourceChangeOptions(ExpectedETag, RemoveCache));
+        if (result.Succeeded) QueryRemove = null;
+        Show(result, "Source removed from the configuration and running feed.");
+    }
+
+    private async Task ReloadAsync()
+    {
+        var result = await ConfigurationService.ReloadAsync();
+        Show(result, "Configuration reloaded and applied to the running feed.");
+    }
+
+    private void Show(SourceChangeResult result, string success)
+    {
+        _configuration = result.Configuration;
+        _errors = result.Errors.ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+        _error = null;
+        _message = null;
+        if (result.Succeeded)
+        {
+            _message = success;
+            (Name, Type, Repository, Workflow, Artifact, VersionArtifact, RemoveCache) =
+                ("", "GitHubActions", "", "", "", null, false);
+        }
+        else
+        {
+            _error = result.Message ?? result.Status.ToString();
+            if (result.Status == SourceChangeStatus.Conflict)
+                _error += " Review the current configuration before trying again.";
+        }
+    }
+}
+
+@code {
+    private IReadOnlyList<string> FieldErrors(string field) =>
+        _errors.TryGetValue(field, out var errors) ? errors : [];
+
+    private static string ErrorId(string field, string prefix) => $"{prefix}-source-{field.ToLowerInvariant()}-error";
+
+    private RenderFragment SourceFields(string prefix, bool disabled) => @<div class="source-fields">
+        <div class="field">
+            <label for="@($"{prefix}-source-name")">Name</label>
+            <input id="@($"{prefix}-source-name")" name="Name" @bind="Name" required maxlength="255" autocomplete="off"
+                   aria-invalid="@(HasFieldError("Name") ? "true" : "false")" aria-describedby="@ErrorId("Name", prefix)" disabled="@disabled" />
+            @FieldError("Name", prefix)
+        </div>
+        <div class="field">
+            <label for="@($"{prefix}-source-type")">Type</label>
+            <select id="@($"{prefix}-source-type")" name="Type" @bind="Type" aria-invalid="@(HasFieldError("Type") ? "true" : "false")"
+                    aria-describedby="@ErrorId("Type", prefix)" disabled="@disabled">
+                <option value="GitHubActions">GitHub Actions</option>
+            </select>
+            @FieldError("Type", prefix)
+        </div>
+        <div class="field">
+            <label for="@($"{prefix}-source-repository")">Repository (owner/repository)</label>
+            <input id="@($"{prefix}-source-repository")" name="Repository" @bind="Repository" required autocomplete="off"
+                   aria-invalid="@(HasFieldError("Repository") ? "true" : "false")" aria-describedby="@ErrorId("Repository", prefix)" disabled="@disabled" />
+            @FieldError("Repository", prefix)
+        </div>
+        <div class="field">
+            <label for="@($"{prefix}-source-workflow")">Workflow file</label>
+            <input id="@($"{prefix}-source-workflow")" name="Workflow" @bind="Workflow" required autocomplete="off"
+                   aria-invalid="@(HasFieldError("Workflow") ? "true" : "false")" aria-describedby="@ErrorId("Workflow", prefix)" disabled="@disabled" />
+            @FieldError("Workflow", prefix)
+        </div>
+        <div class="field">
+            <label for="@($"{prefix}-source-artifact")">Packages artifact</label>
+            <input id="@($"{prefix}-source-artifact")" name="Artifact" @bind="Artifact" required autocomplete="off"
+                   aria-invalid="@(HasFieldError("Artifact") ? "true" : "false")" aria-describedby="@ErrorId("Artifact", prefix)" disabled="@disabled" />
+            @FieldError("Artifact", prefix)
+        </div>
+        <div class="field">
+            <label for="@($"{prefix}-source-version-artifact")">Version artifact (optional)</label>
+            <input id="@($"{prefix}-source-version-artifact")" name="VersionArtifact" @bind="VersionArtifact" autocomplete="off"
+                   aria-invalid="@(HasFieldError("VersionArtifact") ? "true" : "false")" aria-describedby="@ErrorId("VersionArtifact", prefix)" disabled="@disabled" />
+            @FieldError("VersionArtifact", prefix)
+        </div>
+    </div>;
+
+    private bool HasFieldError(string field) => FieldErrors(field).Count > 0;
+
+    private RenderFragment FieldError(string field, string prefix) => builder =>
+    {
+        var errors = FieldErrors(field);
+        if (errors.Count == 0)
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "id", ErrorId(field, prefix));
+            builder.CloseElement();
+            return;
+        }
+        builder.OpenElement(0, "ul");
+        builder.AddAttribute(1, "id", ErrorId(field, prefix));
+        builder.AddAttribute(2, "class", "field-errors error");
+        builder.AddAttribute(3, "role", "alert");
+        var sequence = 4;
+        foreach (var error in errors)
+        {
+            builder.OpenElement(sequence++, "li");
+            builder.AddContent(sequence++, error);
+            builder.CloseElement();
+        }
+        builder.CloseElement();
+    };
+}

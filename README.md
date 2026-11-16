@@ -66,6 +66,13 @@ keboo-127cache serve --open
   rewritten and original versions, cache state (downloaded, partially downloaded, metadata only), size
   and age, plus links to the pull request and run on GitHub.
 - **Packages** (`/packages`): every package id with its served versions.
+- **Sources** (`/sources`): view the effective source list and writable configuration file, and add, edit, or remove
+  sources without restarting the server. Changes are validated, persisted to the writable config layer and hot-applied
+  to the feed. Validation errors are shown beside their fields; stale forms are rejected if the config file changed.
+  Higher-precedence source settings are identified and make the page read-only. Editing a source's repository,
+  workflow, or either artifact clears its cache to prevent stale builds; renaming retains the old cache unless
+  explicitly removed. Removing a source keeps its cache unless permanent cache deletion is selected. The optional
+  VersionArtifact can be cleared by leaving it empty. JSON comments are not preserved when the source list is saved.
 - **Refresh**: a "Refresh all sources" button and a per-source Refresh button rediscover builds from
   GitHub (same as `POST /api/refresh`). The page shows a busy state while it runs, then the result per
   source (builds found, or the error) and the updated tables.
@@ -382,11 +389,11 @@ is rewritten (legacy `Proxy` source fields are migrated into it); other settings
   `versionArtifact`, `type`); nothing is written.
 - Changes are serialized. Send `If-Match` with the `ETag` from the configuration endpoint to detect
   edits made outside the UI (412); `hasExternalChanges` and `POST /api/sources/reload` resync.
-- Editing a source's repository, workflow or artifacts empties that source's cache; unchanged sources
+- Editing a source's repository, workflow or either artifact empties that source's cache; unchanged sources
   keep their state. Removing (or renaming) a source keeps its cache on disk unless `removeCache=true`,
   which uses `ICacheEvictionService.RemoveSourceAsync` and returns 409 when a build is in use.
-- The same CSRF rules as other management calls apply. The UI should call `ISourceConfigurationService`
-  (`GetConfigurationAsync`, `ValidateAsync`, `AddAsync`, `UpdateAsync`, `RemoveAsync`, `ReloadAsync`).
+- The `/sources` page provides the static SSR forms for these operations and uses antiforgery tokens plus
+  the same Host/Origin checks as other UI requests. It calls `ISourceConfigurationService` directly.
 
 ### Cross-site request protection
 
