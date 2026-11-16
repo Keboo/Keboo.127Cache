@@ -1,26 +1,31 @@
 @page "/"
-@inject IManagementService Management
-@inject ICacheEvictionService Eviction
+@page "/_ui/overview"
+@inject OverviewLoader Loader
 @inject IOptions<ProxyOptions> Options
 
 <PageTitle>127Cache</PageTitle>
 
 <h2>Overview</h2>
 <FeedUrl Url="@UiFormat.FeedUrl(Options.Value)" />
+<p id="overview-announcement" role="status" aria-live="polite"></p>
+<p id="overview-connection-error" role="alert" hidden>
+    Could not update the overview. <button type="button" data-overview-retry>Retry connection</button>
+</p>
+<noscript><p>Automatic updates need JavaScript. <a href="/">Reload the overview</a> to see background results.</p></noscript>
 
-@if (_refreshError is not null)
-{
-    <p role="alert" class="error">Refresh failed: @_refreshError</p>
-}
-else if (_refreshSummary is not null)
-{
-    <div role="status" class="notice">
-        <p>@(_refreshSummary.Succeeded ? "Refresh finished." : "Refresh finished with errors.")</p>
+<section id="overview" data-revision="@_state.Revision" data-busy="@_state.Busy.ToString().ToLowerInvariant()"
+         data-status="@_state.Status" aria-busy="@_state.Busy.ToString().ToLowerInvariant()">
+    <p class="@(_state.Busy ? "loading" : null)">@_state.Status</p>
+    @if (_state.Error is not null)
+    {
+        <p role="alert" class="error">Could not update the overview: @_state.Error</p>
+    }
+    @if (_state.Refresh is { } summary)
+    {
         <ul class="plain">
-            @foreach (var result in _refreshSummary.Sources)
+            @foreach (var result in summary.Sources)
             {
-                <li>
-                    <strong>@result.Source</strong>:
+                <li><strong>@result.Source</strong>:
                     @if (result.Succeeded)
                     {
                         <span>@result.Builds build(s) found</span>
@@ -33,99 +38,69 @@ else if (_refreshSummary is not null)
                 </li>
             }
         </ul>
-    </div>
-}
+    }
+    <form id="refresh-form" method="post" action="/" @formname="refresh" @onsubmit="Refresh" data-overview-refresh>
+        <AntiforgeryToken />
+        <button type="submit" name="source" value="" disabled="@_state.Busy">Refresh all sources / retry</button>
+        <a class="button" href="/remove?scope=closed">Remove closed-PR builds…</a>
+    </form>
 
-@if (_loadError is not null)
-{
-    <p role="alert" class="error">Could not read the cache: @_loadError</p>
-}
-else
-{
-    <p>Cache size on disk: <strong>@UiFormat.Size(_diskBytes)</strong> in <code>@Options.Value.CacheDirectory</code></p>
-
+    <p>Cache size on disk:
+        @if (_state.DiskBytes is { } bytes)
+        {
+            <strong>@UiFormat.Size(bytes)</strong>
+        }
+        else
+        {
+            <span class="@(_state.Busy ? "loading" : "muted")">@(_state.Busy ? "Scanning…" : "Unavailable")</span>
+        }
+        in <code>@Options.Value.CacheDirectory</code>
+    </p>
     <h2>Sources</h2>
-    @if (_sources.Count == 0)
+    @if (_state.Sources is null)
+    {
+        <p class="@(_state.Busy ? "loading" : "muted")">@(_state.Busy ? "Loading sources…" : "Sources unavailable.")</p>
+    }
+    else if (_state.Sources.Count == 0)
     {
         <p>No sources are configured. <a href="/sources">Add one in source management</a>.</p>
     }
     else
     {
-        <form id="refresh-form" method="post" @formname="refresh" @onsubmit="RefreshAsync" data-busy="refresh-status">
-            <AntiforgeryToken />
-            <button type="submit" name="source" value="" data-busy-label="Refreshing all sources…">Refresh all sources</button>
-            <a class="button" href="/remove?scope=closed">Remove closed-PR builds…</a>
-            <span id="refresh-status" role="status" class="muted" hidden></span>
-        </form>
-        <SourcesTable Sources="_sources" Now="_now" />
-
+        <SourcesTable Sources="_state.Sources" Now="_now" RefreshDisabled="_state.Busy" />
         <h2>Builds</h2>
-        @if (_packagesUnavailable is not null)
+        @if (_state.Builds is null)
         {
-            <p role="status" class="muted">Package ids are unavailable right now: @_packagesUnavailable</p>
+            <p class="@(_state.Busy ? "loading" : "muted")">@(_state.Busy ? "Discovering completed builds…" : "Builds unavailable.")</p>
         }
-        <BuildsTable Sources="_sources" Builds="_builds" PackageIds="_packageIds" Now="_now" />
+        else
+        {
+            <BuildsTable Sources="_state.Sources" Builds="_state.Builds" PackageIds="_state.PackageIds" Now="_now" />
+        }
     }
-}
+</section>
 
 @code {
-    private IReadOnlyList<SourceInfo> _sources = [];
-    private IReadOnlyList<BuildInfo> _builds = [];
-    private IReadOnlyDictionary<(string Source, int PullRequest, long RunId, int Attempt), IReadOnlyList<string>> _packageIds
-        = new Dictionary<(string, int, long, int), IReadOnlyList<string>>();
-    private long _diskBytes;
-    private string? _loadError;
-    private string? _packagesUnavailable;
-    private DateTimeOffset _now;
-    private RefreshSummary? _refreshSummary;
-    private string? _refreshError;
-
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
     [SupplyParameterFromForm(Name = "source")] private string? RefreshSource { get; set; }
+    private OverviewState _state = new();
+    private DateTimeOffset _now;
 
-    protected override Task OnInitializedAsync() => LoadAsync();
-
-    // On the form post this runs after OnInitializedAsync, so the tables are reloaded to show the refreshed state.
-    private async Task RefreshAsync()
+    protected override void OnInitialized()
     {
-        try
-        {
-            _refreshSummary = await Management.RefreshAsync(string.IsNullOrEmpty(RefreshSource) ? null : RefreshSource);
-        }
-        catch (Exception exception) when (exception is KeyNotFoundException or IOException or InvalidOperationException)
-        {
-            _refreshError = exception.Message;
-        }
-        await LoadAsync();
+        if (HttpContext is { Request.Method: "GET", Request.Path.Value: "/" }) Loader.Load();
+        ReadState();
     }
 
-    private async Task LoadAsync()
+    private void Refresh()
     {
+        Loader.Load(refresh: true, source: string.IsNullOrEmpty(RefreshSource) ? null : RefreshSource);
+        ReadState();
+    }
+
+    private void ReadState()
+    {
+        _state = Loader.State;
         _now = Options.Value.TimeProvider.GetUtcNow();
-        _loadError = null;
-        _packagesUnavailable = null;
-        try
-        {
-            // Package ids come from the same inventory as the feed, so this can materialize (download) builds. It runs
-            // before the builds are listed so a build that was removed and is open again shows as downloaded.
-            _packageIds = (await Management.GetPackagesAsync())
-                .SelectMany(package => package.Versions.Select(v => (Id: package.Id, Version: v)))
-                .GroupBy(x => (x.Version.Source, x.Version.PullRequest, x.Version.RunId, x.Version.Attempt))
-                .ToDictionary(x => x.Key, x => (IReadOnlyList<string>)x.Select(y => y.Id).Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Order(StringComparer.OrdinalIgnoreCase).ToArray());
-        }
-        catch (Exception exception) when (exception is DiscoveryUnavailableException or IOException or InvalidOperationException)
-        {
-            _packagesUnavailable = exception.Message;
-        }
-        try
-        {
-            _sources = await Management.GetSourcesAsync();
-            _builds = await Management.GetBuildsAsync();
-            _diskBytes = (await Eviction.GetDiskUsageAsync()).TotalBytes;
-        }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException or UnauthorizedAccessException)
-        {
-            _loadError = exception.Message;
-        }
     }
 }

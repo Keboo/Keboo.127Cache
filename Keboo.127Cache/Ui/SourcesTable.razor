@@ -48,7 +48,7 @@
                         }
                     </td>
                     <td>
-                        <button type="submit" form="@RefreshFormId" name="source" value="@source.Name" data-busy-label="Refreshing @source.Name…">Refresh</button>
+                        <button type="submit" form="@RefreshFormId" name="source" value="@source.Name" disabled="@RefreshDisabled" data-busy-label="Refreshing @source.Name…">Refresh</button>
                     </td>
                 </tr>
             }
@@ -61,4 +61,5 @@
     [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
     // The refresh buttons submit the form with this id (rendered by the page) through the HTML form attribute.
     [Parameter] public string RefreshFormId { get; set; } = "refresh-form";
+    [Parameter] public bool RefreshDisabled { get; set; }
 }
