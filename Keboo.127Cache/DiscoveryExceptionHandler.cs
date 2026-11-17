@@ -14,7 +14,9 @@ internal sealed class PinnedRunWorkflowException : IOException;
 internal static class DiscoveryFailure
 {
     public static bool CanHandle(Exception exception, CancellationToken cancellationToken) =>
-        exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested;
+        (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        && exception is IOException or InvalidDataException or UnauthorizedAccessException or Win32Exception or HttpRequestException
+            or JsonException or FormatException or TimeoutException or OperationCanceledException;
 
     public static string Describe(Exception exception)
     {

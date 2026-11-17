@@ -99,11 +99,16 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     private sealed class FeedRequestScope(SourceCatalog catalog, FeedRequestScope? previous) : IDisposable
     {
+        public PublishedSnapshot Snapshot { get; } = catalog.AcquireSnapshot();
         public Discovery? Discovery { get; set; }
         public OfflineResolution? Offline { get; set; }
         public bool ContentPending { get; set; }
         public FeedAvailability Availability { get; set; } = new(false, false, "current", "unknown");
-        public void Dispose() => catalog._requestScope.Value = previous;
+        public void Dispose()
+        {
+            catalog._requestScope.Value = previous;
+            catalog.ReleaseSnapshot(Snapshot);
+        }
     }
     private bool _catalogNeedsUpgrade;
 
@@ -149,6 +154,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     public async Task<PublishedPackage[]> GetPackagesAsync(CancellationToken cancellationToken)
     {
+        if (_requestScope.Value is not null) return PublishedPackages();
         if (!_options.HasSource) return [];
         var discovery = await DiscoverAsync(cancellationToken);
         if (discovery.IsStale)
@@ -216,9 +222,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
             MarkContentPending(discovery);
             var work = TrackBackground(async () =>
             {
-                var result = await MaterializePackagesAsync(discovery.Runs, _stopping);
-                if (result.Failure is null) MarkContentHealthy(discovery, pendingOnly: true);
-                return result;
+                return await MaterializePackagesAsync(discovery.Runs, _stopping);
             });
             _contentRefresh = new ContentRefresh(discovery.Runs, work);
             return work;
@@ -258,6 +262,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
                 catch (Exception exception) when (IsBuildFailure(exception) && !_options.RunIds.Contains(build.RunId))
                 {
                     ReportUnavailableBuild(build, exception);
+                    failure ??= exception;
                 }
                 catch (Exception exception) when (DiscoveryFailure.CanHandleContent(exception, cancellationToken)
                     && !_options.RunIds.Contains(build.RunId))
@@ -362,6 +367,16 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     public async Task<BuildEntry[]> GetScriptBuildsAsync(CancellationToken cancellationToken)
     {
+        if (_requestScope.Value is not null)
+        {
+            var packages = PublishedPackages();
+            var visible = packages.Select(x => (x.Build.PullRequest, x.Build.RunId, x.Build.Attempt, x.Build.Packages.Id)).ToHashSet();
+            var builds = GetCachedBuilds().Where(x => x.VersionArtifact is not null
+                && visible.Contains((x.PullRequest, x.RunId, x.Attempt, x.Packages.Id)));
+            return builds.Concat(packages.Where(x => x.Build.VersionArtifact is null
+                    && x.Id.Equals("vpk", StringComparison.OrdinalIgnoreCase)).Select(x => x.Build))
+                .OrderBy(x => NuGetVersion.Parse(x.Version), VersionComparer.VersionRelease).ToArray();
+        }
         var result = new List<BuildEntry>();
         foreach (var build in await GetBuildsAsync(cancellationToken))
         {
@@ -400,6 +415,15 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     internal async Task<FeedAvailability> EnsureFeedAvailableAsync(CancellationToken cancellationToken)
     {
+        if (_requestScope.Value is { } publishedScope)
+        {
+            var health = GetHealth();
+            var degraded = health.Status != "ok";
+            var snapshotPartial = health.UnavailableBuilds is > 0 || health.UnavailablePackages is > 0
+                || health.UnavailableBuildMetadata is > 0 || health.Provenance == "incomplete"
+                || (degraded && publishedScope.Snapshot.Items.Length == 0);
+            return publishedScope.Availability = new FeedAvailability(degraded, snapshotPartial, health.Membership, health.Provenance);
+        }
         var discovery = await DiscoverAsync(cancellationToken);
         var partial = discovery.IsPartial || HasContentFailure();
         if (discovery.IsStale)
@@ -417,6 +441,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     internal void EnsurePackageIndexComplete(string id, bool hasVersions)
     {
+        if (_requestScope.Value is not null) return;
         var scope = _requestScope.Value;
         if (scope?.Discovery is { SkippedBuilds: > 0 })
             throw new DiscoveryUnavailableException("A discovered build has an unknown package inventory, so package versions cannot be enumerated.");
@@ -433,6 +458,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     internal void EnsureLookupComplete()
     {
+        if (_requestScope.Value is not null) return;
         if (_requestScope.Value?.Availability.IsPartial == true)
             throw new DiscoveryUnavailableException("The incomplete feed cannot determine whether this package version is available."
                 + (_requestScope.Value.ContentPending ? " Build content is still being prepared." : "")
@@ -442,6 +468,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
 
     internal void EnsureAggregateComplete()
     {
+        if (_requestScope.Value is not null) return;
         if (_requestScope.Value?.Availability.IsPartial == true)
             throw new DiscoveryUnavailableException("The cached feed is incomplete and cannot enumerate a complete result."
                 + (_requestScope.Value.ContentPending ? " Build content is still being prepared." : "")
@@ -509,6 +536,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
                 {
                     _logger.LogWarning(exception, "Skipping run {RunId} attempt {Attempt} of PR {PullRequest}: " +
                         "version artifact {ArtifactId} is unavailable.", run.RunId, run.Attempt, run.PullRequest, run.VersionArtifact?.Id);
+                    failure ??= exception;
                 }
                 catch (Exception exception) when (DiscoveryFailure.CanHandleContent(exception, cancellationToken)
                     && !_options.RunIds.Contains(run.RunId))
@@ -554,6 +582,7 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
                 catch (Exception exception) when (IsBuildFailure(exception))
                 {
                     ReportUnavailableBuild(build, exception);
+                    failure ??= exception;
                 }
             }
             available.Sort((left, right) =>
@@ -775,6 +804,8 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
                 && !next.Any(x => x.RunId == id))
                 throw new InvalidDataException($"Run {id} is not an available successful build of an open pull request.");
         }
+        if (skipped > 0)
+            throw new IOException($"Discovery could not verify {skipped} build(s): {skippedError}");
         var availableCached = next.Where(x => openPullRequests.Contains(x.PullRequest))
             .Where(x => _options.PullRequests.Length == 0 || _options.PullRequests.Contains(x.PullRequest)
                 || _options.RunIds.Contains(x.RunId))
@@ -1193,7 +1224,8 @@ internal sealed partial class SourceCatalog : IDisposable, IAsyncDisposable
             run.Packages, run.VersionArtifact);
         try
         {
-            var work = TrackBackground(() => Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping)));
+            var work = TrackBackground(() => Task.Run(() => _packages.GetAvailableOfflineAsync(template, _stopping,
+                allowRepair: build is not null || run.VersionArtifact is null)));
             if (await CompletesWithinRequestAsync(work, cancellationToken, OfflineWait))
                 return new OfflineRun(build, await work, pending);
             pending = true;

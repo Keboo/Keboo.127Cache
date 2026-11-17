@@ -388,6 +388,7 @@ public sealed class ProxyTests : IAsyncDisposable
         _github.OpenPullRequests = _github.OpenPullRequests.Where(x => x.Number != 755).ToArray();
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
+        await app.Services.GetRequiredService<IManagementService>().RefreshAsync(cancellationToken: Cancellation);
         using var afterClose = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
             client, app.Services.GetRequiredService<PackageCatalog>(), "/flat/velopack/index.json", Cancellation));
         var remaining = afterClose.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
@@ -613,15 +614,15 @@ public sealed class ProxyTests : IAsyncDisposable
     }
 
     [Test]
-    public async Task HttpFeedWarmupDoesNotDownloadArtifactContents()
+    public async Task HttpFeedWarmupPreparesArtifactContentsWithoutClients()
     {
         await using var app = await StartHttpFeedAsync(prepareContent: false);
-        await GetSettledRunsAsync(app.Services.GetRequiredService<PackageCatalog>());
+        await app.Services.GetRequiredService<PackageCatalog>().WaitForStartupAsync(Cancellation);
         await Assert.That(_github.OpenPullRequestQueries).IsEqualTo(1);
         await Assert.That(_github.RunQueries).IsEqualTo(1);
         await Assert.That(_github.ArtifactQueries).IsEqualTo(1);
-        await Assert.That(_github.VersionDownloads).IsEqualTo(0);
-        await Assert.That(_github.PackageDownloads).IsEqualTo(0);
+        await Assert.That(_github.VersionDownloads).IsEqualTo(1);
+        await Assert.That(_github.PackageDownloads).IsEqualTo(1);
     }
 
     [Test]
@@ -732,7 +733,7 @@ public sealed class ProxyTests : IAsyncDisposable
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
         var catalog = app.Services.GetRequiredService<PackageCatalog>();
-        await RefreshCatalogAsync(catalog);
+        await app.Services.GetRequiredService<IManagementService>().RefreshAsync(cancellationToken: Cancellation);
         await WaitForPackageAsync(catalog, "Example.Plugin");
         using var allLibraryVersions = JsonDocument.Parse(await client.GetStringAsync("/flat/velopack/index.json", Cancellation));
         await Assert.That(allLibraryVersions.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(2);
@@ -755,13 +756,14 @@ public sealed class ProxyTests : IAsyncDisposable
         app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds = [99];
         var memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
+        await app.Services.GetRequiredService<IManagementService>().RefreshAsync(cancellationToken: Cancellation);
         using var versions = JsonDocument.Parse(await CatalogTestSynchronization.GetStringWhenSettledAsync(
             client, app.Services.GetRequiredService<PackageCatalog>(), "/flat/velopack/index.json", Cancellation));
         await Assert.That(versions.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(2);
         _github.OpenPullRequests = [];
         memoryCache = await ProxyAssertions.ExactMemoryCache(app.Services.GetRequiredService<IMemoryCache>());
         memoryCache.Compact(1);
-        await RefreshCatalogAsync(app.Services.GetRequiredService<PackageCatalog>());
+        await app.Services.GetRequiredService<IManagementService>().RefreshAsync(cancellationToken: Cancellation);
         using var missingIndex = await CatalogTestSynchronization.GetWhenSettledAsync(client,
             app.Services.GetRequiredService<PackageCatalog>(), "/flat/velopack/index.json");
         await Assert.That(missingIndex.StatusCode).IsEqualTo(HttpStatusCode.NotFound);

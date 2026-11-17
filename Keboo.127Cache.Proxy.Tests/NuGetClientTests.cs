@@ -143,7 +143,8 @@ internal sealed class NuGetClientFixture : IAsyncDisposable
         var project = Path.Combine(consumer, "Consumer.csproj");
         new XDocument(
             new XElement("Project", new XAttribute("Sdk", "Microsoft.NET.Sdk"),
-                new XElement("PropertyGroup", new XElement("TargetFramework", "net10.0"), new XElement("NuGetAudit", "false")),
+                new XElement("PropertyGroup", new XElement("TargetFramework", "net10.0"), new XElement("NuGetAudit", "false"),
+                    new XElement("ManagePackageVersionsCentrally", "false")),
                 new XElement("ItemGroup", new XElement("PackageReference", new XAttribute("Include", id), new XAttribute("Version", version)))))
             .Save(project);
 

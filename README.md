@@ -66,7 +66,7 @@ keboo-127cache serve --open
   rewritten and original versions, cache state (downloaded, partially downloaded, metadata only), size
   and age, plus links to the pull request and run on GitHub. The shell and feed URL load immediately;
   source discovery, cache inventories and disk usage load in the background with accessible loading states.
-  Opening the overview does not download uncached packages; unknown package ids and versions stay unknown.
+  Startup and periodic refresh prepare uncached packages independently of the overview.
   Pull-request headings show the number
   and title; titles are refreshed during discovery and retained for cached builds while offline or
   after a PR closes. Older cache entries show just the number until a title is discovered.
@@ -79,7 +79,7 @@ keboo-127cache serve --open
   explicitly removed. Removing a source keeps its cache unless permanent cache deletion is selected. The optional
   VersionArtifact can be cleared by leaving it empty. JSON comments are not preserved when the source list is saved.
 - **Refresh**: a "Refresh all sources" button and a per-source Refresh button rediscover builds from
-  GitHub, then prepare their packages in the background (the API's `POST /api/refresh` only rediscovers).
+  GitHub, then prepare their packages in the background. `POST /api/refresh` uses the same operation.
   Existing results stay visible, with discovering/preparing indicators, then the result per source
   (builds found, or the error) and updated tables. Concurrent overview clients share one operation.
 - **Remove** (`/remove`): each cached build has a Remove link, and "Remove closed-PR builds" removes the
@@ -130,7 +130,7 @@ An empty or absent `Sources` array is valid; there is no default repository.
 | --- | --- | --- |
 | `Server.BaseUrl` | `http://localhost:55631` | HTTP(S) loopback origin for listening and feed metadata; no trailing slash |
 | `Server.CacheDirectory` | `null` (per-user local app data) | Location for metadata, artifacts, and rewritten packages |
-| `Server.RefreshSeconds` | `120` | Lifetime of cached GitHub discovery data (minimum 10 seconds) |
+| `Server.RefreshSeconds` | `600` | Background refresh interval in seconds and discovery-cache lifetime (minimum 10 seconds) |
 | `Server.EvictClosedPullRequestsAfterDays` | `null` (off) | When set (minimum 1), cached builds of pull requests closed for at least this many days are removed automatically, at startup and then hourly. See [Removing cached builds](#removing-cached-builds) |
 | `Sources` | `[]` | Flat list of independently configured sources |
 | `Sources[n].Name` | Required | Stable, case-insensitively unique filesystem key of up to 255 ASCII letters, digits, `.`, `_`, `-`, excluding reserved names and trailing `.` |
@@ -152,7 +152,7 @@ Example (the same schema can contain several independent entries):
   "Server": {
     "BaseUrl": "http://localhost:55631",
     "CacheDirectory": null,
-    "RefreshSeconds": 120
+    "RefreshSeconds": 600
   },
   "Sources": [
     {
@@ -175,10 +175,8 @@ nevertheless produce the same package id and version, the first configured
 source wins and the collision is logged. Forks are simply additional sources.
 Only pull-request builds are discovered.
 
-If one source fails discovery, the others keep serving, but feeds that would be
-incomplete without it (version indexes, search, `/builds`) return 503 rather
-than silently omitting its packages. `/health` lists each source under
-`sources`.
+If one source fails discovery, the others keep serving and the failed source's
+last published data remains available. `/health` lists each source under `sources`.
 
 A cache created by an earlier version (flat `catalog.json`, `runs.json`,
 `artifacts/` … directly under `CacheDirectory`) is moved into the directory of
@@ -199,8 +197,8 @@ for new configurations.
 
 The tool serves the latest completed, successful run for each open PR. Queued,
 running, failed, cancelled, and non-PR runs are excluded. The app refreshes
-GitHub discovery on startup and after the in-memory cache expires. Startup lists
-run artifacts but does not download their contents.
+GitHub discovery and package preparation on startup, on manual refresh, and
+at the configured interval.
 
 When GitHub omits a run's PR association, as it often does for forks, the app
 matches the current open PR head SHA and, when available, its head repository
@@ -277,14 +275,14 @@ potentially incomplete v1 or v2 inventory. Rewritten packages use short
 internal filenames without changing their public versions. An integrity record
 binds the inventory to the artifact digest and records the SHA256 of each
 rewritten package; package identities and hashes are checked before a build is
-advertised or served. These checks detect accidental corruption, not malicious
+published. These checks detect accidental corruption, not malicious
 changes by someone who can also edit the integrity record.
 
 Before upgrading a saved catalog, the tool compares each inventory with the
 complete verified raw artifact for every known build, including closed PRs. If
 one artifact is unavailable or invalid, that build is logged and excluded while
 healthy builds remain available; the older catalog, packages, and raw artifacts
-are retained. The next request retries migration. Restore an expired artifact's
+are retained. The next background refresh retries migration. Restore an expired artifact's
 matching raw ZIP to the artifact cache to resume migration. After migration, an
 intact v4 cache remains usable without the raw artifact.
 For a corrupt v4 cache, restore the matching inventory, integrity record, and
@@ -369,7 +367,7 @@ still serves the `Install-PrBuild.ps1` scripts.
 | `POST /api/sources/reload` | re-read the configuration files and apply them |
 | `GET /api/builds[?source=]` | per source/PR/run: `pullRequestTitle` (when known), version, size, `cachedState` (`cached`/`partial`/`notCached`), `served`; never downloads |
 | `GET /api/packages[?source=]` | package id to versions, with source, PR, run, attempt (same content as the feed) |
-| `POST /api/refresh[?source=]` | force rediscovery, bypassing the memory cache; concurrent calls for a source share one discovery (`coalesced`) |
+| `POST /api/refresh[?source=]` | rediscover and prepare packages, bypassing the memory cache; concurrent calls for a source share the same operation (`coalesced`) |
 | `DELETE /api/builds/{source}/{runId}/{attempt}` | remove one cached build |
 | `DELETE /api/pull-requests/{source}/{pullRequest}` | remove every cached run of a pull request |
 | `DELETE /api/sources/{source}/cache` | empty one source's cache |
@@ -445,35 +443,29 @@ Released caches without a snapshot can still be used offline when their
 those historical runs by the configured artifact names and PR/run selections.
 **Their open-PR membership is unknown**: they can include PRs closed long ago,
 and omit other builds. No refresh time or authoritative snapshot is invented.
-Aggregate search, autocomplete, and `/builds` return 503 in this legacy mode;
-known readable packages and complete per-package indexes remain usable with an
-explicit `unknown` membership and `legacy-unverified` provenance. A legacy
+Verified readable packages can be published with an explicit `unknown`
+membership and `legacy-unverified` provenance. A legacy
 `runs.json` workflow label does not prove whether a run was originally added
 through a repository-wide pin. Known unverified pinned runs are excluded until
 live workflow and artifact association verification succeeds; other legacy runs
 may also have originated from an unrecorded pin. Operators requiring strict
 workflow provenance should not use this unverified legacy fallback. A
 catalog-only cache cannot establish workflow identity and is not guessed.
-If catalog and run metadata disagree, version indexes return 503 rather than
-hiding a cached version. Live discovery can corroborate matching runs and their
+If catalog and run metadata disagree, the problem is reported in health rather
+than treating the metadata as verified. Live discovery can corroborate matching runs and their
 artifact identities; uncorroborated metadata remains incomplete.
 
 If GitHub discovery or a required download fails, the server remains running
 and serves usable packages from the last successful snapshot. Open-PR membership
 is stale: a PR closed since that refresh can remain visible, while newly opened
-PRs or newer builds can be missing. Feed requests with locally usable content
-can serve it while a single shared discovery retry is in progress, without
-waiting for the `gh` timeout. Each later request retries after a failure;
-failures are not cached as an empty successful result. Once discovery succeeds,
-the feed uses the newly refreshed membership. Historical metadata and cached
-packages are not deleted when a PR disappears from the feed. A blocked download,
-catalog gate, or offline artifact repair does not make unrelated cached requests
-wait indefinitely; requests fall back to verifiable local content or return 503
-after a short bounded wait. A cold feed with blocked discovery returns 503.
-Problem details distinguish content or cached verification still in progress from
-a known failure. Once pending content preparation succeeds, health can recover
-without another feed request. Shutdown cancels and waits for background cache
-work to release its files.
+PRs or newer builds can be missing. A single background operation runs at startup,
+on manual refresh and periodically (by default every ten minutes). Requests do
+not trigger retries or package preparation. The last published view remains
+available until a replacement is ready; a cold feed returns empty search results
+and 404 for absent packages while retaining its normal service index. Health
+reports failures rather than presenting them as a successful refresh. Historical
+metadata and cached packages are not deleted when a PR disappears from the feed.
+Shutdown cancels and waits for background cache work to release its files.
 
 The app retains a source- and build-bound package inventory under `inventories`
 after successful materialization. It can therefore distinguish an unavailable
@@ -508,30 +500,19 @@ describes the run/workflow and artifact association, not a package signature.
 
 Degraded responses based on an available cached view carry `X-127Cache-Status`,
 `X-127Cache-Membership`, `X-127Cache-Provenance`, and a stale `Warning` header.
-The status is `degraded-partial` when content or discovery is incomplete. Search,
-autocomplete, and `/builds` then return 503 instead of claiming complete
-results. Flat and registration version indexes return 503 with problem details
-if a known version of that package is unavailable, or an unavailable build's
-package inventory is unknown. A known healthy package remains downloadable by
-ID and version; an unrelated package index can succeed with `degraded-partial`
-when retained inventories prove its cached versions are complete. An unknown
-or missing package returns 503 rather than a misleading 404.
+The status is `degraded-partial` when content or discovery is incomplete.
+Search, autocomplete and `/builds` return the published view, which may be
+empty or stale. A missing package or package binary returns 404.
 
-Missing or expired **unpinned** discovered builds are skipped without hiding
-healthy builds, but discovery remains degraded and incomplete and no successful
-snapshot is written. An unknown skipped build could contain any package, so
-version indexes return 503; an already-known healthy package remains
-downloadable by its exact ID and version. An unavailable pinned build fails
-explicitly. Cached raw artifacts can reconstruct missing rewritten packages
+Missing or expired discovered builds leave the source's last published view in
+place and report the failure through health. Cached raw artifacts can reconstruct missing rewritten packages
 offline, including artifacts that have since expired; damaged or unreadable
 cache files are preserved. A
 digest-less legacy ZIP without its SHA-256 record cannot be used for
 reconstruction, although an already rewritten readable package remains usable.
 
-When discovery fails and neither a matching nonempty snapshot nor a usable
-legacy view is available, feed requests (including the service index) return
-HTTP 503 with problem details and `Retry-After`, not an empty successful feed.
-Check `/health` for the reason. If `gh` is missing, install it from
+When discovery fails and neither a matching snapshot nor a usable legacy view
+is available, the feed remains empty. Check `/health` for the reason. If `gh` is missing, install it from
 <https://cli.github.com/>; if authentication has expired, run `gh auth login`
 and `gh auth status` and check repository access. Diagnostics do not include
 raw CLI stderr or tokens.

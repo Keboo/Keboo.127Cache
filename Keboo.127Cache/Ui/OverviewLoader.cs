@@ -17,7 +17,7 @@ internal sealed record OverviewState
 }
 
 // One host-owned operation, not one download per browser. The channel keeps even synchronous disk work off HTTP threads.
-internal sealed class OverviewLoader(IManagementService management, ICacheEvictionService eviction,
+internal sealed class OverviewLoader(IManagementService management, ICacheEvictionService eviction, PackageCatalog catalog,
     ILogger<OverviewLoader> logger) : BackgroundService
 {
     private sealed record Request(bool Refresh, string? Source, TaskCompletionSource Completion);
@@ -26,6 +26,8 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
     private readonly object _gate = new();
     private OverviewState _state = new();
     private Task _completion = Task.CompletedTask;
+    private bool _loaded;
+    private bool _dirty;
 
     public OverviewState State { get { lock (_gate) return _state; } }
     internal Task Completion { get { lock (_gate) return _completion; } }
@@ -34,7 +36,8 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
     {
         lock (_gate)
         {
-            if (_state.Busy) return;
+            if (_state.Busy || (!refresh && _loaded)) return;
+            _loaded = true;
             var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             _completion = completion.Task;
             _state = _state with
@@ -42,7 +45,7 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
                 Busy = true,
                 Revision = _state.Revision + 1,
                 Error = null,
-                Refresh = null,
+                Refresh = refresh ? null : _state.Refresh,
                 Status = refresh ? "Discovering completed builds…" : "Loading cached metadata and discovering completed builds…"
             };
             if (!_requests.Writer.TryWrite(new Request(refresh, source, completion)))
@@ -50,7 +53,18 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
                 _state = _state with { Busy = false, Status = "Overview loader stopped." };
                 completion.TrySetResult();
             }
+
         }
+    }
+
+    private void Invalidate()
+    {
+        lock (_gate)
+        {
+            _loaded = false;
+            if (_state.Busy) { _dirty = true; return; }
+        }
+        Load();
     }
 
     private void Update(Func<OverviewState, OverviewState> update)
@@ -60,6 +74,7 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        catalog.Changed += Invalidate;
         try
         {
             await foreach (var request in _requests.Reader.ReadAllAsync(stoppingToken))
@@ -85,15 +100,28 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
                         Status = state.Error is not null || state.Sources?.Any(x => x.Status != "ok") == true
                             ? "Overview finished with errors. Retry to update."
                             : state.Refresh is { Succeeded: false } ? "Refresh finished with errors."
-                            : request.Refresh ? "Refresh finished." : "Overview ready."
+                            : request.Refresh || state.Refresh is not null ? "Refresh finished." : "Overview ready."
                     });
-                    request.Completion.TrySetResult();
+                    var reload = false;
+                    lock (_gate)
+                    {
+                        reload = _dirty;
+                        _dirty = false;
+                    }
+                    if (reload)
+                    {
+                        Load();
+                        _ = Completion.ContinueWith(_ => request.Completion.TrySetResult(),
+                            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    }
+                    else request.Completion.TrySetResult();
                 }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         finally
         {
+            catalog.Changed -= Invalidate;
             _requests.Writer.TryComplete();
             while (_requests.Reader.TryRead(out var pending)) pending.Completion.TrySetResult();
             Update(state => state with { Busy = false, Status = "Overview loader stopped." });
@@ -130,15 +158,13 @@ internal sealed class OverviewLoader(IManagementService management, ICacheEvicti
     {
         if (request.Refresh)
         {
+            Update(state => state with { Status = "Discovering completed builds and preparing packages…" });
             var result = await management.RefreshAsync(request.Source, token);
             Update(state => state with { Refresh = result });
         }
         await ReadBuildsAsync(token);
         if (request.Refresh)
         {
-            Update(state => state with { Status = "Preparing packages (downloading and rewriting uncached builds)…" });
-            await management.PrepareOverviewPackagesAsync(request.Source, token);
-            await ReadBuildsAsync(token);
             await LoadDiskAsync(token);
         }
         await LoadSourcesAsync(token);
