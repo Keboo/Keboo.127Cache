@@ -1,4 +1,3 @@
-using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -25,8 +24,9 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     private sealed record FailedSource(string Name, string Repository, Exception Error);
 
-    private sealed class AggregateScope(PackageCatalog catalog, AggregateScope? previous, IDisposable[] inner) : IDisposable
+    private sealed class AggregateScope(PackageCatalog catalog, AggregateScope? previous, State state, IDisposable[] inner) : IDisposable
     {
+        public State State { get; } = state;
         public Dictionary<SourceCatalog, Exception> Failed { get; } = [];
         public bool Partial { get; set; }
         public SourceCatalog.FeedAvailability? Availability { get; set; }
@@ -42,15 +42,23 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     // Replaced as a whole when sources are reconciled, so a request always sees a consistent set of sources.
     private State _state;
-    private IReadOnlyList<SourceCatalog> _engines => Volatile.Read(ref _state).Engines;
-    private IReadOnlyList<FailedSource> _failed => Volatile.Read(ref _state).Failed;
+    private readonly object _stateGate = new();
+    private State CurrentState => _scope.Value?.State ?? Volatile.Read(ref _state);
+    private IReadOnlyList<SourceCatalog> _engines => CurrentState.Engines;
+    private IReadOnlyList<FailedSource> _failed => CurrentState.Failed;
     private readonly Func<ProxyOptions, SourceCatalog>? _createEngine;
     private readonly Func<SourceCatalog>? _createPlaceholder;
     private readonly SemaphoreSlim _reconcileGate = new(1);
+    private bool _disposed;
     private readonly ILogger _logger;
     private readonly AsyncLocal<AggregateScope?> _scope = new();
     private readonly HashSet<string> _loggedCollisions = [];
-    private bool Single => Volatile.Read(ref _state) is { Engines.Count: 1, Failed.Count: 0 };
+    private Task _startup = Task.CompletedTask;
+    internal void SetStartup(Task startup) => Volatile.Write(ref _startup, startup);
+    internal Task WaitForStartupAsync(CancellationToken token) => Volatile.Read(ref _startup).WaitAsync(token);
+    internal event Action? Changed;
+    private void OnPublishedChanged() => Changed?.Invoke();
+    private bool Single => CurrentState is { Engines.Count: 1, Failed.Count: 0 };
 
     // Wraps one GitHub Actions source that owns the cache directory of `options` directly.
     public PackageCatalog(IOptions<ProxyOptions> proxyOptions, IGitHubClient github, IMemoryCache memoryCache, ArtifactCache artifacts,
@@ -61,6 +69,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
         _logger = (ILogger?)logger ?? NullLogger.Instance;
         _state = new State([new SourceCatalog(options, new GitHubActionsBuildSource(options, github), memoryCache, artifacts, packages,
             _logger, lifetime)], []);
+        _state.Engines[0].PublishedChanged += OnPublishedChanged;
     }
 
     private PackageCatalog(ProxyOptions options, List<SourceCatalog> engines, List<FailedSource> failed, ILogger logger,
@@ -68,6 +77,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
     {
         _options = options;
         _state = new State(engines, failed);
+        foreach (var engine in engines) engine.PublishedChanged += OnPublishedChanged;
         _logger = logger;
         _createEngine = createEngine;
         _createPlaceholder = createPlaceholder;
@@ -101,15 +111,14 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
             {
                 engines.Add(CreateEngine(options));
             }
-            catch (Exception exception) when (sources.Count > 1)
+            catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, CancellationToken.None))
             {
                 logger.LogError(exception, "Source '{Source}' could not be started and will be unavailable: {Error}",
                     options.Name, exception.Message);
                 failed.Add(new FailedSource(options.Name, options.Repository, exception));
             }
         }
-        if (engines.Count == 0)
-            ExceptionDispatchInfo.Capture(failed[0].Error).Throw();
+        if (engines.Count == 0) engines.Add(Placeholder());
         return new PackageCatalog(root, engines, failed, logger, CreateEngine, Placeholder);
     }
 
@@ -136,7 +145,9 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
         await _reconcileGate.WaitAsync(cancellationToken);
         try
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             var previous = Volatile.Read(ref _state);
+            var previousSources = _options.ConfiguredSources.ToArray();
             _options.ApplySources(sources);
             var desired = _options.CreateSourceOptions();
             var kept = new Dictionary<string, SourceCatalog>(StringComparer.Ordinal);
@@ -163,7 +174,19 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
                     purged.Add(engine.Name);
                 }
             }
-            foreach (var engine in retired) await engine.DisposeAsync();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                _options.ApplySources(previousSources);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            lock (_stateGate)
+                Volatile.Write(ref _state, new State(previous.Engines.Except(retired).ToArray(), previous.Failed));
+            foreach (var engine in retired)
+            {
+                engine.PublishedChanged -= OnPublishedChanged;
+                await engine.DisposeAsync();
+                await engine.DrainPublishedAsync(CancellationToken.None);
+            }
             foreach (var name in purged)
                 await Task.Run(() => CacheDisk.Purge(CacheLayout.SourceDirectory(_options.CacheDirectory, name)), CancellationToken.None);
 
@@ -181,20 +204,27 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
                 try
                 {
                     var engine = _createEngine(options);
+                    engine.PublishedChanged += OnPublishedChanged;
                     engines.Add(engine);
                     started.Add(engine);
                 }
-                catch (Exception exception)
+                catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, CancellationToken.None))
                 {
                     _logger.LogError(exception, "Source '{Source}' could not be started and will be unavailable: {Error}",
                         options.Name, exception.Message);
                     failed.Add(new FailedSource(options.Name, options.Repository, exception));
                 }
             }
-            if (engines.Count == 0) engines.Add(_createPlaceholder());
-            Volatile.Write(ref _state, new State(engines, failed));
+            if (engines.Count == 0)
+            {
+                var placeholder = _createPlaceholder();
+                placeholder.PublishedChanged += OnPublishedChanged;
+                engines.Add(placeholder);
+            }
+            lock (_stateGate) Volatile.Write(ref _state, new State(engines, failed));
             lock (_loggedCollisions) _loggedCollisions.Clear();
             foreach (var engine in started) engine.StartForcedRefresh();
+            Changed?.Invoke();
             return new SourceReconciliation(added, updated,
                 retired.Select(x => x.Name).Where(x => !updated.Contains(x)).ToArray(), purged,
                 failed.Select(x => new SourceStartFailure(x.Name, x.Error.Message)).ToArray());
@@ -219,6 +249,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     public async Task<PublishedPackage[]> GetPackagesAsync(CancellationToken cancellationToken)
     {
+        if (_engines.Count == 0) return [];
         if (Single)
         {
             var only = _engines[0];
@@ -259,6 +290,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     public async Task<BuildEntry[]> GetScriptBuildsAsync(CancellationToken cancellationToken)
     {
+        if (_engines.Count == 0) return [];
         if (Single) return Stamp(_engines[0], await _engines[0].GetScriptBuildsAsync(cancellationToken));
         var results = await RunAsync(engine => engine.GetScriptBuildsAsync(cancellationToken), cancellationToken);
         var merged = new List<BuildEntry>();
@@ -290,7 +322,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
             {
                 results.AddRange(await engine.GetRunArtifactsAsync(cancellationToken));
             }
-            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
             {
                 errors.Add($"[{engine.Name}] {engine.ReportWarmupFailure(exception)}");
             }
@@ -303,6 +335,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
     public async Task<string> GetPackagePathAsync(string id, BuildEntry build, CancellationToken cancellationToken)
     {
         var engine = EngineFor(build);
+        if (_scope.Value is not null) return engine.PublishedPath(id, build);
         try
         {
             return await engine.Packages.GetAsync(id, build, cancellationToken);
@@ -363,7 +396,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
             {
                 results.Add((engine, await operation(engine)));
             }
-            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, cancellationToken))
             {
                 _logger.LogWarning("Source '{Source}' is unavailable: {Error}", engine.Name, exception.Message);
                 scope?.Failed[engine] = exception;
@@ -377,14 +410,19 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     internal IDisposable BeginFeedRequest()
     {
-        var inner = _engines.Select(x => x.BeginFeedRequest()).ToArray();
-        var scope = new AggregateScope(this, _scope.Value, inner);
-        _scope.Value = scope;
-        return scope;
+        lock (_stateGate)
+        {
+            var state = Volatile.Read(ref _state);
+            var inner = state.Engines.Select(x => x.BeginFeedRequest()).ToArray();
+            var scope = new AggregateScope(this, _scope.Value, state, inner);
+            _scope.Value = scope;
+            return scope;
+        }
     }
 
     internal async Task<SourceCatalog.FeedAvailability> EnsureFeedAvailableAsync(CancellationToken cancellationToken)
     {
+        if (_engines.Count == 0) return new SourceCatalog.FeedAvailability(true, true, "unknown", "unknown");
         if (Single) return await _engines[0].EnsureFeedAvailableAsync(cancellationToken);
         var results = await RunAsync(engine => engine.EnsureFeedAvailableAsync(cancellationToken), cancellationToken);
         var availability = Merge(results.Select(x => x.Result), _scope.Value?.Partial == true || results.Count < _engines.Count + _failed.Count);
@@ -430,6 +468,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     internal void EnsurePackageIndexComplete(string id, bool hasVersions)
     {
+        if (_scope.Value is not null) return;
         if (Single) { _engines[0].EnsurePackageIndexComplete(id, hasVersions); return; }
         ThrowIfSourcesFailed();
         foreach (var engine in Healthy()) engine.EnsurePackageIndexComplete(id, hasVersions);
@@ -437,6 +476,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     internal void EnsureLookupComplete()
     {
+        if (_scope.Value is not null) return;
         if (Single) { _engines[0].EnsureLookupComplete(); return; }
         ThrowIfSourcesFailed();
         foreach (var engine in Healthy()) engine.EnsureLookupComplete();
@@ -444,6 +484,7 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     internal void EnsureAggregateComplete()
     {
+        if (_scope.Value is not null) return;
         if (Single) { _engines[0].EnsureAggregateComplete(); return; }
         ThrowIfSourcesFailed();
         foreach (var engine in Healthy()) engine.EnsureAggregateComplete();
@@ -505,7 +546,17 @@ public sealed class PackageCatalog : IDisposable, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var engine in _engines) await engine.DisposeAsync();
+        await _reconcileGate.WaitAsync();
+        try
+        {
+            if (_disposed) return;
+            _disposed = true;
+            foreach (var engine in _engines) await engine.DisposeAsync();
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
     }
 
     public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();

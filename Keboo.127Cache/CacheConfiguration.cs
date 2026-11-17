@@ -19,7 +19,7 @@ public sealed class ServerOptions
 {
     public string BaseUrl { get; set; } = "http://localhost:55631";
     public string? CacheDirectory { get; set; }
-    public int RefreshSeconds { get; set; } = 120;
+    public int RefreshSeconds { get; set; } = 600;
     // Null (the default) keeps builds of closed pull requests until they are removed explicitly.
     public int? EvictClosedPullRequestsAfterDays { get; set; }
 }

@@ -31,6 +31,7 @@ public static class FeedEndpoints
                 if (!file.Equals(packageFile, StringComparison.OrdinalIgnoreCase)
                     && !file.Equals(manifestFile, StringComparison.OrdinalIgnoreCase)) return Results.NotFound();
                 var path = await catalog.GetPackagePathAsync(id, build, ct);
+                if (!File.Exists(path)) return Results.NotFound();
                 return file.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
                     ? Results.Bytes(PackageRewriter.ReadManifest(path), "application/xml")
                     : Results.File(path, "application/octet-stream", enableRangeProcessing: true);

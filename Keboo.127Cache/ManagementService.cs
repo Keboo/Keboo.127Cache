@@ -47,6 +47,7 @@ public interface IManagementService
 
 public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionService eviction) : IManagementService
 {
+    private IReadOnlyList<BuildInfo> _overviewBuilds = [];
     public Task<IReadOnlyList<SourceInfo>> GetSourcesAsync(CancellationToken cancellationToken = default)
     {
         var result = new List<SourceInfo>();
@@ -62,11 +63,23 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
         return Task.FromResult<IReadOnlyList<SourceInfo>>(result.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    public Task<IReadOnlyList<BuildInfo>> GetBuildsAsync(string? source = null, CancellationToken cancellationToken = default) =>
-        GetBuildsCoreAsync(source, waitForDiscovery: false, cancellationToken);
+    public Task<IReadOnlyList<BuildInfo>> GetBuildsAsync(string? source = null, CancellationToken cancellationToken = default)
+    {
+        var targets = Select(source).ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<BuildInfo> builds = Volatile.Read(ref _overviewBuilds);
+        return Task.FromResult<IReadOnlyList<BuildInfo>>(builds.Where(build =>
+            targets.TryGetValue(build.Source, out var target)
+            && (!build.Served || target.HasPublishedBuild(build.PullRequest, build.RunId, build.Attempt)
+                || target.GetCachedBuilds().Any(entry => entry.PullRequest == build.PullRequest
+                    && entry.RunId == build.RunId && entry.Attempt == build.Attempt))).ToArray());
+    }
 
-    public Task<IReadOnlyList<BuildInfo>> GetOverviewBuildsAsync(CancellationToken cancellationToken = default) =>
-        GetBuildsCoreAsync(null, waitForDiscovery: true, cancellationToken);
+    public async Task<IReadOnlyList<BuildInfo>> GetOverviewBuildsAsync(CancellationToken cancellationToken = default)
+    {
+        var builds = await GetBuildsCoreAsync(null, waitForDiscovery: true, cancellationToken);
+        Volatile.Write(ref _overviewBuilds, builds);
+        return builds;
+    }
 
     public Task PrepareOverviewPackagesAsync(string? source = null, CancellationToken cancellationToken = default) =>
         Task.WhenAll(Select(source).Select(target => target.PrepareOverviewPackagesAsync(cancellationToken)));
@@ -131,6 +144,7 @@ public sealed class ManagementService(PackageCatalog catalog, ICacheEvictionServ
     public async Task<IReadOnlyList<PackageInfo>> GetPackagesAsync(string? source = null, CancellationToken cancellationToken = default)
     {
         Select(source);
+        using var scope = catalog.BeginFeedRequest();
         var packages = await catalog.GetPackagesAsync(cancellationToken);
         return packages
             .Where(x => source is null || string.Equals(x.Build.SourceName, source, StringComparison.OrdinalIgnoreCase))

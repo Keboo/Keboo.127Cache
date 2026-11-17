@@ -23,6 +23,7 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
     public long? MissingVersionArtifactForRun { get; set; }
     public bool FailDownloads { get; set; }
     public TaskCompletionSource? DiscoveryBlock { get; set; }
+    public TaskCompletionSource? DiscoveryEntered { get; set; }
     public long? BlockDownloadForArtifact { get; set; }
     public TaskCompletionSource? DownloadBlock { get; set; }
     public TaskCompletionSource DownloadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -76,6 +77,7 @@ internal sealed class OfflineFakeGitHub(string directory) : IGitHubClient
     public async Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _discoveryCalls);
+        DiscoveryEntered?.TrySetResult();
         if (DiscoveryBlock is { } block) await block.Task.WaitAsync(cancellationToken);
         if (DiscoveryError is { } error) throw error;
         return OpenPullRequests;

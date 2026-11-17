@@ -1,3 +1,5 @@
+using NuGet.Versioning;
+
 namespace Keboo.LocalCache;
 
 internal sealed record SourceRefreshOutcome(bool Succeeded, int Builds, string? Error, DateTimeOffset? RefreshedUtc);
@@ -16,25 +18,15 @@ internal sealed partial class SourceCatalog
 
     // The overview already runs off-request, so it must follow discovery/preparation to completion instead of
     // using the feed's bounded HTTP wait and mistaking a still-running operation for its final result.
-    internal async Task<RunArtifacts[]> GetOverviewRunsAsync(CancellationToken token) =>
-        (await StartRefresh().WaitAsync(token)).Runs;
+    internal Task<RunArtifacts[]> GetOverviewRunsAsync(CancellationToken token) =>
+        Task.FromResult(PublishedPackages().Select(x => x.Build)
+            .DistinctBy(x => (x.PullRequest, x.RunId, x.Attempt))
+            .Select(x => new RunArtifacts(x.RunId, x.Attempt, x.PullRequest, x.HeadSha, x.Packages, x.VersionArtifact))
+            .ToArray());
 
     internal async Task PrepareOverviewPackagesAsync(CancellationToken token)
     {
-        var discovery = await StartRefresh().WaitAsync(token);
-        if (discovery.IsStale)
-        {
-            await RequireOfflinePackagesAsync(discovery, token);
-            return;
-        }
-        Task<OnlinePackages>? work;
-        while ((work = StartContentRefresh(discovery)) is null)
-            await WaitForBackgroundWorkAsync(token);
-        var result = await work.WaitAsync(token);
-        if (result.Failure is not null)
-            await RecoverFromContentFailureAsync(result.Failure, discovery, token);
-        else
-            MarkContentHealthy(discovery);
+        await StartForcedRefresh().Work.WaitAsync(token);
     }
 
     // Starts a rediscovery that ignores the memory cache. Callers that arrive while one is running share it.
@@ -50,18 +42,57 @@ internal sealed partial class SourceCatalog
     private async Task<SourceRefreshOutcome> ForceRefreshAsync()
     {
         if (!_options.HasSource) return new SourceRefreshOutcome(true, 0, null, null);
+        await _publicationGate.WaitAsync(_stopping);
         try
         {
+            await RestorePublishedAsync(_stopping);
             _memoryCache.Remove(_cacheKey);
             var discovery = await StartRefresh();
-            return new SourceRefreshOutcome(!discovery.IsStale, discovery.Runs.Length, discovery.Error,
-                GetHealth().LastSuccessfulRefreshUtc);
+            if (discovery.IsStale)
+            {
+                var offline = await ResolveOfflineAsync(discovery, _stopping);
+                var existing = PublishedPackages();
+                var combined = existing.Concat(offline.Packages)
+                    .DistinctBy(package => (package.Id.ToLowerInvariant(), package.Build.Version))
+                    .OrderBy(package => NuGetVersion.Parse(package.Build.Version), VersionComparer.VersionRelease)
+                    .ToArray();
+                if (combined.Length > existing.Length)
+                    await PublishPackagesAsync(combined, _stopping);
+                return new SourceRefreshOutcome(false, discovery.Runs.Length, discovery.Error, GetHealth().LastSuccessfulRefreshUtc);
+            }
+            Task<OnlinePackages>? work;
+            while ((work = StartContentRefresh(discovery)) is null)
+            {
+                Task pending;
+                lock (_contentRefreshGate) pending = _contentRefresh!.Work;
+                await pending.WaitAsync(_stopping);
+            }
+            var result = await work;
+            if (result.Failure is not null)
+            {
+                await RecoverFromContentFailureAsync(result.Failure, discovery, _stopping);
+                if (PublishedPackages().Length == 0 && result.Packages.Length > 0)
+                    await PublishPackagesAsync(result.Packages, _stopping);
+                return new SourceRefreshOutcome(false, discovery.Runs.Length, DiscoveryFailure.DescribeContent(result.Failure),
+                    GetHealth().LastSuccessfulRefreshUtc);
+            }
+            await PublishPackagesAsync(result.Packages, _stopping);
+            MarkContentHealthy(discovery);
+            return new SourceRefreshOutcome(true, discovery.Runs.Length, null, GetHealth().LastSuccessfulRefreshUtc);
         }
         catch (Exception exception) when (DiscoveryFailure.CanHandle(exception, _stopping))
         {
+            if (Volatile.Read(ref _pinnedWorkflowError) is not null)
+                Publish(Volatile.Read(ref _published).Items
+                    .Where(item => !_options.RunIds.Contains(item.Package.Build.RunId)).ToArray());
             var error = exception is DiscoveryUnavailableException ? exception.Message : DiscoveryFailure.Describe(exception);
+            SetFailureHealth(error, FindFallback(error), contentFailure: true);
             _logger.LogWarning("Forced refresh of source '{Source}' failed: {Error}", Name, error);
             return new SourceRefreshOutcome(false, 0, error, GetHealth().LastSuccessfulRefreshUtc);
+        }
+        finally
+        {
+            _publicationGate.Release();
         }
     }
 }

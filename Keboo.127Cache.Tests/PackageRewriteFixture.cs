@@ -148,6 +148,7 @@ internal sealed class FixtureGitHub(string packagesPath, string versionPath) : I
     public PullRequestInfo[] OpenPullRequests { get; set; } = [new(755)];
     public Exception? DiscoveryError { get; set; }
     public WorkflowRun[] Runs { get; set; } = [new(100, 1, "head", "completed", "success", "pull_request", [new(755)])];
+    public Dictionary<long, Artifact[]> RunArtifacts { get; } = [];
 
     public Task<IReadOnlyList<PullRequestInfo>> GetOpenPullRequestsAsync(CancellationToken cancellationToken)
     {
@@ -159,7 +160,7 @@ internal sealed class FixtureGitHub(string packagesPath, string versionPath) : I
         Task.FromResult<IReadOnlyList<WorkflowRun>>(Runs);
 
     public Task<IReadOnlyList<Artifact>> GetArtifactsAsync(long runId, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<Artifact>>([Packages, Version]);
+        Task.FromResult<IReadOnlyList<Artifact>>(RunArtifacts.TryGetValue(runId, out var artifacts) ? artifacts : [Packages, Version]);
 
     public Task DownloadAsync(Artifact artifact, string destination, CancellationToken cancellationToken)
     {

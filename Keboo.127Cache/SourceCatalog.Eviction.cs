@@ -234,10 +234,15 @@ internal sealed partial class SourceCatalog
             outcomes[key] = await ClassifyAsync(key, live, cancellationToken);
         if (outcomes.Count == 0 && !scope.SweepSource) return SourceRemoval.Empty;
 
+        await _publicationGate.WaitAsync(cancellationToken);
+        try
+        {
         await _gate.WaitAsync(cancellationToken);
         IDisposable? locks = null;
         var trash = Path.Combine(_options.CacheDirectory, CacheDisk.TrashPrefix + Guid.NewGuid().ToString("N"));
         var moves = new List<(string Trash, string Original, BuildKey? Key)>();
+        PublishedItem[]? originalPublished = null;
+        var committed = false;
         try
         {
             var footprints = CollectFootprints();
@@ -255,6 +260,12 @@ internal sealed partial class SourceCatalog
                     cancellationToken);
                 // Anything that appeared while waiting for the locks is only visible now.
                 footprints = CollectFootprints();
+                originalPublished = Volatile.Read(ref _published).Items;
+                await SavePublishedAsync(originalPublished.Where(x => !selected.Contains(
+                    new BuildKey(x.Package.Build.PullRequest, x.Package.Build.RunId, x.Package.Build.Attempt))).ToArray(),
+                    cancellationToken);
+                await RetirePublishedAsync(build => selected.Contains(new BuildKey(build.PullRequest, build.RunId, build.Attempt)),
+                    cancellationToken);
             }
 
             var counted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -315,15 +326,40 @@ internal sealed partial class SourceCatalog
                 _memoryCache.Remove(_cacheKey);
                 lock (_contentRefreshGate) _contentRefresh = null;
                 lock (_buildRefreshGate) _buildRefresh = null;
+                if (originalPublished is not null)
+                {
+                    var remainingPublished = originalPublished.Where(x => !removed.Contains(
+                        new BuildKey(x.Package.Build.PullRequest, x.Package.Build.RunId, x.Package.Build.Attempt))).ToArray();
+                    await SavePublishedAsync(remainingPublished, cancellationToken);
+                    Publish(remainingPublished);
+                }
             }
+            committed = true;
             var unattributed = Math.Max(0, sweepBytes - results.Sum(x => x.BytesReclaimed));
             return new SourceRemoval(results, unattributed);
         }
         finally
         {
-            locks?.Dispose();
-            _gate.Release();
-            if (moves.Count > 0 || Directory.Exists(trash)) CacheDisk.Purge(trash);
+            try
+            {
+                if (!committed && originalPublished is not null)
+                {
+                    await RollbackAsync(moves, CancellationToken.None);
+                    await SavePublishedAsync(originalPublished, CancellationToken.None);
+                    Publish(originalPublished);
+                }
+            }
+            finally
+            {
+                locks?.Dispose();
+                _gate.Release();
+                if (moves.Count > 0 || Directory.Exists(trash)) CacheDisk.Purge(trash);
+            }
+        }
+        }
+        finally
+        {
+            _publicationGate.Release();
         }
     }
 

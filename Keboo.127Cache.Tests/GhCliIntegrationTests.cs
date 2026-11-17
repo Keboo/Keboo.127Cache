@@ -87,11 +87,10 @@ public sealed class GhCliIntegrationTests : IDisposable
             var actualAddress = await ReadServerAddressAsync(process, output);
             standardOutput = process.StandardOutput.ReadToEndAsync();
             using var client = new HttpClient { BaseAddress = actualAddress, Timeout = TimeSpan.FromSeconds(2) };
-            await WaitForServerAsync(process, client);
+            await WaitForServerAsync(process, client, authFailure ? "authentication failed" : "could not be started");
             using var response = await client.GetAsync("/v3/index.json");
             var body = await response.Content.ReadAsStringAsync();
-            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.ServiceUnavailable);
-            await Assert.That(body).Contains("gh auth login");
+            await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
             await Assert.That(body.Contains(marker, StringComparison.Ordinal)).IsFalse();
             using var health = JsonDocument.Parse(await client.GetStringAsync("/health"));
             await Assert.That(health.RootElement.GetProperty("status").GetString()).IsEqualTo("degraded");
@@ -124,7 +123,7 @@ public sealed class GhCliIntegrationTests : IDisposable
         throw new InvalidOperationException($"Server exited before announcing its address. Output: {output}");
     }
 
-    private static async Task WaitForServerAsync(Process process, HttpClient client)
+    private static async Task WaitForServerAsync(Process process, HttpClient client, string expectedError)
     {
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline)
@@ -133,7 +132,12 @@ public sealed class GhCliIntegrationTests : IDisposable
             try
             {
                 using var response = await client.GetAsync("/health");
-                if (response.IsSuccessStatusCode) return;
+                if (response.IsSuccessStatusCode)
+                {
+                    using var health = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                    if (health.RootElement.GetProperty("error").GetString()?.Contains(expectedError, StringComparison.Ordinal) == true)
+                        return;
+                }
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
             {

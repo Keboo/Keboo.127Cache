@@ -111,6 +111,8 @@ public sealed class ArtifactIntegrityTests
         await Assert.That(Directory.Exists(Path.Combine(fixture.Options.CacheDirectory, "packages", "discovered"))).IsFalse();
 
         await ReplaceBytesAndChangeTimestampAsync(path, original);
+        var refresh = await app.Services.GetRequiredService<IManagementService>().RefreshAsync(cancellationToken: Cancellation);
+        await Assert.That(refresh.Succeeded).IsTrue();
         using var recovered = await client.GetAsync("/flat/example.package/index.json", Cancellation);
         await Assert.That(recovered.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That(fixture.GitHub.PackageDownloads).IsEqualTo(1);

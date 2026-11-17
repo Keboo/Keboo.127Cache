@@ -245,6 +245,9 @@ public sealed class PackageCache(IOptions<ProxyOptions> proxyOptions, ArtifactCa
         return File.Exists(path) ? path : null;
     }
 
+    internal string? FindVerifiedPath(BuildEntry build, CachedPackage package) =>
+        FindCachedPath(DirectoryFor(build), package);
+
     public async Task<string> GetAsync(string id, BuildEntry build, CancellationToken cancellationToken)
     {
         CachedPackage[] packages;

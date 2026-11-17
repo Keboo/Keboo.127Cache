@@ -195,7 +195,7 @@ public sealed class RuntimeConfigurationTests : IDisposable
         await WaitForWarmupAsync(app);
         await app.Services.GetRequiredService<PackageCatalog>().GetRunArtifactsAsync(CancellationToken.None);
         await Assert.That(github.ArtifactQueries).IsEqualTo(1);
-        await Assert.That(github.Downloads).IsEqualTo(0);
+        await Assert.That(github.Downloads).IsEqualTo(1);
         using var client = Client(app);
         using var builds = JsonDocument.Parse(await client.GetStringAsync("/builds", CancellationToken.None));
         await Assert.That(builds.RootElement.GetArrayLength()).IsEqualTo(0);
@@ -593,8 +593,8 @@ public sealed class RuntimeConfigurationTests : IDisposable
     }
 
     private static Task WaitForWarmupAsync(WebApplication app) =>
-        app.Services.GetServices<IHostedService>().OfType<CatalogWarmupService>().Single()
-            .ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current!.Execution.CancellationToken);
+        app.Services.GetRequiredService<PackageCatalog>()
+            .WaitForStartupAsync(TestContext.Current!.Execution.CancellationToken).WaitAsync(TimeSpan.FromSeconds(10));
 
     private async Task<(int ExitCode, string Output, string Commands)> RunVpkInstallerAsync(string baseUrl)
     {

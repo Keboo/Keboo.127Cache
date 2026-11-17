@@ -35,6 +35,7 @@ internal static class CatalogTestSynchronization
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        await catalog.WaitForStartupAsync(timeout.Token);
         var repeatedSuccess = false;
         var racedCompletion = false;
         for (;;)

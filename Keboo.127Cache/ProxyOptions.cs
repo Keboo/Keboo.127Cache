@@ -22,7 +22,7 @@ public sealed class ProxyOptions
     private int[] _pullRequests = [];
     private long[] _runIds = [];
     private string _baseUrl = "http://localhost:55631";
-    private int _refreshSeconds = 120;
+    private int _refreshSeconds = 600;
     // The first source observes live changes to the root's selectors, which callers adjust after startup.
     private ProxyOptions? _origin;
     public string CacheDirectory { get; set; } = Path.Combine(

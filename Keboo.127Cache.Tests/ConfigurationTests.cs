@@ -19,7 +19,7 @@ public sealed class ConfigurationTests : IDisposable
 
         await Assert.That(result.Sources).IsEmpty();
         await Assert.That(result.Server.BaseUrl).IsEqualTo("http://localhost:55631");
-        await Assert.That(result.Server.RefreshSeconds).IsEqualTo(120);
+        await Assert.That(result.Server.RefreshSeconds).IsEqualTo(600);
         await Assert.That(result.Server.CacheDirectory).IsNull();
         await Assert.That(ProxyOptions.FromConfiguration(result).HasSource).IsFalse();
     }
@@ -853,7 +853,7 @@ public sealed class ConfigurationTests : IDisposable
 
         var validSnapshot = ProviderFiles(defaults, user, explicitFile, true);
         File.WriteAllText(explicitFile, """{ "Server": [] }""");
-        await Assert.That(CacheConfigurationLoader.Load(validSnapshot).Server.RefreshSeconds).IsEqualTo(120);
+        await Assert.That(CacheConfigurationLoader.Load(validSnapshot).Server.RefreshSeconds).IsEqualTo(600);
     }
 
     [Test]
@@ -885,7 +885,7 @@ public sealed class ConfigurationTests : IDisposable
         File.Delete(user);
         config.Reload();
 
-        await Assert.That(CacheConfigurationLoader.Load(config).Server.RefreshSeconds).IsEqualTo(120);
+        await Assert.That(CacheConfigurationLoader.Load(config).Server.RefreshSeconds).IsEqualTo(600);
     }
 
     [Test]

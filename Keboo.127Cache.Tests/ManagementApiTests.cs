@@ -252,8 +252,7 @@ public sealed class ManagementApiTests
         await Assert.That(removed.GetProperty("willReappear").GetBoolean()).IsTrue();
         await Assert.That(removed.GetProperty("reappearance").GetString()).IsEqualTo("WillReappear");
         using var after = await host.SendAsync(HttpMethod.Get, "api/builds", csrfHeader: false);
-        await Assert.That((await JsonAsync(after)).EnumerateArray().Single().GetProperty("cachedState").GetString())
-            .IsEqualTo("notCached");
+        await Assert.That((await JsonAsync(after)).EnumerateArray().Count()).IsEqualTo(0);
     }
 
     [Test]
@@ -271,6 +270,7 @@ public sealed class ManagementApiTests
         await Assert.That(pullRequest.StatusCode).IsEqualTo(HttpStatusCode.OK);
         await Assert.That((await JsonAsync(pullRequest)).GetProperty("removedCount").GetInt32()).IsEqualTo(1);
 
+        await host.App.Services.GetRequiredService<IManagementService>().RefreshAsync();
         await host.PopulateAsync();
         using var source = await host.SendAsync(HttpMethod.Delete, "api/sources/main/cache");
         await Assert.That(source.StatusCode).IsEqualTo(HttpStatusCode.OK);

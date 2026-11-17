@@ -12,13 +12,15 @@ namespace Keboo.LocalCache.Tests;
 
 public sealed class MultiSourceTests
 {
-    private sealed class SharedFactory(IGitHubClient github) : IBuildSourceFactory
+    private sealed class SharedFactory(IGitHubClient github, string? failingSource = null) : IBuildSourceFactory
     {
-        public IBuildSource Create(ProxyOptions source) => new GitHubActionsBuildSource(source, github);
+        public IBuildSource Create(ProxyOptions source) => source.Name == failingSource
+            ? throw new IOException("Synthetic source startup failure.")
+            : new GitHubActionsBuildSource(source, github);
     }
 
     private static async Task<WebApplication> StartAsync(PackageRewriteFixture fixture, FixtureGitHub github,
-        CollectingLogger<PackageCatalog> logger)
+        CollectingLogger<PackageCatalog> logger, string? failingSource = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = fixture.DirectoryPath });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -32,7 +34,7 @@ public sealed class MultiSourceTests
         });
         builder.Logging.ClearProviders();
         builder.Services.AddProxy(builder.Configuration);
-        builder.Services.AddSingleton<IBuildSourceFactory>(new SharedFactory(github));
+        builder.Services.AddSingleton<IBuildSourceFactory>(new SharedFactory(github, failingSource));
         builder.Services.AddSingleton<ILogger<PackageCatalog>>(logger);
         var app = builder.Build();
         app.UseExceptionHandler();
@@ -77,6 +79,23 @@ public sealed class MultiSourceTests
 
         var health = catalog.GetHealth();
         await Assert.That(health.Sources!.Select(x => x.Source).ToArray()).IsEquivalentTo(new[] { "first", "second" });
+    }
+
+    [Test]
+    public async Task FailedSourceDoesNotHideHealthySourcePackages()
+    {
+        using var fixture = new PackageRewriteFixture();
+        var github = await fixture.CreateGitHubAsync();
+        await using var app = await StartAsync(fixture, github, new CollectingLogger<PackageCatalog>(), "first");
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single() + "/") };
+        var catalog = app.Services.GetRequiredService<PackageCatalog>();
+        using var response = await CatalogTestSynchronization.GetWhenSettledAsync(client, catalog, "flat/acme.core/index.json");
+        response.EnsureSuccessStatusCode();
+        using var index = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        await Assert.That(index.RootElement.GetProperty("versions").GetArrayLength()).IsEqualTo(1);
+        var health = catalog.GetHealth();
+        await Assert.That(health.Status).IsEqualTo("degraded");
+        await Assert.That(health.Sources!.Single(x => x.Source == "first").Error).Contains("Synthetic source startup failure");
     }
 
     [Test]

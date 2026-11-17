@@ -296,6 +296,8 @@ public class PackageRewriteFeedTests
             await Assert.That(await File.ReadAllTextAsync(catalogPath)).IsEqualTo(originalCatalog);
 
             File.Copy(Path.Combine(cacheDirectory, "artifacts", "200.zip"), Path.Combine(cacheDirectory, "artifacts", "300.zip"));
+            github.DiscoveryError = new IOException("Synthetic offline failure.");
+            await app.Services.GetRequiredService<IManagementService>().RefreshAsync();
             using var recovered = JsonDocument.Parse(await client.GetStringAsync("flat/acme.core/index.json"));
             var versions = recovered.RootElement.GetProperty("versions").EnumerateArray().Select(x => x.GetString()).ToArray();
             await Assert.That(string.Join(",", versions)).IsEqualTo(
@@ -303,6 +305,8 @@ public class PackageRewriteFeedTests
             var bytes = await client.GetByteArrayAsync($"flat/acme.core/{versions[0]}/acme.core.{versions[0]}.nupkg");
             using var reader = new PackageArchiveReader(new MemoryStream(bytes));
             await Assert.That(reader.GetIdentity().Version.ToNormalizedString()).IsEqualTo(versions[0]);
+            github.DiscoveryError = null;
+            await app.Services.GetRequiredService<IManagementService>().RefreshAsync();
         }
         var saved = JsonSerializer.Deserialize<CatalogFile>(await File.ReadAllTextAsync(catalogPath), JsonSettings.Options)!;
         await Assert.That(saved.SchemaVersion).IsEqualTo(CacheSchema.Version);
@@ -781,6 +785,8 @@ public class PackageRewriteFeedTests
         var outOfScope = new BuildEntry(100, 1, 755, "old", "1.2.0-beta.3",
             PackageRewriter.VersionFor("1.2.0-beta.3", 755, 100, 1, github.Packages.Id), github.Packages, github.Version);
         var unavailablePackages = github.Packages with { Id = 300, Expired = true };
+        github.Runs = [new(101, 1, "new", "completed", "success", "pull_request", [new(755)])];
+        github.RunArtifacts[101] = [unavailablePackages, github.Version];
         var pinnedUnavailable = new BuildEntry(101, 1, 755, "new", "1.2.0-beta.3",
             PackageRewriter.VersionFor("1.2.0-beta.3", 755, 101, 1, unavailablePackages.Id), unavailablePackages, github.Version);
         await JsonSettings.WriteAtomicAsync(Path.Combine(cacheDirectory, "runs.json"),
@@ -797,11 +803,14 @@ public class PackageRewriteFeedTests
         await Assert.That(File.Exists(path)).IsTrue();
 
         using (var builds = JsonDocument.Parse(await client.GetStringAsync("builds")))
-            await Assert.That(builds.RootElement.GetArrayLength()).IsEqualTo(0);
+            await Assert.That(string.Join(",", builds.RootElement.EnumerateArray()
+                .Select(x => x.GetProperty("runId").GetInt64()))).IsEqualTo("");
         using (var packages = await client.GetAsync("flat/acme.core/index.json"))
             await Assert.That(packages.StatusCode).IsEqualTo(System.Net.HttpStatusCode.NotFound);
 
         File.Copy(Path.Combine(cacheDirectory, "artifacts", "200.zip"), Path.Combine(cacheDirectory, "artifacts", "300.zip"));
+        var refresh = await app.Services.GetRequiredService<IManagementService>().RefreshAsync();
+        await Assert.That(refresh.Succeeded).IsTrue();
 
         using (var builds = JsonDocument.Parse(await client.GetStringAsync("builds")))
         {
@@ -834,6 +843,8 @@ public class PackageRewriteFeedTests
         if (catalogLogger is not null) builder.Services.AddSingleton<ILogger<PackageCatalog>>(catalogLogger);
         var app = builder.Build();
         app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds = runIds ?? [99];
+        if (pullRequests is not null)
+            app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.PullRequests = pullRequests;
         app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync();
