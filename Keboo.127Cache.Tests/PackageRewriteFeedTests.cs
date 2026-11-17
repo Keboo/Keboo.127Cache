@@ -843,6 +843,8 @@ public class PackageRewriteFeedTests
         if (catalogLogger is not null) builder.Services.AddSingleton<ILogger<PackageCatalog>>(catalogLogger);
         var app = builder.Build();
         app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.RunIds = runIds ?? [99];
+        if (pullRequests is not null)
+            app.Services.GetRequiredService<IOptions<ProxyOptions>>().Value.PullRequests = pullRequests;
         app.UseExceptionHandler();
         app.MapProxy();
         await app.StartAsync();
