@@ -67,6 +67,9 @@ keboo-127cache serve --open
   and age, plus links to the pull request and run on GitHub. The shell and feed URL load immediately;
   source discovery, cache inventories and disk usage load in the background with accessible loading states.
   Opening the overview does not download uncached packages; unknown package ids and versions stay unknown.
+  Pull-request headings show the number
+  and title; titles are refreshed during discovery and retained for cached builds while offline or
+  after a PR closes. Older cache entries show just the number until a title is discovered.
 - **Packages** (`/packages`): every package id with its served versions.
 - **Sources** (`/sources`): view the effective source list and writable configuration file, and add, edit, or remove
   sources without restarting the server. Changes are validated, persisted to the writable config layer and hot-applied
@@ -364,7 +367,7 @@ still serves the `Install-PrBuild.ps1` scripts.
 | `PUT /api/sources/{source}` | replace a source's definition (rename allowed) |
 | `DELETE /api/sources/{source}[?removeCache=true]` | remove a source from the configuration |
 | `POST /api/sources/reload` | re-read the configuration files and apply them |
-| `GET /api/builds[?source=]` | per source/PR/run: version, size, `cachedState` (`cached`/`partial`/`notCached`), `served`; never downloads |
+| `GET /api/builds[?source=]` | per source/PR/run: `pullRequestTitle` (when known), version, size, `cachedState` (`cached`/`partial`/`notCached`), `served`; never downloads |
 | `GET /api/packages[?source=]` | package id to versions, with source, PR, run, attempt (same content as the feed) |
 | `POST /api/refresh[?source=]` | force rediscovery, bypassing the memory cache; concurrent calls for a source share one discovery (`coalesced`) |
 | `DELETE /api/builds/{source}/{runId}/{attempt}` | remove one cached build |
