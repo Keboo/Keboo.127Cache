@@ -137,7 +137,7 @@ jobs:
 
       - name: ReportGenerator
         if: runner.os == 'Linux'
-        uses: danielpalme/ReportGenerator-GitHub-Action@5.6.0
+        uses: danielpalme/ReportGenerator-GitHub-Action@5.6.1
         with:
           reports: ${{ steps.coverage.outputs.reports }}
           targetdir: coveragereport
